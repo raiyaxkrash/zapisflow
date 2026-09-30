@@ -14,6 +14,7 @@ from app.database.models.payment import Payment, PaymentStatus
 from app.database.models.service import DepositType
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
+from app.repositories.notification_repository import NotificationRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
@@ -258,6 +259,11 @@ class BookingService:
         appointment.start_time = new_start_time
         appointment.end_time = new_end_time
         appointment.end_time_with_buffer = new_end_time_with_buffer
+
+        # Recalculate and reset pending/stale notifications for the new appointment time
+        await NotificationRepository(self.session).handle_appointment_rescheduled(
+            appointment.id, new_start_time
+        )
 
         await self.session.flush()
         return appointment

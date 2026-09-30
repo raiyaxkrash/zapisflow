@@ -4,7 +4,7 @@ Claims due notifications using PostgreSQL FOR UPDATE SKIP LOCKED, commits before
 routes via dynamic tenant BotRegistry, and handles transient retries and permanent bot blocks.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Optional
 import uuid
@@ -28,6 +28,7 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.scheduler.jobs.reminder_generator import generate_visit_reminders
 from app.services.bot_registry import BotRegistry
+from app.services.exceptions import BotDisabledError, BotUnavailableError
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
 
 logger = logging.getLogger("app.scheduler.reminder_worker")
@@ -116,6 +117,16 @@ async def send_visit_reminders(
             if not notif:
                 continue
 
+            # 1. Verify that notification is STILL in PROCESSING and claimed by this worker
+            if notif.status != NotificationStatus.PROCESSING or notif.claimed_by != actual_worker_id:
+                logger.info(
+                    "Notification #%s claim superseded (status=%s, claimed_by=%s), aborting send",
+                    notification_id,
+                    notif.status,
+                    notif.claimed_by,
+                )
+                continue
+
             app = notif.appointment
             if not app:
                 async with session_maker() as session:
@@ -125,11 +136,23 @@ async def send_visit_reminders(
                     await session.commit()
                 continue
 
-            # Verify appointment status: must still be CONFIRMED!
+            # 2. Re-verify appointment status: must still be CONFIRMED!
             if app.status != AppointmentStatus.CONFIRMED:
                 async with session_maker() as session:
                     await NotificationRepository(session).mark_cancelled(
                         notification_id, f"Appointment status is {app.status}"
+                    )
+                    await session.commit()
+                continue
+
+            # 3. Re-verify appointment is still in the future
+            now_utc = datetime.now(timezone.utc)
+            app_start = app.start_time if app.start_time.tzinfo else app.start_time.replace(tzinfo=timezone.utc)
+            if app_start <= now_utc:
+                logger.info("Appointment #%s has already started or passed, cancelling reminder #%s", app.id, notification_id)
+                async with session_maker() as session:
+                    await NotificationRepository(session).mark_cancelled(
+                        notification_id, "Appointment start_time has already passed"
                     )
                     await session.commit()
                 continue
@@ -161,15 +184,24 @@ async def send_visit_reminders(
                     await session.commit()
                     continue
 
-            # Resolve bot instance
+            # Resolve bot instance with specific policy handling
             target_bot: Optional[Bot] = None
+            bot_lookup_error: Optional[str] = None
+            bot_retry_delay: Optional[int] = 60
+
             if registry:
                 try:
                     target_bot = await registry.get_by_master_id(app.master_id)
+                except BotDisabledError:
+                    bot_lookup_error = "BotInstance is DISABLED (no delivery)"
+                    bot_retry_delay = 3600  # Avoid hot-looping, long backoff
+                except BotUnavailableError as exc:
+                    bot_lookup_error = f"BotInstance unavailable (ERROR): {exc}"
+                    bot_retry_delay = 300  # 5 min backoff
                 except Exception as exc:
-                    logger.warning(
-                        "BotRegistry failed to get bot for master %s: %s", app.master_id, exc
-                    )
+                    bot_lookup_error = f"BotRegistry error: {exc}"
+                    bot_retry_delay = 60
+
             if not target_bot:
                 target_bot = bot
 
@@ -177,8 +209,8 @@ async def send_visit_reminders(
                 async with session_maker() as session:
                     await NotificationRepository(session).mark_failed(
                         notification_id,
-                        f"No active bot found for master #{app.master_id}",
-                        retry_delay_seconds=60,
+                        bot_lookup_error or f"No active bot found for master #{app.master_id}",
+                        retry_delay_seconds=bot_retry_delay,
                         max_attempts=actual_max_attempts,
                     )
                     await session.commit()

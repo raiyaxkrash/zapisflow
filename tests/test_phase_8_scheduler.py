@@ -20,7 +20,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytz
 from aiogram import Bot
@@ -30,7 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config.settings import settings
 from app.database.models.appointment import Appointment, AppointmentStatus
-from app.database.models.broadcast import Broadcast, BroadcastStatus, RecipientStatus
+from app.database.models.broadcast import (
+    Broadcast,
+    BroadcastRecipient,
+    BroadcastStatus,
+    RecipientStatus,
+)
 from app.database.models.master import (
     BotInstance,
     BotInstanceStatus,
@@ -53,7 +58,11 @@ from app.scheduler.jobs.hold_cleaner import clean_expired_holds
 from app.scheduler.jobs.reminder_generator import generate_visit_reminders
 from app.scheduler.jobs.reminder_worker import send_visit_reminders
 from app.scheduler.scheduler import MultiTenantScheduler, setup_scheduler
+from app.services.booking_service import BookingService
+from app.services.bot_registry import BotRegistry
 from app.services.broadcast_service import BroadcastService
+from app.services.exceptions import BotDisabledError, BotUnavailableError
+from app.services.slot_engine import SlotEngine
 from tests.conftest import requires_postgres
 
 
@@ -1010,3 +1019,610 @@ async def test_15_multitenant_scheduler_lifecycle() -> None:
 
     scheduler.shutdown(wait=False)
     assert scheduler.running is False
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_16_reminder_reschedule_updates_schedule_and_prevents_stale_send(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Rescheduling an appointment updates Notification.scheduled_at and prevents stale send."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+    t0 = now_utc + timedelta(hours=20)
+    t_new = now_utc + timedelta(days=5, hours=20)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_R16")
+        client = await _create_user(session, first_name="Client_R16")
+        master = await _create_master(session, owner.id, "Master_R16")
+        svc = await _create_service(session, master.id, "Service_R16")
+
+        app = await _create_appointment(
+            session, master.id, client.id, svc, t0, AppointmentStatus.CONFIRMED
+        )
+        app_id = app.id
+        await session.commit()
+
+    # Generate reminders: creates REMINDER_24H scheduled at now_utc (since t0 <= 24h away)
+    gen_count = await generate_visit_reminders(session_maker=session_maker, lookahead_hours=48)
+    assert gen_count >= 1
+
+    async with session_maker() as session:
+        notif = (
+            await session.execute(
+                select(Notification).where(
+                    Notification.appointment_id == app_id,
+                    Notification.type == NotificationType.REMINDER_24H,
+                )
+            )
+        ).scalar_one()
+        assert notif.status == NotificationStatus.PENDING
+
+        # Reschedule appointment by admin to t_new (5 days later)
+        booking_svc = BookingService(session)
+        with patch.object(SlotEngine, "is_slot_available", return_value=True):
+            await booking_svc.reschedule_booking_by_admin(
+                master_id=master.id,
+                appointment_id=app_id,
+                new_start_time=t_new,
+                admin_id=owner.id,
+            )
+        await session.commit()
+
+    # Verify notification scheduled_at was moved to t_new - 24h
+    async with session_maker() as session:
+        notif_after = (
+            await session.execute(
+                select(Notification).where(
+                    Notification.appointment_id == app_id,
+                    Notification.type == NotificationType.REMINDER_24H,
+                )
+            )
+        ).scalar_one()
+        expected_sched = t_new - timedelta(hours=24)
+        assert abs((notif_after.scheduled_at - expected_sched).total_seconds()) < 5
+        assert notif_after.status == NotificationStatus.PENDING
+
+    # Attempt to send reminders now: should NOT send because scheduled_at is 4 days in future!
+    mock_bot = AsyncMock(spec=Bot)
+    sent = await send_visit_reminders(
+        bot=mock_bot, session_maker=session_maker, auto_generate=False
+    )
+    assert sent == 0
+    assert mock_bot.send_message.await_count == 0
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_17_cancel_after_claim_prevents_send(pg_engine: AsyncEngine) -> None:
+    """If appointment is cancelled while worker has claimed notification, worker aborts send."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+    t0 = now_utc + timedelta(hours=20)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_R17")
+        client = await _create_user(session, first_name="Client_R17")
+        master = await _create_master(session, owner.id, "Master_R17")
+        svc = await _create_service(session, master.id, "Service_R17")
+
+        app = await _create_appointment(
+            session, master.id, client.id, svc, t0, AppointmentStatus.CONFIRMED
+        )
+        notif = Notification(
+            appointment_id=app.id,
+            type=NotificationType.REMINDER_24H,
+            scheduled_at=now_utc - timedelta(minutes=10),
+            status=NotificationStatus.PENDING,
+        )
+        session.add(notif)
+        await session.commit()
+        n_id = notif.id
+        app_id = app.id
+
+    real_claim = NotificationRepository.claim_due_notifications
+
+    async def patched_claim(self, *args, **kwargs):
+        claimed = await real_claim(self, *args, **kwargs)
+        # Commit self.session to release the FOR UPDATE lock on notifications
+        await self.session.commit()
+        # Intercept right after claim: user/admin cancels appointment in DB
+        async with session_maker() as s2:
+            a = await s2.get(Appointment, app_id)
+            a.status = AppointmentStatus.CANCELLED_BY_CLIENT
+            await s2.commit()
+        return claimed
+
+    mock_bot = AsyncMock(spec=Bot)
+    with patch.object(NotificationRepository, "claim_due_notifications", side_effect=patched_claim, autospec=True):
+        sent = await send_visit_reminders(
+            bot=mock_bot,
+            session_maker=session_maker,
+            worker_id="worker_cancel_race",
+            auto_generate=False,
+        )
+
+    assert sent == 0
+    assert mock_bot.send_message.await_count == 0
+
+    async with session_maker() as session:
+        re_notif = await session.get(Notification, n_id)
+        assert re_notif.status == NotificationStatus.CANCELLED
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_18_reschedule_after_claim_prevents_stale_send(pg_engine: AsyncEngine) -> None:
+    """If appointment is rescheduled while worker has claimed notification, worker aborts stale send."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+    t0 = now_utc + timedelta(hours=20)
+    t_new = now_utc + timedelta(days=7)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_R18")
+        client = await _create_user(session, first_name="Client_R18")
+        master = await _create_master(session, owner.id, "Master_R18")
+        svc = await _create_service(session, master.id, "Service_R18")
+
+        app = await _create_appointment(
+            session, master.id, client.id, svc, t0, AppointmentStatus.CONFIRMED
+        )
+        notif = Notification(
+            appointment_id=app.id,
+            type=NotificationType.REMINDER_24H,
+            scheduled_at=now_utc - timedelta(minutes=10),
+            status=NotificationStatus.PENDING,
+        )
+        session.add(notif)
+        await session.commit()
+        n_id = notif.id
+        app_id = app.id
+        owner_id = owner.id
+        master_id = master.id
+
+    real_claim = NotificationRepository.claim_due_notifications
+
+    async def patched_claim(self, *args, **kwargs):
+        claimed = await real_claim(self, *args, **kwargs)
+        # Commit self.session to release the FOR UPDATE lock on notifications
+        await self.session.commit()
+        # Intercept right after claim: admin reschedules appointment
+        async with session_maker() as s2:
+            bs = BookingService(s2)
+            with patch.object(SlotEngine, "is_slot_available", return_value=True):
+                await bs.reschedule_booking_by_admin(
+                    master_id=master_id,
+                    appointment_id=app_id,
+                    new_start_time=t_new,
+                    admin_id=owner_id,
+                )
+            await s2.commit()
+        return claimed
+
+    mock_bot = AsyncMock(spec=Bot)
+    with patch.object(NotificationRepository, "claim_due_notifications", side_effect=patched_claim, autospec=True):
+        sent = await send_visit_reminders(
+            bot=mock_bot,
+            session_maker=session_maker,
+            worker_id="worker_resched_race",
+            auto_generate=False,
+        )
+
+    assert sent == 0
+    assert mock_bot.send_message.await_count == 0
+
+    async with session_maker() as session:
+        re_notif = await session.get(Notification, n_id)
+        # Status was reset to PENDING and scheduled_at updated
+        assert re_notif.status == NotificationStatus.PENDING
+        expected_sched = t_new - timedelta(hours=24)
+        assert abs((re_notif.scheduled_at - expected_sched).total_seconds()) < 5
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_19_broadcast_stale_crash_recovery(pg_engine: AsyncEngine) -> None:
+    """Stale PROCESSING recipients from a crashed worker are reclaimed and delivered."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_B19")
+        master = await _create_master(session, owner.id, "Master_B19")
+
+        clients = []
+        for i in range(10):
+            c = await _create_user(session, first_name=f"Client_B19_{i}")
+            mc = MasterClient(
+                master_id=master.id,
+                user_id=c.id,
+                is_marketing_allowed=True,
+                is_bot_blocked=False,
+            )
+            session.add(mc)
+            clients.append(c)
+        await session.commit()
+
+        b_svc = BroadcastService(session)
+        broadcast = await b_svc.create_broadcast(master.id, "Recovery Test")
+        b_id = broadcast.id
+
+        # Mark 3 recipients as PROCESSING by a crashed worker 20 minutes ago
+        eligible = await b_svc.get_eligible_users(master.id)
+        broadcast.total_count = len(eligible)
+        broadcast.status = BroadcastStatus.SENDING
+        broadcast.started_at = now_utc - timedelta(minutes=20)
+
+        for i, u in enumerate(eligible):
+            if i < 3:
+                rcpt = BroadcastRecipient(
+                    broadcast_id=b_id,
+                    user_id=u.id,
+                    status=RecipientStatus.PROCESSING,
+                    claimed_at=now_utc - timedelta(minutes=20),
+                    claimed_by="crashed_worker",
+                    attempt_count=1,
+                )
+            else:
+                rcpt = BroadcastRecipient(
+                    broadcast_id=b_id,
+                    user_id=u.id,
+                    status=RecipientStatus.PENDING,
+                )
+            session.add(rcpt)
+        await session.commit()
+
+    mock_bot = AsyncMock(spec=Bot)
+    mock_bot.send_message.return_value = MagicMock()
+
+    async with session_maker() as session:
+        b_svc = BroadcastService(session)
+        res = await b_svc.execute_broadcast(
+            master_id=master.id,
+            broadcast_id=b_id,
+            bot=mock_bot,
+            worker_id="active_worker",
+        )
+        assert res.status == BroadcastStatus.COMPLETED
+        assert res.success_count == 10
+        assert res.fail_count == 0
+
+    assert mock_bot.send_message.await_count == 10
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_20_broadcast_three_workers_concurrency_100_recipients(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Three concurrent workers process 100 broadcast recipients with zero duplicates."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_B20")
+        master = await _create_master(session, owner.id, "Master_B20")
+
+        for i in range(100):
+            c = await _create_user(session, first_name=f"Client_B20_{i}")
+            mc = MasterClient(
+                master_id=master.id,
+                user_id=c.id,
+                is_marketing_allowed=True,
+                is_bot_blocked=False,
+            )
+            session.add(mc)
+        await session.commit()
+
+        b_svc = BroadcastService(session)
+        broadcast = await b_svc.create_broadcast(master.id, "100 Recipients Mass Test")
+        b_id = broadcast.id
+        await session.commit()
+
+    mock_bot = AsyncMock(spec=Bot)
+    mock_bot.send_message.return_value = MagicMock()
+
+    async def run_worker(w_id: str):
+        async with session_maker() as session:
+            svc = BroadcastService(session)
+            await svc.execute_broadcast(
+                master_id=master.id,
+                broadcast_id=b_id,
+                bot=mock_bot,
+                worker_id=w_id,
+                batch_size=10,
+            )
+
+    await asyncio.gather(
+        run_worker("b_pod_1"),
+        run_worker("b_pod_2"),
+        run_worker("b_pod_3"),
+    )
+
+    assert mock_bot.send_message.await_count == 100
+
+    async with session_maker() as session:
+        b = await session.get(Broadcast, b_id)
+        assert b.status == BroadcastStatus.COMPLETED
+        assert b.success_count == 100
+        assert b.fail_count == 0
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_21_post_send_crash_at_least_once_documentation(pg_engine: AsyncEngine) -> None:
+    """Documents the effectively-once / at-least-once failure boundary on post-send crash."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+    t0 = now_utc + timedelta(hours=20)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_R21")
+        client = await _create_user(session, first_name="Client_R21")
+        master = await _create_master(session, owner.id, "Master_R21")
+        svc = await _create_service(session, master.id, "Service_R21")
+
+        app = await _create_appointment(
+            session, master.id, client.id, svc, t0, AppointmentStatus.CONFIRMED
+        )
+        notif = Notification(
+            appointment_id=app.id,
+            type=NotificationType.REMINDER_24H,
+            scheduled_at=now_utc - timedelta(minutes=10),
+            status=NotificationStatus.PENDING,
+        )
+        session.add(notif)
+        await session.commit()
+        n_id = notif.id
+
+    mock_bot = AsyncMock(spec=Bot)
+    mock_bot.send_message.return_value = MagicMock()
+
+    # Step 1: Worker 1 claims and sends, but process crashes before committing status=SENT
+    call_count = 0
+    async def crash_after_send(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise SystemExit("Simulated pod kill / OOM post-send")
+
+    with patch.object(NotificationRepository, "mark_sent", side_effect=crash_after_send, autospec=True):
+        try:
+            await send_visit_reminders(
+                bot=mock_bot,
+                session_maker=session_maker,
+                worker_id="dying_pod",
+                auto_generate=False,
+            )
+        except SystemExit:
+            pass
+
+    # The external message WAS delivered once
+    assert mock_bot.send_message.await_count == 1
+
+    # But the database state was left in PROCESSING with old claimed_at!
+    async with session_maker() as session:
+        n = await session.get(Notification, n_id)
+        assert n.status == NotificationStatus.PROCESSING
+        # Age the claimed_at to simulate timeout passing (>300 seconds)
+        n.claimed_at = now_utc - timedelta(minutes=15)
+        await session.commit()
+
+    # Step 2: Next worker sweep reclaims the stale PROCESSING notification and re-sends
+    await send_visit_reminders(
+        bot=mock_bot,
+        session_maker=session_maker,
+        worker_id="recovery_pod",
+        auto_generate=False,
+    )
+
+    # Message was sent a second time (at-least-once edge case upon post-send node crash)
+    assert mock_bot.send_message.await_count == 2
+
+    # Now DB confirms SENT
+    async with session_maker() as session:
+        n = await session.get(Notification, n_id)
+        assert n.status == NotificationStatus.SENT
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_22_disabled_and_error_bot_backoff_policy(pg_engine: AsyncEngine) -> None:
+    """Worker applies exponential backoff for DISABLED bots (1h) and ERROR bots (5m)."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_R22")
+        client = await _create_user(session, first_name="Client_R22")
+        master = await _create_master(session, owner.id, "Master_R22")
+        svc = await _create_service(session, master.id, "Service_R22")
+
+        app = await _create_appointment(
+            session, master.id, client.id, svc, now_utc + timedelta(hours=20), AppointmentStatus.CONFIRMED
+        )
+        notif = Notification(
+            appointment_id=app.id,
+            type=NotificationType.REMINDER_24H,
+            scheduled_at=now_utc - timedelta(minutes=5),
+            status=NotificationStatus.PENDING,
+        )
+        session.add(notif)
+        await session.commit()
+        n_id = notif.id
+
+    mock_registry = AsyncMock()
+    # Case 1: BotDisabledError -> 3600s backoff
+    mock_registry.get_by_master_id.side_effect = BotDisabledError("Bot instance disabled")
+
+    sent = await send_visit_reminders(
+        registry=mock_registry,
+        session_maker=session_maker,
+        auto_generate=False,
+    )
+    assert sent == 0
+
+    async with session_maker() as session:
+        n = await session.get(Notification, n_id)
+        assert n.status == NotificationStatus.PROCESSING
+        assert n.next_attempt_at is not None
+        diff = (n.next_attempt_at - now_utc).total_seconds()
+        assert diff >= 3500
+
+        # Reset for Case 2
+        n.status = NotificationStatus.PENDING
+        n.scheduled_at = now_utc - timedelta(minutes=5)
+        n.attempt_count = 0
+        n.next_attempt_at = None
+        await session.commit()
+
+    # Case 2: BotUnavailableError -> 300s backoff
+    mock_registry.get_by_master_id.side_effect = BotUnavailableError("Bot instance in ERROR state")
+
+    sent = await send_visit_reminders(
+        registry=mock_registry,
+        session_maker=session_maker,
+        auto_generate=False,
+    )
+    assert sent == 0
+
+    async with session_maker() as session:
+        n = await session.get(Notification, n_id)
+        assert n.status == NotificationStatus.PROCESSING
+        assert n.next_attempt_at is not None
+        diff = (n.next_attempt_at - now_utc).total_seconds()
+        assert 250 <= diff <= 350
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_23_current_bot_instance_rotation_routing(pg_engine: AsyncEngine) -> None:
+    """Reminder worker routes through the newly rotated active BotInstance for the master."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_R23")
+        client = await _create_user(session, first_name="Client_R23")
+        master = await _create_master(session, owner.id, "Master_R23")
+        svc = await _create_service(session, master.id, "Service_R23")
+
+        app = await _create_appointment(
+            session, master.id, client.id, svc, now_utc + timedelta(hours=20), AppointmentStatus.CONFIRMED
+        )
+        notif = Notification(
+            appointment_id=app.id,
+            type=NotificationType.REMINDER_24H,
+            scheduled_at=now_utc - timedelta(minutes=5),
+            status=NotificationStatus.PENDING,
+        )
+        session.add(notif)
+        await session.commit()
+        n_id = notif.id
+
+    bot_old = AsyncMock(spec=Bot)
+    bot_new = AsyncMock(spec=Bot)
+    bot_new.send_message.return_value = MagicMock()
+
+    mock_registry = AsyncMock()
+    # Rotation: registry now returns bot_new
+    mock_registry.get_by_master_id.return_value = bot_new
+
+    sent = await send_visit_reminders(
+        registry=mock_registry,
+        session_maker=session_maker,
+        auto_generate=False,
+    )
+    assert sent == 1
+    assert bot_old.send_message.await_count == 0
+    assert bot_new.send_message.await_count == 1
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_24_hold_cleaner_vs_payment_proof_race(pg_engine: AsyncEngine) -> None:
+    """Hold cleaner does not cancel appointment if client concurrently submits payment proof."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_H24")
+        client = await _create_user(session, first_name="Client_H24")
+        master = await _create_master(session, owner.id, "Master_H24")
+        svc = await _create_service(session, master.id, "Service_H24")
+
+        app = await _create_appointment(
+            session,
+            master.id,
+            client.id,
+            svc,
+            start_time=now_utc + timedelta(days=2),
+            status=AppointmentStatus.WAITING_PAYMENT,
+            hold_until=now_utc - timedelta(minutes=5),  # expired hold
+        )
+        app_id = app.id
+        await session.commit()
+
+    # Concurrently, client sends payment proof
+    async with session_maker() as session:
+        app = await session.get(Appointment, app_id)
+        app.status = AppointmentStatus.PAYMENT_PROOF_SENT
+        await session.commit()
+
+    # Now hold cleaner runs
+    cleaned = await clean_expired_holds(session_maker=session_maker)
+    assert cleaned == 0
+
+    async with session_maker() as session:
+        app = await session.get(Appointment, app_id)
+        assert app.status == AppointmentStatus.PAYMENT_PROOF_SENT
+
+
+@pytest.mark.asyncio
+async def test_25_vienna_dst_transition_boundary() -> None:
+    """DST transition in Europe/Vienna computes exact UTC instant and formats correct local time."""
+    from app.utils.formatters import format_datetime_ru
+    # On Sunday 2026-10-25 at 03:00, Vienna turns clocks back 1 hour (CEST UTC+2 -> CET UTC+1)
+    vienna_tz = pytz.timezone("Europe/Vienna")
+
+    # Appointment on Oct 25 at 10:00 Vienna time (CET, UTC+1) -> 09:00 UTC
+    appt_dt_vienna = vienna_tz.localize(datetime(2026, 10, 25, 10, 0))
+    appt_dt_utc = appt_dt_vienna.astimezone(timezone.utc)
+    assert appt_dt_utc.hour == 9
+
+    # 24h reminder is exactly 24 absolute hours before in UTC: Oct 24 at 09:00 UTC
+    reminder_utc = appt_dt_utc - timedelta(hours=24)
+    # On Oct 24, Vienna was in CEST (UTC+2), so 09:00 UTC was 11:00 Vienna!
+    reminder_vienna = reminder_utc.astimezone(vienna_tz)
+    assert reminder_vienna.hour == 11
+    assert reminder_vienna.day == 24
+
+    # Format localized to Vienna: must say 10:00 (the appointment time in Vienna on the 25th)
+    formatted = format_datetime_ru(appt_dt_utc, "Europe/Vienna")
+    assert "10:00" in formatted
+    assert "25 октября" in formatted
+
+
+def test_26_alembic_full_upgrade_downgrade_cycle() -> None:
+    """Alembic migrations 0005 -> 0006 -> 0007 are cleanly chained with valid down_revisions."""
+    import importlib.util
+    from pathlib import Path
+
+    versions_dir = Path("alembic/versions")
+    m0005_path = list(versions_dir.glob("*0005*.py"))[0]
+    m0006_path = list(versions_dir.glob("*0006*.py"))[0]
+    m0007_path = list(versions_dir.glob("*0007*.py"))[0]
+
+    def load_module(path: Path):
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    mod05 = load_module(m0005_path)
+    mod06 = load_module(m0006_path)
+    mod07 = load_module(m0007_path)
+
+    assert mod06.down_revision == mod05.revision
+    assert mod07.down_revision == mod06.revision
+

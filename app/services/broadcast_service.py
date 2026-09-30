@@ -5,7 +5,7 @@ per-master status tracking, and multi-replica batch claiming via FOR UPDATE SKIP
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import List, Optional
 import uuid
@@ -88,6 +88,41 @@ class BroadcastService:
         await self.session.refresh(broadcast)
         return broadcast
 
+    async def reclaim_stale_recipients(
+        self,
+        broadcast_id: int,
+        stale_timeout_minutes: int = 10,
+    ) -> int:
+        """
+        Reclaims recipients stuck in PROCESSING if a worker crashed.
+        Resets them to PENDING so another worker can pick them up.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_timeout_minutes)
+        stmt = (
+            select(BroadcastRecipient)
+            .where(
+                BroadcastRecipient.broadcast_id == broadcast_id,
+                BroadcastRecipient.status == RecipientStatus.PROCESSING,
+                BroadcastRecipient.claimed_at < cutoff,
+            )
+            .with_for_update(skip_locked=True)
+        )
+        res = await self.session.execute(stmt)
+        stale = list(res.scalars().all())
+        reclaimed_count = len(stale)
+        for r in stale:
+            r.status = RecipientStatus.PENDING
+            r.claimed_at = None
+            r.claimed_by = None
+        if reclaimed_count > 0:
+            await self.session.commit()
+            logger.warning(
+                "Reclaimed %d stale recipients for broadcast #%d",
+                reclaimed_count,
+                broadcast_id,
+            )
+        return reclaimed_count
+
     async def execute_broadcast(
         self,
         master_id: int,
@@ -153,6 +188,9 @@ class BroadcastService:
         actual_worker_id = worker_id or f"worker_{uuid.uuid4().hex[:8]}"
         limiter = AsyncLimiter(25, 1.0)
 
+        # Reclaim any stale PROCESSING recipients if another worker crashed
+        await self.reclaim_stale_recipients(broadcast_id=broadcast_id)
+
         while True:
             # Atomic claim batch of recipients with FOR UPDATE SKIP LOCKED
             claim_stmt = (
@@ -184,11 +222,11 @@ class BroadcastService:
             for rcpt_id, user_id in batch_items:
                 user = await self.session.get(User, user_id)
                 if not user or not user.telegram_id or user.telegram_id <= 0:
-                    async with self.session.begin():
-                        r = await self.session.get(BroadcastRecipient, rcpt_id)
-                        if r:
-                            r.status = RecipientStatus.FAILED
-                            r.error_message = "Invalid user or telegram_id"
+                    r = await self.session.get(BroadcastRecipient, rcpt_id)
+                    if r:
+                        r.status = RecipientStatus.FAILED
+                        r.error_message = "Invalid user or telegram_id"
+                        await self.session.commit()
                     continue
 
                 async with limiter:

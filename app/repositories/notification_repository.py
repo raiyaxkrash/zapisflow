@@ -228,3 +228,82 @@ class NotificationRepository(BaseRepository[Notification]):
         )
         res = await self.session.execute(stmt)
         return res.rowcount
+
+    async def handle_appointment_rescheduled(
+        self, appointment_id: int, new_start_time: datetime
+    ) -> None:
+        """Recalculate or reset reminder schedules when an appointment is rescheduled.
+
+        Guarantees:
+        - Outdated scheduled_at is discarded.
+        - PENDING/PROCESSING reminders are reset with recalculated scheduled_at based on new_start_time.
+        - SENT reminders from past dates are safely reset to PENDING if new_start_time is in the future.
+        - If new_start_time is too close, expired reminder windows are set to CANCELLED.
+        - Metadata fields (attempt_count, claimed_at, claimed_by, next_attempt_at, last_error, sent_at)
+          are cleanly reset.
+        """
+        now_utc = datetime.now(timezone.utc)
+        if new_start_time.tzinfo is None:
+            new_start_time = new_start_time.replace(tzinfo=timezone.utc)
+
+        time_until = new_start_time - now_utc
+
+        stmt = select(Notification).where(Notification.appointment_id == appointment_id)
+        res = await self.session.execute(stmt)
+        notifs = list(res.scalars().all())
+
+        for notif in notifs:
+            if notif.type == NotificationType.REMINDER_24H:
+                if time_until > timedelta(hours=24):
+                    notif.scheduled_at = new_start_time - timedelta(hours=24)
+                    notif.status = NotificationStatus.PENDING
+                    notif.attempt_count = 0
+                    notif.claimed_at = None
+                    notif.claimed_by = None
+                    notif.next_attempt_at = None
+                    notif.sent_at = None
+                    notif.last_error = None
+                elif timedelta(hours=3) < time_until <= timedelta(hours=24):
+                    notif.scheduled_at = now_utc
+                    notif.status = NotificationStatus.PENDING
+                    notif.attempt_count = 0
+                    notif.claimed_at = None
+                    notif.claimed_by = None
+                    notif.next_attempt_at = None
+                    notif.sent_at = None
+                    notif.last_error = None
+                else:
+                    notif.status = NotificationStatus.CANCELLED
+                    notif.last_error = "24h window passed after reschedule"
+                    notif.claimed_at = None
+                    notif.claimed_by = None
+                    notif.next_attempt_at = None
+
+            elif notif.type == NotificationType.REMINDER_3H:
+                if time_until > timedelta(hours=3):
+                    notif.scheduled_at = new_start_time - timedelta(hours=3)
+                    notif.status = NotificationStatus.PENDING
+                    notif.attempt_count = 0
+                    notif.claimed_at = None
+                    notif.claimed_by = None
+                    notif.next_attempt_at = None
+                    notif.sent_at = None
+                    notif.last_error = None
+                elif timedelta(seconds=0) < time_until <= timedelta(hours=3):
+                    notif.scheduled_at = now_utc
+                    notif.status = NotificationStatus.PENDING
+                    notif.attempt_count = 0
+                    notif.claimed_at = None
+                    notif.claimed_by = None
+                    notif.next_attempt_at = None
+                    notif.sent_at = None
+                    notif.last_error = None
+                else:
+                    notif.status = NotificationStatus.CANCELLED
+                    notif.last_error = "3h window passed after reschedule"
+                    notif.claimed_at = None
+                    notif.claimed_by = None
+                    notif.next_attempt_at = None
+
+        await self.session.flush()
+
