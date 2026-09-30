@@ -27,3 +27,9 @@
 !/tests/
 !/tests/**/
 !/tests/**/*.py
+
+# Maintenance and migration scripts.
+!/scripts/
+!/scripts/**/
+!/scripts/**/*.py
+

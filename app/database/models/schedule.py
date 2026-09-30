@@ -5,10 +5,13 @@ Schedule templates, exceptions and blocked intervals models.
 from datetime import date as dt_date, datetime, time as dt_time
 from typing import List, Optional
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
@@ -28,10 +31,13 @@ class ScheduleTemplate(Base):
     __tablename__ = "schedule_templates"
     __table_args__ = (
         UniqueConstraint("master_id", "day_of_week", name="uq_master_weekday"),
+        Index("idx_schedule_templates_master_day", "master_id", "day_of_week"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
+    master_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     day_of_week: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     is_day_off: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     work_start: Mapped[dt_time] = mapped_column(Time, default=dt_time(10, 0), nullable=False)
@@ -67,10 +73,13 @@ class ScheduleException(Base):
     __tablename__ = "schedule_exceptions"
     __table_args__ = (
         UniqueConstraint("master_id", "date", name="uq_master_date"),
+        Index("idx_schedule_exceptions_master_date", "master_id", "date"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
+    master_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     date: Mapped[dt_date] = mapped_column(Date, nullable=False, index=True)
     is_day_off: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     work_start: Mapped[Optional[dt_time]] = mapped_column(Time, nullable=True)
@@ -105,9 +114,15 @@ class BlockedInterval(Base):
     Manually blocked interval for a master (e.g. personal appointment, sick leave).
     """
     __tablename__ = "blocked_intervals"
+    __table_args__ = (
+        CheckConstraint("start_time < end_time", name="chk_blocked_intervals_time_order"),
+        Index("idx_blocked_intervals_master_start", "master_id", "start_time"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
+    master_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)

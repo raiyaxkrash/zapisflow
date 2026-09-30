@@ -7,10 +7,14 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
     DateTime,
-    Integer,
     Enum as SQLEnum,
     ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -41,12 +45,26 @@ class MediaType(str, Enum):
 class Payment(Base):
     """
     Financial deposit or payment record.
+    Guarantees tenant consistency via composite FK to appointments(id, master_id).
     """
     __tablename__ = "payments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["appointment_id", "master_id"],
+            ["appointments.id", "appointments.master_id"],
+            name="fk_payments_appointment_master",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("amount >= 0", name="chk_payments_amount_positive"),
+        Index("idx_payments_master_status", "master_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     appointment_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("appointments.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -68,7 +86,11 @@ class Payment(Base):
     rejection_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # Relationships
-    appointment: Mapped["Appointment"] = relationship("Appointment", back_populates="payments")
+    appointment: Mapped["Appointment"] = relationship(
+        "Appointment",
+        back_populates="payments",
+        foreign_keys="[Payment.appointment_id, Payment.master_id]",
+    )
     user: Mapped["User"] = relationship("User", back_populates="payments")
     confirmed_by_admin: Mapped[Optional["Admin"]] = relationship("Admin")
     proofs: Mapped[List["PaymentProof"]] = relationship(

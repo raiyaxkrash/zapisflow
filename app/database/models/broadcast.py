@@ -6,9 +6,11 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     Enum as SQLEnum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -40,8 +42,14 @@ class Broadcast(Base):
     Mass broadcast message campaign created by an admin.
     """
     __tablename__ = "broadcasts"
+    __table_args__ = (
+        Index("idx_broadcasts_master_status", "master_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     admin_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
     )

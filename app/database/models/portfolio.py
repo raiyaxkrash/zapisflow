@@ -4,7 +4,17 @@ Portfolio categories and items models.
 
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base
@@ -15,8 +25,14 @@ class PortfolioCategory(Base):
     Category for grouping portfolio works (e.g. Nails, Pedicure, Brows, Hair).
     """
     __tablename__ = "portfolio_categories"
+    __table_args__ = (
+        Index("idx_portfolio_categories_master_active", "master_id", "is_active"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     display_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

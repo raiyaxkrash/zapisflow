@@ -7,15 +7,20 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum as SQLEnum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base, TimestampMixin
@@ -58,9 +63,22 @@ class Appointment(Base, TimestampMixin):
     Timestamps are stored as TIMESTAMPTZ (DateTime(timezone=True)).
     """
     __tablename__ = "appointments"
+    __table_args__ = (
+        UniqueConstraint("id", "master_id", name="uq_appointments_id_master_id"),
+        CheckConstraint("snapshot_service_price >= 0", name="chk_appointments_price_positive"),
+        CheckConstraint("snapshot_deposit_amount >= 0", name="chk_appointments_deposit_positive"),
+        CheckConstraint("snapshot_service_duration_min > 0", name="chk_appointments_duration_positive"),
+        CheckConstraint("snapshot_buffer_duration_min >= 0", name="chk_appointments_buffer_positive"),
+        CheckConstraint("start_time < end_time", name="chk_appointments_start_before_end"),
+        CheckConstraint("end_time <= end_time_with_buffer", name="chk_appointments_buffer_order"),
+        Index("idx_appointments_master_start", "master_id", "start_time"),
+        Index("idx_appointments_master_status", "master_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
+    master_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -101,7 +119,10 @@ class Appointment(Base, TimestampMixin):
     user: Mapped["User"] = relationship("User", back_populates="appointments")
     service: Mapped["Service"] = relationship("Service", back_populates="appointments")
     payments: Mapped[List["Payment"]] = relationship(
-        "Payment", back_populates="appointment", cascade="all, delete-orphan"
+        "Payment",
+        back_populates="appointment",
+        cascade="all, delete-orphan",
+        foreign_keys="[Payment.appointment_id, Payment.master_id]",
     )
     notifications: Mapped[List["Notification"]] = relationship(
         "Notification", back_populates="appointment", cascade="all, delete-orphan"

@@ -4,7 +4,7 @@ Administrative audit log model.
 
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Optional
-from sqlalchemy import DateTime, JSON, Integer, ForeignKey, String, func
+from sqlalchemy import BigInteger, DateTime, JSON, Integer, ForeignKey, Index, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base
@@ -16,10 +16,17 @@ if TYPE_CHECKING:
 class AuditLog(Base):
     """
     Log of administrative actions for transparency and security.
+    Hybrid model: master_id IS NULL for platform events, NOT NULL for tenant events.
     """
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("idx_audit_logs_master_created", "master_id", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     admin_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("admins.id", ondelete="CASCADE"), nullable=False, index=True
     )

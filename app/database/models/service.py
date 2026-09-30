@@ -5,7 +5,18 @@ Service database model.
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
-from sqlalchemy import Boolean, Enum as SQLEnum, Integer, Numeric, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Enum as SQLEnum,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base, TimestampMixin
@@ -24,9 +35,18 @@ class Service(Base, TimestampMixin):
     Service offered by the master.
     """
     __tablename__ = "services"
+    __table_args__ = (
+        CheckConstraint("price >= 0", name="chk_services_price_positive"),
+        CheckConstraint("deposit_value >= 0", name="chk_services_deposit_positive"),
+        CheckConstraint("duration_min > 0", name="chk_services_duration_positive"),
+        CheckConstraint("buffer_min >= 0", name="chk_services_buffer_positive"),
+        Index("idx_services_master_active", "master_id", "is_active"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
+    master_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     

@@ -27,6 +27,17 @@ from app.database.models.notification import (
     NotificationType,
     NotificationStatus,
 )
+from app.database.models.master import (
+    Master,
+    MasterStatus,
+    SubscriptionStatus,
+    BotInstance,
+    BotInstanceStatus,
+    MasterClient,
+    MasterSettings,
+    MasterAdmin,
+    MasterAdminRole,
+)
 from app.database.models.audit import AuditLog
 
 __all__ = [
@@ -59,4 +70,13 @@ __all__ = [
     "NotificationType",
     "NotificationStatus",
     "AuditLog",
+    "Master",
+    "MasterStatus",
+    "SubscriptionStatus",
+    "BotInstance",
+    "BotInstanceStatus",
+    "MasterClient",
+    "MasterSettings",
+    "MasterAdmin",
+    "MasterAdminRole",
 ]
