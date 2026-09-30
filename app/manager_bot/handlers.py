@@ -832,11 +832,19 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
     plan = await sub_service.get_active_plan(plan_code)
     amount_int = int(payment.amount)
 
+    if settings.is_production:
+        note = (
+            "<i>Автоматический платёжный шлюз находится на этапе подключения. "
+            "Для активации коммерческого тарифа в пилотном режиме обратитесь к платформенному администратору.</i>"
+        )
+    else:
+        note = "<i>Для тестирования и ручной активации в текущей среде нажмите кнопку подтверждения:</i>"
+
     text = (
         f"💳 <b>Оплата подписки: {master.display_name}</b>\n\n"
         f"Тариф: <b>{plan.name}</b> ({plan.period_days} дн.)\n"
         f"Сумма к оплате: <b>{amount_int:,} ₽</b>\n\n"
-        "<i>Для тестирования и ручной активации в текущей среде нажмите кнопку подтверждения:</i>"
+        f"{note}"
     ).replace(",", " ")
 
     await callback.message.edit_text(
@@ -849,6 +857,13 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
 @manager_router.callback_query(F.data.startswith("mgr:sub:confirm:"))
 async def cb_subscription_confirm(callback: CallbackQuery, session: AsyncSession) -> None:
     """Process manual/test confirmation of subscription payment."""
+    if settings.is_production:
+        await callback.answer(
+            "Ошибка: самостоятельное подтверждение платежей запрещено в production-среде.",
+            show_alert=True,
+        )
+        return
+
     parts = callback.data.split(":")
     master_id = int(parts[3])
     payment_id = int(parts[4])

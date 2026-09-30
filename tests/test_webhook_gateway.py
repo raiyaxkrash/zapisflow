@@ -156,7 +156,7 @@ async def test_health_ready_db_down(fake_redis: fakeredis.aioredis.FakeRedis) ->
         assert response.status_code == 503
         data = response.json()
         assert data["status"] == "degraded"
-        assert "DB Connection refused" in data["database"]
+        assert data["database"] == "error"
 
 
 @pytest.mark.asyncio

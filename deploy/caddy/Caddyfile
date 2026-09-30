@@ -1,0 +1,46 @@
+# Caddy Reverse Proxy Configuration for Multi-Tenant Beauty Bot Platform
+# Handles automatic Let's Encrypt TLS certificates, security headers,
+# request size limits, and forwarding to FastAPI webhook backend.
+
+{$DOMAIN:api.yourdomain.com} {
+    # Logging configuration
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+
+    # Strict Request Body Limit (Telegram updates are typically < 64KB, max 2MB)
+    request_body {
+        max_size 2MB
+    }
+
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+        -Server
+    }
+
+    # Reverse proxy to backend application container
+    reverse_proxy http://backend:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        # Explicitly forward Telegram secret token header
+        header_up X-Telegram-Bot-Api-Secret-Token {http.x-telegram-bot-api-secret-token}
+
+        # Connection and response timeouts
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 30s
+            read_timeout 30s
+            write_timeout 30s
+            max_idle_conns 100
+        }
+    }
+}

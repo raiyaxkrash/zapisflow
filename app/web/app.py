@@ -42,10 +42,39 @@ from app.services.update_dedup import UpdateDeduplicator
 logger = logging.getLogger("app.web.app")
 
 
+async def read_limited_request_body(request: Request, max_bytes: int) -> bytes:
+    """Safely stream and read request body up to max_bytes without buffering unbounded streams."""
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    detail="Payload Too Large",
+                )
+        except ValueError:
+            pass
+
+    chunks: list[bytes] = []
+    total_bytes = 0
+    async for chunk in request.stream():
+        total_bytes += len(chunk)
+        if total_bytes > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="Payload Too Large",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manages application lifecycle: DB initialization, Redis, BotRegistry and Dispatcher."""
     logger.info("Starting Multi-Bot Webhook Ingestion Engine...")
+
+    # Strict production configuration check (fail fast on invalid config)
+    settings.validate_production_configuration()
 
     # Initialize Database if not already done
     await init_db()
@@ -58,6 +87,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.redis_client = redis_client
             logger.info("Connected to Redis at %s:%s", settings.redis_host, settings.redis_port)
         except Exception as e:
+            if settings.is_production:
+                logger.critical("Fatal: Cannot connect to Redis in production: %s", e)
+                raise RuntimeError(f"Redis is required in production environment: {e}")
             logger.warning("Could not connect to Redis (%s), running with fallback", e)
             app.state.redis_client = None
 
@@ -194,7 +226,7 @@ def create_app(
             db_status = "ok"
         except Exception as e:
             logger.error("Health ready DB check failed: %s", e)
-            db_status = f"error: {e}"
+            db_status = "error"
             is_ready = False
 
         # Check Redis
@@ -207,7 +239,7 @@ def create_app(
                 redis_status = "disabled_or_fallback"
         except Exception as e:
             logger.error("Health ready Redis check failed: %s", e)
-            redis_status = f"error: {e}"
+            redis_status = "error"
             is_ready = False
 
         status_code = status.HTTP_200_OK if is_ready else status.HTTP_503_SERVICE_UNAVAILABLE
@@ -237,24 +269,8 @@ def create_app(
         except (ValueError, AttributeError):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bot not found")
 
-        # 2. Check Content-Length and body size limit (413 Payload Too Large)
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                if int(content_length) > settings.webhook_max_body_bytes:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                        detail="Payload Too Large",
-                    )
-            except ValueError:
-                pass
-
-        raw_body = await request.body()
-        if len(raw_body) > settings.webhook_max_body_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                detail="Payload Too Large",
-            )
+        # 2. Check Content-Length and body size limit (413 Payload Too Large) via streaming reader
+        raw_body = await read_limited_request_body(request, settings.webhook_max_body_bytes)
 
         # 3. Resolve BotInstance from Database
         session_maker = app.state.session_factory or async_session_factory
@@ -387,24 +403,8 @@ def create_app(
                 detail="Forbidden: Invalid secret token",
             )
 
-        # 2. Check Content-Length and body size limit (413 Payload Too Large)
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                if int(content_length) > settings.webhook_max_body_bytes:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                        detail="Payload Too Large",
-                    )
-            except ValueError:
-                pass
-
-        raw_body = await request.body()
-        if len(raw_body) > settings.webhook_max_body_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                detail="Payload Too Large",
-            )
+        # 2. Check Content-Length and body size limit (413 Payload Too Large) via streaming reader
+        raw_body = await read_limited_request_body(request, settings.webhook_max_body_bytes)
 
         # 3. Parse and validate Telegram Update payload
         try:

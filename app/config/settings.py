@@ -17,6 +17,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # Environment
+    app_env: str = Field(default="development", alias="APP_ENV")
+
     # Telegram Bot
     bot_token: str = Field(default="dummy_token_for_init", alias="BOT_TOKEN")
     admin_ids: List[int] = Field(default_factory=list, alias="ADMIN_IDS")
@@ -85,6 +88,57 @@ class Settings(BaseSettings):
     hold_cleaner_interval_seconds: int = Field(default=60, alias="HOLD_CLEANER_INTERVAL_SECONDS")
     reminder_generation_interval_seconds: int = Field(default=120, alias="REMINDER_GENERATION_INTERVAL_SECONDS")
     reminder_delivery_interval_seconds: int = Field(default=30, alias="REMINDER_DELIVERY_INTERVAL_SECONDS")
+
+    @property
+    def is_production(self) -> bool:
+        """Returns True if the application is running in production mode."""
+        return self.app_env.strip().lower() in ("production", "prod")
+
+    def validate_production_configuration(self) -> None:
+        """
+        Strict validation for production deployment.
+        Enforces:
+        - APP_MODE == 'webhook'
+        - WEBHOOK_BASE_URL starts with https:// and is not empty
+        - BOT_TOKEN_ENCRYPTION_KEY is valid 32-byte key and not a placeholder
+        - MANAGER_WEBHOOK_SECRET is non-empty and at least 32 chars
+        - MANAGER_BOT_TOKEN is non-empty
+        """
+        if not self.is_production:
+            return
+
+        errors: list[str] = []
+
+        if self.app_mode.lower() != "webhook":
+            errors.append(f"APP_MODE must be 'webhook' in production, got '{self.app_mode}'")
+
+        if not self.webhook_base_url or not self.webhook_base_url.startswith("https://"):
+            errors.append("WEBHOOK_BASE_URL must be configured with https:// in production")
+
+        if not self.manager_bot_token:
+            errors.append("MANAGER_BOT_TOKEN is required in production")
+
+        if not self.manager_webhook_secret or len(self.manager_webhook_secret) < 32:
+            errors.append("MANAGER_WEBHOOK_SECRET must be at least 32 characters in production")
+
+        if not self.bot_token_encryption_key:
+            errors.append("BOT_TOKEN_ENCRYPTION_KEY is required in production")
+        else:
+            try:
+                from app.core.token_crypto import TokenCrypto
+                key_bytes = TokenCrypto._parse_key(self.bot_token_encryption_key)
+                if len(key_bytes) != 32:
+                    errors.append("BOT_TOKEN_ENCRYPTION_KEY must decode to exactly 32 bytes")
+            except Exception as e:
+                errors.append(f"BOT_TOKEN_ENCRYPTION_KEY invalid: {e}")
+
+        if "postgres:postgres@localhost" in self.database_url:
+            errors.append("DATABASE_URL uses default insecure credentials in production")
+
+        if errors:
+            raise ValueError(
+                "Production configuration validation failed:\n" + "\n".join(f" - {err}" for err in errors)
+            )
 
     @property
     def sync_database_url(self) -> str:

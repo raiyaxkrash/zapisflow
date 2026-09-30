@@ -33,3 +33,11 @@
 !/scripts/**/
 !/scripts/**/*.py
 
+# Deployment configurations
+!/deploy/
+!/deploy/**
+
+# Documentation
+!/docs/
+!/docs/**
+

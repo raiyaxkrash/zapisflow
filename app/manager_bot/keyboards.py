@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.config.settings import settings
 from app.database.models.master import BotInstance, BotInstanceStatus, Master
 from app.database.models.subscription import SubscriptionPlan
 
@@ -171,12 +172,13 @@ def subscription_payment_keyboard(
     rows = []
     if payment_url:
         rows.append([InlineKeyboardButton(text="💳 Оплатить онлайн", url=payment_url)])
-    rows.append([
-        InlineKeyboardButton(
-            text="✅ Подтвердить оплату (тест/ручная)",
-            callback_data=f"mgr:sub:confirm:{master_id}:{payment_id}",
-        )
-    ])
+    if not settings.is_production:
+        rows.append([
+            InlineKeyboardButton(
+                text="✅ Подтвердить оплату (тест/ручная)",
+                callback_data=f"mgr:sub:confirm:{master_id}:{payment_id}",
+            )
+        ])
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:sub:{master_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

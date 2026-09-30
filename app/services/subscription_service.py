@@ -287,10 +287,14 @@ class SubscriptionService:
         provider_payment_id: str,
         paid_at: Optional[datetime] = None,
         sanitized_metadata: Optional[Dict[str, Any]] = None,
+        allow_manual_in_production: bool = False,
     ) -> bool:
         """
         Atomically process a verified successful payment callback with row locking and idempotency.
         """
+        if provider.upper() == "MANUAL" and settings.is_production and not allow_manual_in_production:
+            raise SubscriptionError("Ручное подтверждение платежа запрещено в рабочей среде (APP_ENV=production).")
+
         now_utc = datetime.now(timezone.utc)
         if paid_at is None:
             paid_at = now_utc
