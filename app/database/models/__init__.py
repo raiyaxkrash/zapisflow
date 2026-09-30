@@ -39,6 +39,12 @@ from app.database.models.master import (
     MasterAdminRole,
 )
 from app.database.models.audit import AuditLog
+from app.database.models.subscription import (
+    EffectiveSubscriptionStatus,
+    SubscriptionPlan,
+    SubscriptionPeriod,
+    SubscriptionPayment,
+)
 
 __all__ = [
     "Base",
@@ -79,4 +85,8 @@ __all__ = [
     "MasterSettings",
     "MasterAdmin",
     "MasterAdminRole",
+    "EffectiveSubscriptionStatus",
+    "SubscriptionPlan",
+    "SubscriptionPeriod",
+    "SubscriptionPayment",
 ]

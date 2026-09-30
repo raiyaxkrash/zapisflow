@@ -5,6 +5,7 @@ from typing import Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.database.models.master import BotInstance, BotInstanceStatus, Master
+from app.database.models.subscription import SubscriptionPlan
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -131,7 +132,52 @@ def project_card_keyboard(
             )
         ])
 
+    # Subscription management
+    rows.append([
+        InlineKeyboardButton(
+            text="💳 Подписка и тариф",
+            callback_data=f"mgr:sub:{master.id}",
+        )
+    ])
+
     rows.append([InlineKeyboardButton(text="⬅️ Назад к проектам", callback_data="mgr:projects")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subscription_card_keyboard(
+    master_id: int,
+    plans: Sequence[SubscriptionPlan],
+) -> InlineKeyboardMarkup:
+    """Action buttons for subscription management screen."""
+    rows = []
+    for plan in plans:
+        price_int = int(plan.price)
+        rows.append([
+            InlineKeyboardButton(
+                text=f"💳 {plan.name} — {price_int:,} ₽".replace(",", " "),
+                callback_data=f"mgr:sub:pay:{master_id}:{plan.code}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subscription_payment_keyboard(
+    master_id: int,
+    payment_id: int,
+    payment_url: Optional[str] = None,
+) -> InlineKeyboardMarkup:
+    """Confirmation buttons for subscription payment."""
+    rows = []
+    if payment_url:
+        rows.append([InlineKeyboardButton(text="💳 Оплатить онлайн", url=payment_url)])
+    rows.append([
+        InlineKeyboardButton(
+            text="✅ Подтвердить оплату (тест/ручная)",
+            callback_data=f"mgr:sub:confirm:{master_id}:{payment_id}",
+        )
+    ])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:sub:{master_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -154,3 +200,4 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="❌ Отмена", callback_data="mgr:cancel")]
         ]
     )
+

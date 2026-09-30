@@ -4,7 +4,7 @@ Multi-tenant master, bot instance, master settings, clients and admins models.
 
 from datetime import datetime
 import enum
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 import uuid
 from sqlalchemy import (
     BigInteger,
@@ -23,6 +23,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base
+
+if TYPE_CHECKING:
+    from app.database.models.subscription import SubscriptionPayment, SubscriptionPeriod
+    from app.database.models.user import User
 
 
 class MasterStatus(str, enum.Enum):
@@ -97,6 +101,12 @@ class Master(Base):
     )
     admins: Mapped[List["MasterAdmin"]] = relationship(
         "MasterAdmin", back_populates="master", cascade="all, delete-orphan"
+    )
+    subscription_periods: Mapped[List["SubscriptionPeriod"]] = relationship(
+        "SubscriptionPeriod", back_populates="master", cascade="all, delete-orphan"
+    )
+    subscription_payments: Mapped[List["SubscriptionPayment"]] = relationship(
+        "SubscriptionPayment", back_populates="master", cascade="all, delete-orphan"
     )
 
 

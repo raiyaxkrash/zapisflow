@@ -35,6 +35,7 @@ from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
 from app.services.exceptions import SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
+from app.services.subscription_access_policy import SubscriptionAccessPolicy
 from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import (
     format_date_ru,
@@ -66,9 +67,19 @@ async def cb_start_booking(
         )
         return
 
-    await state.clear()
     if master_id is None:
         master_id = await LegacyTenantResolver.get_master_id(session)
+
+    if not is_admin:
+        policy = SubscriptionAccessPolicy(session)
+        if not await policy.can_accept_new_booking(master_id):
+            await callback.answer(
+                "🌸 Онлайн-запись сейчас временно недоступна. Пожалуйста, свяжитесь с мастером напрямую.",
+                show_alert=True,
+            )
+            return
+
+    await state.clear()
     service_repo = ServiceRepository(session)
     services = await service_repo.list_active(master_id=master_id)
 

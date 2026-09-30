@@ -14,6 +14,7 @@ from app.config.settings import settings
 from app.core.security import mask_token
 from app.core.token_crypto import TokenCrypto
 from app.database.models.master import BotInstanceStatus, Master, MasterSettings, MasterStatus, SubscriptionStatus
+from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPayment, SubscriptionPlan
 from app.database.models.user import User
 from app.manager_bot.keyboards import (
     cancel_keyboard,
@@ -21,7 +22,10 @@ from app.manager_bot.keyboards import (
     main_menu_keyboard,
     project_card_keyboard,
     project_list_keyboard,
+    subscription_card_keyboard,
+    subscription_payment_keyboard,
 )
+from app.services.subscription_service import SubscriptionService
 from app.manager_bot.states import ConnectBotStates, CreateMasterStates, RotateTokenStates
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.repositories.master_repository import MasterRepository
@@ -247,10 +251,24 @@ async def cb_project_card(callback: CallbackQuery, state: FSMContext, session: A
 
     readiness_text = "5/5 (готов к приёму клиентов)" if is_ready else f"Нужно настроить: {len(missing)} пункт(ов)"
 
+    sub_service = SubscriptionService(session)
+    eff_sub = await sub_service.get_effective_status(master.id)
+    if eff_sub.status == EffectiveSubscriptionStatus.TRIAL_ACTIVE:
+        date_str = eff_sub.expires_at.strftime("%d.%m.%Y") if eff_sub.expires_at else "—"
+        sub_info = f"🟡 Пробный период (до {date_str}, {eff_sub.days_remaining} дн.)"
+    elif eff_sub.status == EffectiveSubscriptionStatus.PAID_ACTIVE:
+        date_str = eff_sub.expires_at.strftime("%d.%m.%Y") if eff_sub.expires_at else "—"
+        sub_info = f"🟢 Активна (до {date_str}, {eff_sub.days_remaining} дн.)"
+    elif eff_sub.status == EffectiveSubscriptionStatus.EXPIRED:
+        sub_info = "🔴 Истекла (запись приостановлена)"
+    else:
+        sub_info = "🚫 Заблокирована"
+
     text = (
         f"⚙️ <b>Управление проектом: {master.display_name}</b>\n\n"
         f"🤖 <b>Telegram-бот:</b> {bot_info}\n"
         f"📊 <b>Статус бота:</b> {bot_status_str}\n"
+        f"💳 <b>Подписка:</b> {sub_info}\n"
         f"📋 <b>Готовность к запуску:</b> {readiness_text}\n"
         f"🌍 <b>Часовой пояс:</b> {master.timezone}\n"
     )
@@ -738,3 +756,143 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.edit_text("Действие отменено.", reply_markup=main_menu_keyboard())
     await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Subscription Management
+# ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:sub:(\d+)$"))
+async def cb_subscription_screen(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Detailed subscription management screen with IDOR verification."""
+    await state.clear()
+    master_id = int(callback.data.split(":")[2])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await session.get(Master, master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    sub_service = SubscriptionService(session)
+    eff_sub = await sub_service.get_effective_status(master.id)
+    plans = await sub_service.list_active_plans()
+
+    if eff_sub.status == EffectiveSubscriptionStatus.TRIAL_ACTIVE:
+        date_str = eff_sub.expires_at.strftime("%d.%m.%Y %H:%M UTC") if eff_sub.expires_at else "—"
+        status_line = f"🟡 <b>Пробный период</b>\n<i>(осталось {eff_sub.days_remaining} дн., действует до {date_str})</i>"
+    elif eff_sub.status == EffectiveSubscriptionStatus.PAID_ACTIVE:
+        date_str = eff_sub.expires_at.strftime("%d.%m.%Y %H:%M UTC") if eff_sub.expires_at else "—"
+        status_line = f"🟢 <b>Активна</b>\n<i>(оплачено до {date_str}, осталось {eff_sub.days_remaining} дн.)</i>"
+    elif eff_sub.status == EffectiveSubscriptionStatus.EXPIRED:
+        status_line = "🔴 <b>Истекла</b>\n<i>(доступ клиентов к записи ограничен, все ваши данные сохранены)</i>"
+    else:
+        status_line = "🚫 <b>Заблокирована</b> администратором платформы"
+
+    text = (
+        f"💳 <b>Управление подпиской: {master.display_name}</b>\n\n"
+        f"📊 <b>Текущий статус:</b>\n{status_line}\n\n"
+        "Продлите подписку для бесперебойного приёма онлайн-записей ваших клиентов.\n"
+        "Выберите желаемый период продления:"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=subscription_card_keyboard(master.id, plans),
+    )
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:sub:pay:"))
+async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Initiate subscription payment for a chosen plan."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    plan_code = parts[4]
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await session.get(Master, master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    sub_service = SubscriptionService(session)
+    try:
+        payment, intent = await sub_service.create_subscription_payment(
+            master_id=master.id,
+            actor_user_id=user.id,
+            plan_code=plan_code,
+        )
+        await session.commit()
+    except Exception as exc:
+        logger.exception("Failed to create subscription payment: %s", exc)
+        await callback.answer(f"Ошибка создания платежа: {str(exc)[:100]}", show_alert=True)
+        return
+
+    plan = await sub_service.get_active_plan(plan_code)
+    amount_int = int(payment.amount)
+
+    text = (
+        f"💳 <b>Оплата подписки: {master.display_name}</b>\n\n"
+        f"Тариф: <b>{plan.name}</b> ({plan.period_days} дн.)\n"
+        f"Сумма к оплате: <b>{amount_int:,} ₽</b>\n\n"
+        "<i>Для тестирования и ручной активации в текущей среде нажмите кнопку подтверждения:</i>"
+    ).replace(",", " ")
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=subscription_payment_keyboard(master.id, payment.id, intent.payment_url),
+    )
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:sub:confirm:"))
+async def cb_subscription_confirm(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Process manual/test confirmation of subscription payment."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    payment_id = int(parts[4])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await session.get(Master, master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    payment = await session.get(SubscriptionPayment, payment_id)
+    if not payment or payment.master_id != master.id:
+        await callback.answer("Платеж не найден.", show_alert=True)
+        return
+
+    sub_service = SubscriptionService(session)
+    try:
+        await sub_service.process_successful_payment(
+            provider=payment.provider,
+            provider_payment_id=payment.provider_payment_id,
+        )
+        await session.commit()
+    except Exception as exc:
+        logger.exception("Failed to process payment #%s: %s", payment_id, exc)
+        await callback.answer(f"Ошибка обработки: {str(exc)[:100]}", show_alert=True)
+        return
+
+    eff_sub = await sub_service.get_effective_status(master.id)
+    date_str = eff_sub.expires_at.strftime("%d.%m.%Y %H:%M UTC") if eff_sub.expires_at else "—"
+
+    text = (
+        f"🎉 <b>Подписка успешно продлена!</b>\n\n"
+        f"Проект: <b>{master.display_name}</b>\n"
+        f"Новый срок действия: <b>до {date_str}</b> ({eff_sub.days_remaining} дн.)\n\n"
+        "Онлайн-запись и все сервисы студии полностью активны."
+    )
+
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К проекту", callback_data=f"mgr:master:{master.id}")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")],
+        ]
+    )
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer("Подписка продлена!", show_alert=False)
+

@@ -188,3 +188,39 @@ class MasterNotReadyError(AppException):
     def __init__(self, message: str, missing_items: list[str]) -> None:
         super().__init__(message)
         self.missing_items = missing_items
+
+
+class SubscriptionError(AppException):
+    """Base exception for subscription, billing, and access gating failures."""
+
+    pass
+
+
+class SubscriptionExpiredError(SubscriptionError):
+    """Raised when a master's subscription has expired and cannot perform paid actions."""
+
+    pass
+
+
+class SubscriptionSuspendedError(SubscriptionError):
+    """Raised when a master's account or subscription is administratively suspended."""
+
+    pass
+
+
+class PlanNotFoundError(SubscriptionError):
+    """Raised when a requested subscription plan does not exist or is inactive."""
+
+    pass
+
+
+class PaymentAlreadyProcessedError(SubscriptionError):
+    """Raised when a billing payment callback was already processed (idempotency)."""
+
+    pass
+
+
+class BillingIDORViolationError(SubscriptionError):
+    """Raised when a non-owner attempts to view or modify SaaS billing resources."""
+
+    pass

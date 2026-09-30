@@ -16,8 +16,10 @@ from app.services.exceptions import (
     InvalidBookingStatusError,
     InvalidPaymentStatusError,
     PaymentNotFoundError,
+    SubscriptionExpiredError,
 )
 from app.services.appointment_state import transition_appointment
+from app.services.subscription_access_policy import SubscriptionAccessPolicy
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,13 @@ class PaymentService:
         comment: Optional[str] = None,
     ) -> Tuple[Appointment, Payment, PaymentProof]:
         """Record receipt upload by client, freeze hold and transition to PAYMENT_PROOF_SENT strictly within master_id."""
+        if not await SubscriptionAccessPolicy(self.session).can_submit_payment_proof(
+            master_id, appointment_id
+        ):
+            raise SubscriptionExpiredError(
+                "Онлайн-запись сейчас временно недоступна. Пожалуйста, свяжитесь с мастером напрямую."
+            )
+
         payment = await self.payment_repo.get_by_appointment_id(
             appointment_id, master_id=master_id, for_update=True
         )

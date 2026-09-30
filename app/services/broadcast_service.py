@@ -25,6 +25,8 @@ from app.database.models.broadcast import (
 )
 from app.database.models.master import MasterClient
 from app.database.models.user import User
+from app.services.exceptions import SubscriptionExpiredError
+from app.services.subscription_access_policy import SubscriptionAccessPolicy
 
 logger = logging.getLogger("app.broadcast")
 
@@ -70,6 +72,9 @@ class BroadcastService:
         button_url: Optional[str] = None,
     ) -> Broadcast:
         """Create a new broadcast campaign strictly belonging to master_id."""
+        if not await SubscriptionAccessPolicy(self.session).can_send_marketing_broadcast(master_id):
+            raise SubscriptionExpiredError("Маркетинговые рассылки недоступны при истекшей подписке.")
+
         eligible = await self.get_eligible_users(master_id)
         broadcast = Broadcast(
             master_id=master_id,
@@ -133,6 +138,9 @@ class BroadcastService:
         batch_size: int = 50,
     ) -> Broadcast:
         """Send a campaign ensuring it strictly belongs to master_id with multi-replica claiming."""
+        if not await SubscriptionAccessPolicy(self.session).can_send_marketing_broadcast(master_id):
+            raise SubscriptionExpiredError("Маркетинговые рассылки недоступны при истекшей подписке.")
+
         query = select(Broadcast).where(
             Broadcast.id == broadcast_id,
             Broadcast.master_id == master_id,

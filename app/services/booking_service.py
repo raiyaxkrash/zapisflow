@@ -23,11 +23,16 @@ from app.services.exceptions import (
     InvalidBookingStatusError,
     ServiceNotFoundError,
     SlotAlreadyBookedError,
+    SubscriptionExpiredError,
     UserNotFoundError,
 )
 from app.services.appointment_state import transition_appointment
 from app.services.slot_engine import SlotEngine
 from app.services.payment_service import PaymentService
+from app.services.subscription_access_policy import (
+    NEUTRAL_CLIENT_EXPIRED_MESSAGE,
+    SubscriptionAccessPolicy,
+)
 
 
 class BookingService:
@@ -40,6 +45,7 @@ class BookingService:
         self.payment_repo = PaymentRepository(session)
         self.user_repo = UserRepository(session)
         self.master_settings_repo = MasterSettingsRepository(session)
+        self.access_policy = SubscriptionAccessPolicy(session)
 
     @staticmethod
     def _is_overlap_violation(exc: IntegrityError) -> bool:
@@ -66,6 +72,11 @@ class BookingService:
         admin_notes: Optional[str] = None,
     ) -> Tuple[Appointment, Payment]:
         """Atomically reserve a slot, create immutable snapshot and pending deposit payment for a master."""
+        # 0. Subscription gating: prevent new customer booking holds on EXPIRED or SUSPENDED masters
+        if not is_manual:
+            if not await self.access_policy.can_create_hold(master_id):
+                raise SubscriptionExpiredError(NEUTRAL_CLIENT_EXPIRED_MESSAGE)
+
         # 1. Validate user exists
         user = await self.user_repo.get_by_id(user_id)
         if not user:

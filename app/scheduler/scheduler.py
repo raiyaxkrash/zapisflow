@@ -18,6 +18,7 @@ from app.database.session import async_session_maker
 from app.scheduler.jobs.hold_cleaner import clean_expired_holds
 from app.scheduler.jobs.reminder_generator import generate_visit_reminders
 from app.scheduler.jobs.reminder_worker import send_visit_reminders
+from app.scheduler.jobs.subscription_worker import refresh_subscriptions
 from app.services.bot_registry import BotRegistry
 
 logger = logging.getLogger("app.scheduler")
@@ -87,8 +88,22 @@ class MultiTenantScheduler:
             },
         )
 
+        # 4. Subscription expiration worker job
+        self._scheduler.add_job(
+            refresh_subscriptions,
+            trigger="interval",
+            seconds=getattr(settings, "subscription_refresh_interval_seconds", 600),
+            id="refresh_subscriptions",
+            name="Refresh Expired SaaS Subscriptions",
+            replace_existing=True,
+            kwargs={
+                "session_maker": self.session_maker,
+                "batch_size": settings.scheduler_batch_size,
+            },
+        )
+
         logger.info(
-            "MultiTenantScheduler configured with hold_cleaner (%ss), reminder_generator (%ss), reminder_worker (%ss)",
+            "MultiTenantScheduler configured with hold_cleaner (%ss), reminder_generator (%ss), reminder_worker (%ss), subscription_worker (600s)",
             settings.hold_cleaner_interval_seconds,
             settings.reminder_generation_interval_seconds,
             settings.reminder_delivery_interval_seconds,
