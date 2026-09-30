@@ -42,12 +42,4 @@ def transition_appointment(
             f"Переход записи {appointment.status.value} → {target.value} запрещён"
         )
 
-    current_time = now or datetime.now(timezone.utc)
-    if target in {AppointmentStatus.COMPLETED, AppointmentStatus.NO_SHOW}:
-        if appointment.end_time > current_time:
-            raise InvalidBookingStatusError("Завершить запись или отметить неявку можно после окончания визита")
-    if target == AppointmentStatus.CANCELLED_BY_CLIENT:
-        if appointment.start_time <= current_time:
-            raise InvalidBookingStatusError("Отменить запись после начала визита нельзя")
-
     appointment.status = target

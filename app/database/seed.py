@@ -236,15 +236,19 @@ async def seed_database() -> None:
             await seed_portfolio_categories(session)
             await seed_admins(session)
             await session.commit()
-            logger.info("Database seeding completed successfully! 🎉")
+            logger.info("Database seeding completed successfully!")
         except Exception as e:
             await session.rollback()
             logger.error(f"Seeding failed: {e}", exc_info=True)
             raise
 
 
-if __name__ == "__main__":
+async def main() -> None:
     try:
-        asyncio.run(seed_database())
+        await seed_database()
     finally:
-        asyncio.run(close_db())
+        await close_db()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

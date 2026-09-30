@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: beauty_bot_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres_secure_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -38,7 +38,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres_secure_password@postgres:5432/beauty_bot_db
+      DATABASE_URL: ${DATABASE_URL}
       REDIS_HOST: redis
       REDIS_PORT: 6379
     depends_on:
@@ -56,7 +56,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres_secure_password@postgres:5432/beauty_bot_db
+      DATABASE_URL: ${DATABASE_URL}
       REDIS_HOST: redis
       REDIS_PORT: 6379
     depends_on:

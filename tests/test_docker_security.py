@@ -27,6 +27,15 @@ def test_dockerignore_excludes_secret_env_files() -> None:
     assert "!.env.example" in patterns
     assert ".git" in patterns or ".git/" in patterns
     assert ".venv" in patterns or ".venv/" in patterns
+    assert "*.sqlite3" in patterns
+    assert "backups/" in patterns or "*.bak" in patterns
+
+
+def test_compose_does_not_contain_hardcoded_passwords() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "postgres_secure_password" not in compose
+    assert "${POSTGRES_PASSWORD}" in compose
+    assert "${DATABASE_URL}" in compose
 
 
 def test_postgres_database_uses_named_volume_and_services_are_private() -> None:
