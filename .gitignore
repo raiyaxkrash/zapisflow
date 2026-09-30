@@ -1,49 +1,29 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-.venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Keep only source code, tests, migrations, and project configuration in Git.
+*
 
-# Virtual environments
-.env
-.env.local
-.env.*.local
+# Project files at the repository root.
+!/.gitignore
+!/.dockerignore
+!/.env.example
+!/Dockerfile
+!/README.md
+!/alembic.ini
+!/docker-compose.yml
+!/pyproject.toml
+!/requirements.txt
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
+# Python application source.
+!/app/
+!/app/**/
+!/app/**/*.py
 
-# Logs
-*.log
-logs/
+# Alembic migrations and template.
+!/alembic/
+!/alembic/**/
+!/alembic/**/*.py
+!/alembic/script.py.mako
 
-# Testing & Coverage
-.coverage
-htmlcov/
-.pytest_cache/
-
-# OS specific
-Thumbs.db
-.DS_Store
+# Automated tests.
+!/tests/
+!/tests/**/
+!/tests/**/*.py

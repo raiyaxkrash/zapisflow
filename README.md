@@ -26,7 +26,7 @@
   - Исключает временные коллизии с уже забронированными и подтверждёнными записями.
 - **Гарантия от овербукинга (Double-Booking Prevention):**
   - Механизм `hold` на 30 минут с автоматическим освобождением слота, если предоплата не поступила.
-  - На уровне СУБД: аппаратный PostgreSQL Exclusion Constraint (`btree_gist`) на интервалы `tstzrange` в таблице `appointments`. Физически невозможно создать две пересекающиеся записи у одного мастера даже при параллельных запросах в одну миллисекунду.
+  - На уровне PostgreSQL: расширение `btree_gist` и `EXCLUSION CONSTRAINT` на уровне ядра базы данных гарантируют невозможность одновременного бронирования пересекающихся интервалов для одного мастера. Использование `SELECT ... FOR UPDATE` гарантирует строгую изоляцию транзакций.
 - **Прозрачная предоплата банковским переводом:**
   - Автоматический расчёт суммы (фиксированная или % от услуги).
   - Реквизиты и кнопка копирования номера карты.
@@ -84,8 +84,8 @@
 |---|---|---|
 | **Язык** | Python 3.12+ | Современный асинхронный синтаксис |
 | **Telegram Framework** | `aiogram 3.14+` | Асинхронная обработка сообщений и коллбэков, FSM |
-| **СУБД** | PostgreSQL 16 | Реляционная БД с поддержкой extension `btree_gist` |
-| **ORM / Driver** | `SQLAlchemy 2.0` + `asyncpg` | Асинхронные сессии, строгая типизация Mapped |
+| **СУБД** | PostgreSQL 16 | Реляционная СУБД с btree_gist и exclusion constraints |
+| **ORM / Driver** | `SQLAlchemy 2.0` + `asyncpg` | Асинхронные сессии, пул соединений, строгая типизация Mapped |
 | **Миграции** | `Alembic` | Управление структурой таблиц и версионирование схемы |
 | **Кэш & FSM** | `Redis 7` | Хранение состояний FSM и распределённые блокировки |
 | **Планировщик** | `APScheduler 3.10+` | Фоновые задачи, очистка истекших hold, напоминания |
@@ -112,19 +112,19 @@ brave-borg/
 │   │   ├── states/           # FSM-состояния визардов записи и управления
 │   │   └── bot_instance.py   # Инициализация Bot и Dispatcher
 │   ├── config/
-│   │   └── settings.py       # Pydantic Settings конфигурация
+│   │   └── settings.py       # Pydantic Settings конфигурация (DATABASE_URL, пул соединений)
 │   ├── database/
 │   │   ├── models/           # 19 SQLAlchemy ORM моделей (users, appointments, payments, etc.)
 │   │   ├── seed.py           # Идемпотентный скрипт начального наполнения БД
-│   │   └── session.py        # Async Engine и Session Factory
-│   ├── repositories/         # Репозитории доступа к данным (CRUD + агрегации)
+│   │   └── session.py        # Async Engine (asyncpg), пул соединений и fail-fast healthcheck
+│   ├── repositories/         # Репозитории доступа к данным (CRUD + FOR UPDATE блокировки)
 │   ├── scheduler/            # APScheduler и фоновые воркеры (hold_cleaner, reminder_worker)
 │   ├── services/             # Бизнес-логика (SlotEngine, BookingService, PaymentService, Analytics)
 │   ├── utils/                # Форматирование дат, валюты, временных зон
 │   └── main.py               # Точка входа приложения
-├── alembic/                  # Миграции базы данных
+├── alembic/                  # Миграции базы данных (btree_gist, exclusion constraints, native ENUMs)
 ├── tests/                    # Набор модульных и интеграционных тестов (pytest)
-├── docker-compose.yml        # Оркестрация PostgreSQL, Redis и Bot
+├── docker-compose.yml        # Оркестрация PostgreSQL 16, Redis, Migrate и Bot
 ├── Dockerfile                # Сборка контейнера приложения
 ├── requirements.txt          # Зависимости проекта
 └── .env.example              # Шаблон переменных окружения
@@ -144,10 +144,13 @@ cp .env.example .env
 Отредактируйте параметры в файле `.env`:
 ```env
 # Telegram Bot Token (получить у @BotFather)
-BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+BOT_TOKEN=<токен BotFather>
 
-# Telegram ID администраторов (узнать через @userinfobot)
-ADMIN_IDS=[123456789]
+# Telegram ID администраторов (JSON-массив; узнать через @userinfobot)
+ADMIN_IDS=[123456789,987654321]
+
+# Канонический URL подключения к PostgreSQL 16 (asyncpg)
+DATABASE_URL=postgresql+asyncpg://postgres:postgres_secure_password@localhost:5432/beauty_bot_db
 
 # Банковские реквизиты для приема предоплаты
 BANK_CARD_NUMBER=2202 2000 1234 5678
@@ -171,9 +174,10 @@ docker compose up -d --build
 ```
 
 Docker поднимет:
-1. `postgres` (PostgreSQL 16 с расширением `btree_gist`).
-2. `redis` (Redis 7 для хранения FSM-сессий).
-3. `bot` (автоматически применит миграции `alembic upgrade head` и запустит бота).
+1. `postgres:16-alpine` с персистентным томом `postgres_data` и healthcheck через `pg_isready`;
+2. `redis:7-alpine` для FSM и распределенных блокировок;
+3. Сервис `migrate`, который дождётся готовности PostgreSQL и выполнит `alembic upgrade head`;
+4. Сервис `bot`, который стартует после успешного завершения миграций.
 
 Для заполнения базы начальными услугами, графиком и настройками выполните:
 ```bash
@@ -203,10 +207,7 @@ docker compose logs -f bot
    pip install -r requirements.txt
    ```
 
-3. **Запустите PostgreSQL и Redis** (можно поднять только инфраструктурные сервисы через Docker):
-   ```bash
-   docker compose up -d postgres redis
-   ```
+3. **Запустите PostgreSQL 16 и Redis** (например, через `docker compose up -d postgres redis`) и настройте `DATABASE_URL` и `REDIS_HOST` в `.env`.
 
 4. **Примените миграции базы данных:**
    ```bash
@@ -227,10 +228,10 @@ docker compose logs -f bot
 
 ## 🧪 Запуск тестов
 
-Проект покрыт автоматическими тестами `pytest` (проверка `SlotEngine`, расчета интервалов, фоновой очистки истекших броней, напоминаний и сервиса аналитики):
+Проект покрыт автоматическими тестами `pytest`, включая миграции Alembic, проверку конкурентного бронирования, state machine платежей, расчёт слотов `SlotEngine`, fail-fast healthcheck и фоновые задачи:
 
 ```bash
-pytest
+pytest -v
 ```
 
 ---
@@ -258,4 +259,5 @@ pytest
 ## 🛡 Безопасность и надёжность
 - **Никаких утечек персональных данных:** номера телефонов запрашиваются только по согласию через стандартную кнопку Telegram Contact.
 - **Снимок услуги (Snapshotting):** при создании записи в таблицу `appointments` копируются название, цена, буфер и длительность на момент бронирования. Последующее изменение прайс-листа мастером не ломает уже созданные записи и финансовые отчёты.
-- **Устойчивость к рестартам:** все таймеры и напоминания опираются на базу данных PostgreSQL и APScheduler, а не на память процесса — при перезапуске сервера ни одна запись и ни одно напоминание не потеряются.
+- **PostgreSQL 16 & btree_gist:** защита от овербукинга на уровне ядра СУБД с помощью `EXCLUDE USING gist`, предотвращающая наложение записей даже при параллельных транзакциях.
+- **Устойчивость к рестартам:** все данные хранятся в PostgreSQL с персистентным томом `postgres_data`, а фоновые задачи восстанавливаются на основании данных после запуска.

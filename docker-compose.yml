@@ -4,25 +4,23 @@ services:
     container_name: beauty_bot_postgres
     restart: always
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-beauty_bot_db}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_secure_password}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      POSTGRES_DB: beauty_bot_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_secure_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-beauty_bot_db}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d beauty_bot_db"]
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - backend
 
   redis:
     image: redis:7-alpine
     container_name: beauty_bot_redis
     restart: always
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -30,22 +28,51 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - backend
+
+  migrate:
+    build: .
+    image: beauty_bot_app:local
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres_secure_password@postgres:5432/beauty_bot_db
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+    command: ["alembic", "upgrade", "head"]
 
   bot:
     build: .
+    image: beauty_bot_app:local
     container_name: beauty_bot_app
     restart: always
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres_secure_password@postgres:5432/beauty_bot_db
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
-    volumes:
-      - .:/app
-    command: >
-      sh -c "alembic upgrade head && python -m app.main"
+    networks:
+      - backend
+    command: ["python", "-m", "app.main"]
+
+networks:
+  backend:
+    driver: bridge
 
 volumes:
   postgres_data:

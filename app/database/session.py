@@ -1,8 +1,10 @@
 """
-Database session management and asynchronous engine setup using SQLAlchemy 2.0.
+Database session management and asynchronous engine setup using SQLAlchemy 2.0 and asyncpg.
 """
 
 from typing import AsyncGenerator
+import logging
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -12,15 +14,18 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.config.settings import settings
-from app.database.models.base import Base
 
-# Asynchronous engine with connection pooling and pre-ping healthcheck
+logger = logging.getLogger(__name__)
+
+# Asynchronous PostgreSQL engine with configurable connection pooling and pre-ping healthcheck
 engine: AsyncEngine = create_async_engine(
     settings.database_url,
     echo=False,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    pool_pre_ping=settings.db_pool_pre_ping,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+    pool_timeout=settings.db_pool_timeout,
+    pool_recycle=settings.db_pool_recycle,
 )
 
 # Thread-safe async session factory
@@ -50,13 +55,32 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     """
-    Initializes database extensions and creates tables if they don't exist.
-    Used for local testing and initial bootstrap.
+    Fail-fast startup connectivity check and extension verification.
+    Raises RuntimeError loudly if database is unreachable or btree_gist is missing.
+    No silent fallback to SQLite.
     """
-    async with engine.begin() as conn:
-        # Enable btree_gist extension for PostgreSQL exclusion constraints
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gist;"))
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with engine.connect() as conn:
+            # 1. Connectivity check
+            await conn.execute(text("SELECT 1"))
+            # 2. btree_gist extension check
+            result = await conn.execute(
+                text("SELECT 1 FROM pg_extension WHERE extname = 'btree_gist'")
+            )
+            if not result.scalar():
+                raise RuntimeError(
+                    "PostgreSQL extension 'btree_gist' is missing! "
+                    "Run 'CREATE EXTENSION IF NOT EXISTS btree_gist;' or 'alembic upgrade head'."
+                )
+    except Exception as exc:
+        logger.critical(
+            "Database connectivity check failed for %s: %s",
+            settings.safe_database_url,
+            exc,
+        )
+        raise RuntimeError(
+            f"Failed to connect to PostgreSQL at {settings.safe_database_url}: {exc}"
+        ) from exc
 
 
 async def close_db() -> None:

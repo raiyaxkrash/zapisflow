@@ -2,17 +2,14 @@
 Appointment repository for booking transactions, overlaps and queries.
 """
 
-from datetime import datetime
-from decimal import Decimal
-from typing import Any, List, Optional, Sequence
-from sqlalchemy import and_, func, or_, select
+from datetime import datetime, timezone
+from typing import Optional, Sequence
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database.models.appointment import Appointment, AppointmentStatus
-from app.database.models.payment import Payment, PaymentProof
-from app.database.models.service import Service
-from app.database.models.user import User
+from app.database.models.payment import Payment
 from app.repositories.base import BaseRepository
 
 
@@ -24,7 +21,9 @@ class AppointmentRepository(BaseRepository[Appointment]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(Appointment, session)
 
-    async def get_by_id_with_relations(self, appointment_id: int) -> Optional[Appointment]:
+    async def get_by_id_with_relations(
+        self, appointment_id: int, *, for_update: bool = False
+    ) -> Optional[Appointment]:
         """
         Fetch appointment by ID including user, service, payments and proofs.
         """
@@ -37,8 +36,26 @@ class AppointmentRepository(BaseRepository[Appointment]):
                 selectinload(Appointment.payments).selectinload(Payment.proofs),
             )
         )
+        if for_update:
+            query = query.with_for_update()
         result = await self.session.execute(query)
         return result.scalars().first()
+
+    async def expire_waiting_hold_if_due(self, appointment_id: int) -> bool:
+        """Expire a due hold with one conditional update inside the write transaction."""
+        now_utc = datetime.now(timezone.utc)
+        result = await self.session.execute(
+            update(Appointment)
+            .where(
+                Appointment.id == appointment_id,
+                Appointment.status == AppointmentStatus.WAITING_PAYMENT,
+                Appointment.hold_until.is_not(None),
+                Appointment.hold_until <= now_utc,
+            )
+            .values(status=AppointmentStatus.EXPIRED, hold_until=None)
+            .returning(Appointment.id)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def get_active_overlapping(
         self,
@@ -49,26 +66,19 @@ class AppointmentRepository(BaseRepository[Appointment]):
     ) -> Sequence[Appointment]:
         """
         Find any active appointments that overlap with [start_time, end_time_with_buffer).
-        Active statuses:
-        - CONFIRMED
-        - PAYMENT_PROOF_SENT
-        - WAITING_PAYMENT (only if hold_until > now())
+        A waiting hold occupies its interval until the expiry worker commits
+        EXPIRED. This matches the PostgreSQL exclusion constraint and ensures a slot
+        is not offered while a still-WAITING_PAYMENT row exists.
         """
-        now = func.now()
-        active_condition = or_(
-            Appointment.status.in_([
-                AppointmentStatus.CONFIRMED,
-                AppointmentStatus.PAYMENT_PROOF_SENT,
-            ]),
-            and_(
-                Appointment.status == AppointmentStatus.WAITING_PAYMENT,
-                Appointment.hold_until > now,
-            ),
-        )
+        active_statuses = [
+            AppointmentStatus.CONFIRMED,
+            AppointmentStatus.PAYMENT_PROOF_SENT,
+            AppointmentStatus.WAITING_PAYMENT,
+        ]
 
         query = select(Appointment).where(
             Appointment.master_id == master_id,
-            active_condition,
+            Appointment.status.in_(active_statuses),
             Appointment.start_time < end_time_with_buffer,
             Appointment.end_time_with_buffer > start_time,
         )
@@ -84,32 +94,29 @@ class AppointmentRepository(BaseRepository[Appointment]):
         master_id: int,
         start_datetime: datetime,
         end_datetime: datetime,
+        exclude_id: Optional[int] = None,
     ) -> Sequence[Appointment]:
         """
         Get all active appointments within a date range for slot calculations.
         """
-        now = func.now()
-        active_condition = or_(
-            Appointment.status.in_([
-                AppointmentStatus.CONFIRMED,
-                AppointmentStatus.PAYMENT_PROOF_SENT,
-            ]),
-            and_(
-                Appointment.status == AppointmentStatus.WAITING_PAYMENT,
-                Appointment.hold_until > now,
-            ),
-        )
+        active_statuses = [
+            AppointmentStatus.CONFIRMED,
+            AppointmentStatus.PAYMENT_PROOF_SENT,
+            AppointmentStatus.WAITING_PAYMENT,
+        ]
 
         query = (
             select(Appointment)
             .where(
                 Appointment.master_id == master_id,
-                active_condition,
+                Appointment.status.in_(active_statuses),
                 Appointment.start_time < end_datetime,
                 Appointment.end_time_with_buffer > start_datetime,
             )
             .order_by(Appointment.start_time.asc())
         )
+        if exclude_id is not None:
+            query = query.where(Appointment.id != exclude_id)
         result = await self.session.execute(query)
         return result.scalars().all()
 
@@ -117,7 +124,7 @@ class AppointmentRepository(BaseRepository[Appointment]):
         """
         Get upcoming active appointments for a client.
         """
-        now = func.now()
+        now = datetime.now(timezone.utc)
         query = (
             select(Appointment)
             .where(
@@ -139,7 +146,7 @@ class AppointmentRepository(BaseRepository[Appointment]):
         """
         Get past or concluded appointments for a client.
         """
-        now = func.now()
+        now = datetime.now(timezone.utc)
         query = (
             select(Appointment)
             .where(
@@ -166,7 +173,7 @@ class AppointmentRepository(BaseRepository[Appointment]):
         """
         Get all appointments in WAITING_PAYMENT status where hold_until has passed.
         """
-        now = func.now()
+        now = datetime.now(timezone.utc)
         query = (
             select(Appointment)
             .where(

@@ -12,7 +12,7 @@ from app.repositories.base import BaseRepository
 
 class SettingsRepository(BaseRepository[AppSetting]):
     """
-    Repository for managing dynamic system configuration stored in JSONB.
+    Repository for managing dynamic system configuration stored as JSON.
     """
 
     def __init__(self, session: AsyncSession) -> None:

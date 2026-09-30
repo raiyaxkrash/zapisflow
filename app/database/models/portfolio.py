@@ -4,7 +4,7 @@ Portfolio categories and items models.
 
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base
@@ -16,7 +16,7 @@ class PortfolioCategory(Base):
     """
     __tablename__ = "portfolio_categories"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     display_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -36,9 +36,9 @@ class PortfolioItem(Base):
     """
     __tablename__ = "portfolio_items"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     category_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("portfolio_categories.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("portfolio_categories.id", ondelete="CASCADE"), nullable=False, index=True
     )
     telegram_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
     telegram_file_unique_id: Mapped[str] = mapped_column(String(255), nullable=False)

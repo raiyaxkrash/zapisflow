@@ -1,9 +1,9 @@
 """
-Base declarative model and common mixins for SQLAlchemy 2.0.
+Base declarative model and common mixins for SQLAlchemy 2.0 with PostgreSQL.
 """
 
 from datetime import datetime
-from sqlalchemy import MetaData, func, DateTime
+from sqlalchemy import DateTime, MetaData, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Naming convention for clean constraint and index naming
@@ -28,7 +28,7 @@ class Base(DeclarativeBase):
 
 class TimestampMixin:
     """
-    Mixin adding timezone-aware created_at and updated_at timestamps.
+    Mixin adding timezone-aware created_at and updated_at TIMESTAMPTZ timestamps.
     """
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -41,3 +41,8 @@ class TimestampMixin:
         onupdate=func.now(),
         nullable=False,
     )
+
+
+# Backward compatibility alias for any existing imports
+def UTCDateTime() -> DateTime:
+    return DateTime(timezone=True)

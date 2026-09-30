@@ -456,10 +456,10 @@ async def cb_agree_policy(
 
     # Fetch requisites from settings
     settings_repo = SettingsRepository(session)
-    bank_name = await settings_repo.get_value("default_bank_name", settings.default_bank_name)
-    card_number = await settings_repo.get_value("default_card_number", settings.default_card_number)
+    bank_name = await settings_repo.get_value("bank_name", settings.bank_name)
+    card_number = await settings_repo.get_value("bank_card_number", settings.bank_card_number)
     phone_req = await settings_repo.get_value("default_phone_requisites", settings.default_phone_requisites)
-    recipient = await settings_repo.get_value("default_recipient_name", settings.default_recipient_name)
+    recipient = await settings_repo.get_value("bank_recipient_name", settings.bank_recipient_name)
     hold_mins = int(await settings_repo.get_value("hold_duration_minutes", settings.hold_duration_minutes))
 
     tz_str = await settings_repo.get_value("timezone", settings.timezone)

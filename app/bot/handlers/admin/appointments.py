@@ -3,7 +3,7 @@ Admin handlers for appointment management, filtering, details, rescheduling, and
 """
 
 from datetime import date, datetime, time, timedelta
-from typing import List, Optional
+from typing import List
 import pytz
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
@@ -21,15 +21,16 @@ from app.bot.keyboards.admin.callbacks import (
     AdminCalendarCallback,
     AdminMenuCallback,
 )
+from app.bot.keyboards.admin.schedule import get_admin_calendar_keyboard
 from app.bot.states.admin import AdminAppointmentNoteSG, AdminRescheduleSG
 from app.config.settings import settings
 from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
-from app.repositories.service_repository import ServiceRepository
 from app.repositories.settings_repository import SettingsRepository
+from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
-from app.services.exceptions import SlotAlreadyBookedError
+from app.services.exceptions import BookingNotFoundError, InvalidBookingStatusError, SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
 
@@ -241,7 +242,12 @@ async def cb_appointment_complete(
     Mark appointment as completed.
     """
     booking_service = BookingService(session)
-    appointment = await booking_service.complete_booking(callback_data.appointment_id)
+    try:
+        appointment = await booking_service.complete_booking(callback_data.appointment_id)
+    except (BookingNotFoundError, InvalidBookingStatusError) as exc:
+        await session.rollback()
+        await callback.answer(str(exc), show_alert=True)
+        return
 
     settings_repo = SettingsRepository(session)
     tz_str = await settings_repo.get_value("timezone", settings.timezone)
@@ -249,6 +255,7 @@ async def cb_appointment_complete(
     keyboard = get_admin_appointment_card_keyboard(
         appointment, filter_type=callback_data.filter_type or "today"
     )
+    await session.commit()
 
     if callback.message:
         await callback.message.edit_text(text=text, reply_markup=keyboard)
@@ -265,7 +272,12 @@ async def cb_appointment_no_show(
     Mark appointment as NO-SHOW.
     """
     booking_service = BookingService(session)
-    appointment = await booking_service.mark_no_show(callback_data.appointment_id)
+    try:
+        appointment = await booking_service.mark_no_show(callback_data.appointment_id)
+    except (BookingNotFoundError, InvalidBookingStatusError) as exc:
+        await session.rollback()
+        await callback.answer(str(exc), show_alert=True)
+        return
 
     settings_repo = SettingsRepository(session)
     tz_str = await settings_repo.get_value("timezone", settings.timezone)
@@ -273,6 +285,7 @@ async def cb_appointment_no_show(
     keyboard = get_admin_appointment_card_keyboard(
         appointment, filter_type=callback_data.filter_type or "today"
     )
+    await session.commit()
 
     if callback.message:
         await callback.message.edit_text(text=text, reply_markup=keyboard)
@@ -292,14 +305,20 @@ async def cb_appointment_cancel(
     Cancel appointment by admin and notify client.
     """
     booking_service = BookingService(session)
-    appointment = await booking_service.cancel_booking_by_admin(
-        appointment_id=callback_data.appointment_id,
-        reason="Отменено мастером через панель управления",
-    )
+    try:
+        appointment = await booking_service.cancel_booking_by_admin(
+            appointment_id=callback_data.appointment_id,
+            reason="Отменено мастером через панель управления",
+        )
+    except (BookingNotFoundError, InvalidBookingStatusError) as exc:
+        await session.rollback()
+        await callback.answer(str(exc), show_alert=True)
+        return
 
     settings_repo = SettingsRepository(session)
     tz_str = await settings_repo.get_value("timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
+    await session.commit()
 
     # Notify client if Telegram ID is available
     if appointment.user and appointment.user.telegram_id:
@@ -353,8 +372,6 @@ async def cb_appointment_reschedule_start(
         filter_type=callback_data.filter_type,
     )
 
-    from app.bot.keyboards.client import build_inline_calendar
-
     settings_repo = SettingsRepository(session)
     tz_str = await settings_repo.get_value("timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
@@ -366,7 +383,7 @@ async def cb_appointment_reschedule_start(
         f"Текущее время: <b>{format_datetime_ru(appointment.start_time, tz_name=tz_str)}</b>\n\n"
         "Выберите новую дату для переноса:"
     )
-    keyboard = build_inline_calendar(year=today.year, month=today.month, today=today)
+    keyboard = get_admin_calendar_keyboard(year=today.year, month=today.month, today=today)
 
     if callback.message:
         await callback.message.edit_text(text=text, reply_markup=keyboard)
@@ -375,7 +392,25 @@ async def cb_appointment_reschedule_start(
 
 @router.callback_query(
     AdminRescheduleSG.picking_date,
-    F.data.startswith("cal:day:"),
+    AdminCalendarCallback.filter(F.action == "month"),
+)
+async def cb_reschedule_month_nav(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    """Page the admin calendar while keeping the reschedule wizard active."""
+    selected = AdminCalendarCallback.unpack(callback.data)
+    settings_repo = SettingsRepository(session)
+    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    today = datetime.now(pytz.timezone(tz_str)).date()
+    keyboard = get_admin_calendar_keyboard(selected.year, selected.month, today)
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(
+    AdminRescheduleSG.picking_date,
+    AdminCalendarCallback.filter(F.action == "day"),
 )
 async def cb_reschedule_pick_date(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
@@ -383,16 +418,26 @@ async def cb_reschedule_pick_date(
     """
     Date chosen for reschedule: compute available slots and show time grid.
     """
-    date_str = callback.data.split(":")[2]
-    target_date = date.fromisoformat(date_str)
+    selected = AdminCalendarCallback.unpack(callback.data)
+    target_date = date(selected.year, selected.month, selected.day)
 
     data = await state.get_data()
     service_id = data["service_id"]
     appointment_id = data["appointment_id"]
+    appointment = await AppointmentRepository(session).get_by_id(appointment_id)
+    if appointment is None:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
 
     slot_engine = SlotEngine(session)
-    slots = await slot_engine.get_available_slots_for_date(
-        target_date=target_date, service_id=service_id, master_id=1
+    slots = await slot_engine.get_available_slots(
+        service_id=service_id,
+        target_date=target_date,
+        master_id=appointment.master_id,
+        duration_min=appointment.snapshot_service_duration_min,
+        buffer_min=appointment.snapshot_buffer_duration_min,
+        exclude_appointment_id=appointment.id,
+        allow_inactive=True,
     )
 
     if not slots:
@@ -452,6 +497,7 @@ async def cb_reschedule_confirm_slot(
     state: FSMContext,
     bot: Bot,
     session: AsyncSession,
+    db_user: User,
 ) -> None:
     """
     Time chosen: perform reschedule, notify client, clear state.
@@ -462,16 +508,21 @@ async def cb_reschedule_confirm_slot(
     data = await state.get_data()
     appointment_id = data["appointment_id"]
     filter_type = data.get("filter_type", "today")
-    await state.clear()
+    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
+    if admin is None:
+        await callback.answer("Профиль администратора не найден", show_alert=True)
+        return
 
     booking_service = BookingService(session)
     try:
         appointment = await booking_service.reschedule_booking_by_admin(
-            appointment_id=appointment_id, new_start_time=new_start_time
+            appointment_id=appointment_id, new_start_time=new_start_time, admin_id=admin.id
         )
-    except SlotAlreadyBookedError as e:
+    except (SlotAlreadyBookedError, InvalidBookingStatusError) as e:
         await callback.answer(str(e), show_alert=True)
         return
+
+    await state.clear()
 
     settings_repo = SettingsRepository(session)
     tz_str = await settings_repo.get_value("timezone", settings.timezone)
@@ -564,7 +615,7 @@ async def msg_appointment_save_note(
         settings_repo = SettingsRepository(session)
         tz_str = await settings_repo.get_value("timezone", settings.timezone)
         text = (
-            f"✅ <b>Заметка сохранена!</b>\n\n"
+            "✅ <b>Заметка сохранена!</b>\n\n"
             + format_appointment_card(appointment, tz_name=tz_str)
         )
         keyboard = get_admin_appointment_card_keyboard(

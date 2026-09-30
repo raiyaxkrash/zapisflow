@@ -2,6 +2,7 @@
 Admin appointments list and action keyboards.
 """
 
+from datetime import datetime, timezone
 from typing import Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -123,20 +124,21 @@ def get_admin_appointment_card_keyboard(
                 ).pack(),
             ),
         )
-        builder.row(
-            InlineKeyboardButton(
-                text="✔️ Завершить (Выполнена)",
-                callback_data=AdminAppointmentCallback(
-                    action="complete", appointment_id=appointment.id, filter_type=filter_type
-                ).pack(),
-            ),
-            InlineKeyboardButton(
-                text="🚫 Отметить NO-SHOW",
-                callback_data=AdminAppointmentCallback(
-                    action="no_show", appointment_id=appointment.id, filter_type=filter_type
-                ).pack(),
-            ),
-        )
+        if appointment.status == AppointmentStatus.CONFIRMED and appointment.end_time <= datetime.now(timezone.utc):
+            builder.row(
+                InlineKeyboardButton(
+                    text="✔️ Завершить (Выполнена)",
+                    callback_data=AdminAppointmentCallback(
+                        action="complete", appointment_id=appointment.id, filter_type=filter_type
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Отметить NO-SHOW",
+                    callback_data=AdminAppointmentCallback(
+                        action="no_show", appointment_id=appointment.id, filter_type=filter_type
+                    ).pack(),
+                ),
+            )
 
     if appointment.user and appointment.user.telegram_id:
         builder.row(

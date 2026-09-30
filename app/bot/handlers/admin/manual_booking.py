@@ -4,7 +4,7 @@ Allows creating confirmed appointments directly without deposit checks.
 """
 
 from datetime import date, datetime, time
-import time as pytime
+from uuid import uuid4
 from typing import Optional
 import pytz
 from aiogram import F, Router
@@ -112,8 +112,8 @@ async def cb_manual_booking_choose_service(
         return
 
     slot_engine = SlotEngine(session)
-    slots = await slot_engine.get_available_slots_for_date(
-        target_date=target_date, service_id=service_id, master_id=1
+    slots = await slot_engine.get_available_slots(
+        service_id=service_id, target_date=target_date, master_id=1
     )
 
     if not slots:
@@ -337,8 +337,6 @@ async def finalize_manual_booking(
     Create User profile if needed and record CONFIRMED manual appointment.
     """
     data = await state.get_data()
-    await state.clear()
-
     service_id = data["service_id"]
     slot_iso = data["slot_iso"]
     client_name = data["client_name"]
@@ -351,13 +349,11 @@ async def finalize_manual_booking(
     # 1. Resolve user
     user = None
     if client_phone:
-        found_users = await user_repo.search_users(client_phone, limit=1)
-        if found_users:
-            user = found_users[0]
+        user = await user_repo.get_by_phone_exact(client_phone)
 
     if not user:
         # Synthetic negative telegram_id for offline/walk-in clients
-        synthetic_tg_id = -int((pytime.time() * 1000) % 2000000000)
+        synthetic_tg_id = -(uuid4().int & ((1 << 63) - 1))
         user = User(
             telegram_id=synthetic_tg_id,
             first_name=client_name,
@@ -385,6 +381,8 @@ async def finalize_manual_booking(
         else:
             await event.answer(err_msg)
         return
+
+    await state.clear()
 
     settings_repo = SettingsRepository(session)
     tz_str = await settings_repo.get_value("timezone", settings.timezone)

@@ -4,7 +4,7 @@ Payment repository for managing financial records, deposits and proofs.
 
 from decimal import Decimal
 from typing import Optional, Sequence
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -21,7 +21,9 @@ class PaymentRepository(BaseRepository[Payment]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(Payment, session)
 
-    async def get_by_appointment_id(self, appointment_id: int) -> Optional[Payment]:
+    async def get_by_appointment_id(
+        self, appointment_id: int, *, for_update: bool = False
+    ) -> Optional[Payment]:
         """
         Get payment details by appointment ID.
         """
@@ -34,6 +36,26 @@ class PaymentRepository(BaseRepository[Payment]):
                 selectinload(Payment.appointment),
             )
         )
+        if for_update:
+            query = query.with_for_update()
+        result = await self.session.execute(query)
+        return result.scalars().first()
+
+    async def get_by_id_with_proofs(
+        self, payment_id: int, *, for_update: bool = False
+    ) -> Optional[Payment]:
+        """Load the payment decision graph without async lazy relationship access."""
+        query = (
+            select(Payment)
+            .where(Payment.id == payment_id)
+            .options(
+                selectinload(Payment.proofs),
+                selectinload(Payment.user),
+                selectinload(Payment.appointment).selectinload(Appointment.user),
+            )
+        )
+        if for_update:
+            query = query.with_for_update()
         result = await self.session.execute(query)
         return result.scalars().first()
 
@@ -74,37 +96,9 @@ class PaymentRepository(BaseRepository[Payment]):
         )
         self.session.add(proof)
 
-        # Update payment status to SUBMITTED
-        payment = await self.get_by_id(payment_id)
-        if payment and payment.status == PaymentStatus.PENDING:
-            payment.status = PaymentStatus.SUBMITTED
-
         await self.session.flush()
         await self.session.refresh(proof)
         return proof
-
-    async def update_status(
-        self,
-        payment_id: int,
-        status: PaymentStatus,
-        admin_id: Optional[int] = None,
-        rejection_reason: Optional[str] = None,
-    ) -> Optional[Payment]:
-        """
-        Update payment status upon admin decision.
-        """
-        payment = await self.get_by_id(payment_id)
-        if not payment:
-            return None
-        payment.status = status
-        if status == PaymentStatus.CONFIRMED:
-            payment.confirmed_at = func.now()
-            payment.confirmed_by_admin_id = admin_id
-        elif status == PaymentStatus.REJECTED:
-            payment.rejection_reason = rejection_reason
-        await self.session.flush()
-        await self.session.refresh(payment)
-        return payment
 
     async def list_pending_inbox(self, master_id: int = 1) -> Sequence[Payment]:
         """

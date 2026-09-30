@@ -4,7 +4,7 @@ User and Admin database models.
 
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base
@@ -18,10 +18,11 @@ if TYPE_CHECKING:
 class User(Base):
     """
     Represents a client or administrator Telegram profile.
+    telegram_id uses BigInteger (BIGINT) to support all 64-bit Telegram IDs.
     """
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     first_name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -50,10 +51,10 @@ class User(Base):
         "UserMarketingPreference", back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
     appointments: Mapped[List["Appointment"]] = relationship(
-        "Appointment", back_populates="user", cascade="all, delete-orphan"
+        "Appointment", back_populates="user", passive_deletes="all"
     )
     payments: Mapped[List["Payment"]] = relationship(
-        "Payment", back_populates="user", cascade="all, delete-orphan"
+        "Payment", back_populates="user", passive_deletes="all"
     )
 
 
@@ -63,9 +64,9 @@ class Admin(Base):
     """
     __tablename__ = "admins"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
     )
     role: Mapped[str] = mapped_column(String(32), default="ADMIN", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -85,7 +86,7 @@ class UserMarketingPreference(Base):
     __tablename__ = "user_marketing_preferences"
 
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     is_marketing_allowed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

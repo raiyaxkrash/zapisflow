@@ -6,7 +6,6 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import (
-    BigInteger,
     DateTime,
     Enum as SQLEnum,
     ForeignKey,
@@ -42,9 +41,9 @@ class Broadcast(Base):
     """
     __tablename__ = "broadcasts"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     admin_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -52,7 +51,7 @@ class Broadcast(Base):
     button_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     status: Mapped[BroadcastStatus] = mapped_column(
-        SQLEnum(BroadcastStatus, name="broadcast_status_enum"),
+        SQLEnum(BroadcastStatus, name="broadcast_status_enum", native_enum=True),
         default=BroadcastStatus.DRAFT,
         nullable=False,
     )
@@ -79,15 +78,15 @@ class BroadcastRecipient(Base):
     """
     __tablename__ = "broadcast_recipients"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     broadcast_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("broadcasts.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("broadcasts.id", ondelete="CASCADE"), nullable=False, index=True
     )
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     status: Mapped[RecipientStatus] = mapped_column(
-        SQLEnum(RecipientStatus, name="recipient_status_enum"),
+        SQLEnum(RecipientStatus, name="recipient_status_enum", native_enum=True),
         default=RecipientStatus.PENDING,
         nullable=False,
     )

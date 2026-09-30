@@ -5,7 +5,7 @@ Service database model.
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
-from sqlalchemy import BigInteger, Boolean, Enum as SQLEnum, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Enum as SQLEnum, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base, TimestampMixin
@@ -25,8 +25,8 @@ class Service(Base, TimestampMixin):
     """
     __tablename__ = "services"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
@@ -35,7 +35,7 @@ class Service(Base, TimestampMixin):
     buffer_min: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     
     deposit_type: Mapped[DepositType] = mapped_column(
-        SQLEnum(DepositType, name="deposit_type_enum"),
+        SQLEnum(DepositType, name="deposit_type_enum", native_enum=True),
         default=DepositType.FIXED,
         nullable=False,
     )

@@ -4,7 +4,6 @@ Interactive creation flow: text -> optional photo -> optional inline button -> p
 """
 
 import re
-from typing import Optional
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -13,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.filters import IsAdminFilter
 from app.bot.keyboards.admin import AdminMenuCallback
 from app.bot.states.admin import AdminBroadcastSG
+from app.database.models.broadcast import BroadcastStatus
 from app.database.models.user import User
+from app.repositories.user_repository import UserRepository
 from app.services.broadcast_service import BroadcastService
 
 router = Router(name="admin_broadcast")
@@ -216,11 +217,18 @@ async def show_broadcast_preview(
     Create campaign in DRAFT and render preview card.
     """
     data = await state.get_data()
+    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
+    if admin is None:
+        if isinstance(event, Message):
+            await event.answer("Профиль администратора не найден")
+        else:
+            await event.answer("Профиль администратора не найден", show_alert=True)
+        return
     broadcast_svc = BroadcastService(session)
 
     broadcast = await broadcast_svc.create_broadcast(
         text=data["text"],
-        admin_id=db_user.id if db_user else None,
+        admin_id=admin.id,
         photo_file_id=data.get("photo_file_id"),
         button_text=data.get("button_text"),
         button_url=data.get("button_url"),
@@ -295,6 +303,17 @@ async def cb_broadcast_execute(
 
     broadcast_svc = BroadcastService(session)
     completed_bc = await broadcast_svc.execute_broadcast(broadcast_id=broadcast_id, bot=bot)
+
+    if completed_bc.status == BroadcastStatus.SENDING:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=(
+                f"⏳ Рассылка #{completed_bc.id} уже выполняется. "
+                f"Отправлено: {completed_bc.success_count}, "
+                f"ошибок: {completed_bc.fail_count}."
+            ),
+        )
+        return
 
     summary_text = (
         f"🎉 <b>Рассылка #{completed_bc.id} успешно завершена!</b>\n\n"

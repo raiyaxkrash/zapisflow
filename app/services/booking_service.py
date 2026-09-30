@@ -11,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
 from app.database.models.appointment import Appointment, AppointmentStatus
+from app.database.models.audit import AuditLog
 from app.database.models.payment import Payment, PaymentStatus
-from app.database.models.service import DepositType, Service
+from app.database.models.service import DepositType
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.service_repository import ServiceRepository
@@ -25,6 +26,9 @@ from app.services.exceptions import (
     SlotAlreadyBookedError,
     UserNotFoundError,
 )
+from app.services.appointment_state import transition_appointment
+from app.services.slot_engine import SlotEngine
+from app.services.payment_service import PaymentService
 
 
 class BookingService:
@@ -39,6 +43,20 @@ class BookingService:
         self.payment_repo = PaymentRepository(session)
         self.user_repo = UserRepository(session)
         self.settings_repo = SettingsRepository(session)
+
+    @staticmethod
+    def _is_overlap_violation(exc: IntegrityError) -> bool:
+        """Recognize PostgreSQL exclusion constraint or overlap violations."""
+        orig = getattr(exc, "orig", None)
+        pgcode = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+        if pgcode == "23P01":
+            return True
+        exc_str = str(exc).lower()
+        return (
+            "no_overlapping" in exc_str
+            or "exclusion" in exc_str
+            or "23p01" in exc_str
+        )
 
     async def create_hold_booking(
         self,
@@ -69,7 +87,13 @@ class BookingService:
         end_time = start_time + duration
         end_time_with_buffer = end_time + buffer
 
-        # 4. Check for existing active overlaps before insert
+        # Validate slot availability against schedule and existing active bookings
+        if start_time.tzinfo is None or not await SlotEngine(self.session).is_slot_available(
+            service_id, start_time, master_id=master_id
+        ):
+            raise SlotAlreadyBookedError("Выбранное время больше недоступно. Пожалуйста, выберите другой слот.")
+
+        # Check for existing active overlaps before insert
         overlaps = await self.appointment_repo.get_active_overlapping(
             master_id=master_id,
             start_time=start_time,
@@ -121,8 +145,10 @@ class BookingService:
             await self.session.flush()
         except IntegrityError as exc:
             await self.session.rollback()
+            if not self._is_overlap_violation(exc):
+                raise
             raise SlotAlreadyBookedError(
-                "Выбранный интервал только что был забронирован другим клиентом."
+                "Выбранный интервал только что был забронирован другим клиентом. Пожалуйста, выберите другое время."
             ) from exc
 
         # 8. Create associated deposit payment
@@ -131,9 +157,6 @@ class BookingService:
             user_id=user_id,
             amount=deposit_amount,
         )
-        if is_manual:
-            payment.status = PaymentStatus.CONFIRMED
-
         await self.session.flush()
         await self.session.refresh(appointment)
         return appointment, payment
@@ -147,31 +170,22 @@ class BookingService:
         """
         Client-initiated cancellation. Marks deposit retained according to policy.
         """
-        appointment = await self.appointment_repo.get_by_id_with_relations(appointment_id)
+        payment = await self.payment_repo.get_by_appointment_id(appointment_id, for_update=True)
+        appointment = await self.appointment_repo.get_by_id_with_relations(
+            appointment_id, for_update=True
+        )
         if not appointment:
             raise BookingNotFoundError(f"Запись #{appointment_id} не найдена")
 
         if appointment.user_id != user_id:
             raise BookingNotFoundError("У вас нет доступа к этой записи")
 
-        if appointment.status in [
-            AppointmentStatus.CANCELLED_BY_CLIENT,
-            AppointmentStatus.CANCELLED_BY_ADMIN,
-            AppointmentStatus.COMPLETED,
-            AppointmentStatus.EXPIRED,
-        ]:
-            raise InvalidBookingStatusError(
-                f"Невозможно отменить запись в статусе {appointment.status.display_name}"
-            )
-
-        appointment.status = AppointmentStatus.CANCELLED_BY_CLIENT
+        transition_appointment(appointment, AppointmentStatus.CANCELLED_BY_CLIENT)
         appointment.cancel_reason = reason
         appointment.hold_until = None
 
         # Handle deposit: per policy, prepaid amount is retained
-        payment = await self.payment_repo.get_by_appointment_id(appointment_id)
-        if payment and payment.status in [PaymentStatus.CONFIRMED, PaymentStatus.SUBMITTED]:
-            payment.status = PaymentStatus.RETAINED
+        PaymentService.retain_confirmed_deposit(payment)
 
         await self.session.flush()
         return appointment
@@ -184,11 +198,17 @@ class BookingService:
         """
         Admin-initiated cancellation.
         """
-        appointment = await self.appointment_repo.get_by_id_with_relations(appointment_id)
+        payment = await self.payment_repo.get_by_appointment_id(appointment_id, for_update=True)
+        appointment = await self.appointment_repo.get_by_id_with_relations(
+            appointment_id, for_update=True
+        )
         if not appointment:
             raise BookingNotFoundError(f"Запись #{appointment_id} не найдена")
 
-        appointment.status = AppointmentStatus.CANCELLED_BY_ADMIN
+        if payment and payment.status == PaymentStatus.SUBMITTED:
+            raise InvalidBookingStatusError("Сначала проверьте присланный чек")
+
+        transition_appointment(appointment, AppointmentStatus.CANCELLED_BY_ADMIN)
         appointment.cancel_reason = reason
         appointment.hold_until = None
 
@@ -199,14 +219,37 @@ class BookingService:
         self,
         appointment_id: int,
         new_start_time: datetime,
+        admin_id: int,
     ) -> Appointment:
         """
         Reschedule an appointment to a new date/time by master.
         Preserves snapshot durations and recalculates boundaries.
         """
-        appointment = await self.appointment_repo.get_by_id(appointment_id)
+        appointment = await self.appointment_repo.get_by_id_with_relations(appointment_id)
         if not appointment:
             raise BookingNotFoundError(f"Запись #{appointment_id} не найдена")
+        if appointment.status not in {
+            AppointmentStatus.WAITING_PAYMENT,
+            AppointmentStatus.PAYMENT_PROOF_SENT,
+            AppointmentStatus.CONFIRMED,
+        }:
+            raise InvalidBookingStatusError("Перенос этой записи недоступен")
+        appointment_start_utc = appointment.start_time
+        if appointment_start_utc.tzinfo is None:
+            appointment_start_utc = appointment_start_utc.replace(tzinfo=pytz.UTC)
+        if appointment_start_utc <= datetime.now(pytz.UTC):
+            raise InvalidBookingStatusError("Перенос после начала визита недоступен")
+
+        if new_start_time.tzinfo is None or not await SlotEngine(self.session).is_slot_available(
+            service_id=appointment.service_id,
+            slot_start=new_start_time,
+            master_id=appointment.master_id,
+            duration_min=appointment.snapshot_service_duration_min,
+            buffer_min=appointment.snapshot_buffer_duration_min,
+            exclude_appointment_id=appointment.id,
+            allow_inactive=True,
+        ):
+            raise SlotAlreadyBookedError("Новое время не соответствует графику или уже занято.")
 
         duration = timedelta(minutes=appointment.snapshot_service_duration_min)
         buffer = timedelta(minutes=appointment.snapshot_buffer_duration_min)
@@ -223,14 +266,35 @@ class BookingService:
         if overlaps:
             raise SlotAlreadyBookedError("Новое выбранное время уже занято другой записью.")
 
+        previous_interval = {
+            "start_time": appointment.start_time.isoformat(),
+            "end_time": appointment.end_time.isoformat(),
+            "end_time_with_buffer": appointment.end_time_with_buffer.isoformat(),
+        }
         appointment.start_time = new_start_time
         appointment.end_time = new_end_time
         appointment.end_time_with_buffer = new_end_time_with_buffer
+        self.session.add(
+            AuditLog(
+                admin_id=admin_id,
+                action="reschedule_appointment",
+                entity_type="appointment",
+                entity_id=appointment.id,
+                payload_before=previous_interval,
+                payload_after={
+                    "start_time": new_start_time.isoformat(),
+                    "end_time": new_end_time.isoformat(),
+                    "end_time_with_buffer": new_end_time_with_buffer.isoformat(),
+                },
+            )
+        )
 
         try:
             await self.session.flush()
         except IntegrityError as exc:
             await self.session.rollback()
+            if not self._is_overlap_violation(exc):
+                raise
             raise SlotAlreadyBookedError("Конфликт времени при переносе записи.") from exc
 
         return appointment
@@ -239,11 +303,11 @@ class BookingService:
         """
         Mark appointment as completed after client visit.
         """
-        appointment = await self.appointment_repo.get_by_id(appointment_id)
+        appointment = await self.appointment_repo.get_by_id_with_relations(appointment_id)
         if not appointment:
             raise BookingNotFoundError(f"Запись #{appointment_id} не найдена")
 
-        appointment.status = AppointmentStatus.COMPLETED
+        transition_appointment(appointment, AppointmentStatus.COMPLETED)
         await self.session.flush()
         return appointment
 
@@ -251,11 +315,15 @@ class BookingService:
         """
         Mark appointment as No-Show.
         """
-        appointment = await self.appointment_repo.get_by_id(appointment_id)
+        payment = await self.payment_repo.get_by_appointment_id(appointment_id, for_update=True)
+        appointment = await self.appointment_repo.get_by_id_with_relations(
+            appointment_id, for_update=True
+        )
         if not appointment:
             raise BookingNotFoundError(f"Запись #{appointment_id} не найдена")
 
-        appointment.status = AppointmentStatus.NO_SHOW
+        transition_appointment(appointment, AppointmentStatus.NO_SHOW)
+        PaymentService.retain_confirmed_deposit(payment)
         await self.session.flush()
         return appointment
 
@@ -263,10 +331,6 @@ class BookingService:
         """
         Release expired temporary hold.
         """
-        appointment = await self.appointment_repo.get_by_id(appointment_id)
-        if appointment and appointment.status == AppointmentStatus.WAITING_PAYMENT:
-            appointment.status = AppointmentStatus.EXPIRED
-            appointment.hold_until = None
-            await self.session.flush()
-            return appointment
-        return None
+        if not await self.appointment_repo.expire_waiting_hold_if_due(appointment_id):
+            return None
+        return await self.appointment_repo.get_by_id_with_relations(appointment_id)

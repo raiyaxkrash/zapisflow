@@ -36,6 +36,12 @@ class UserRepository(BaseRepository[User]):
         result = await self.session.execute(query)
         return result.scalars().first()
 
+    async def get_by_phone_exact(self, phone: str) -> Optional[User]:
+        """Reuse a manual client only when the phone has one exact owner."""
+        result = await self.session.execute(select(User).where(User.phone == phone).limit(2))
+        matches = result.scalars().all()
+        return matches[0] if len(matches) == 1 else None
+
     async def get_or_create(
         self,
         telegram_id: int,
@@ -125,6 +131,13 @@ class UserRepository(BaseRepository[User]):
         )
         result = await self.session.execute(query)
         return result.scalars().first() is not None
+
+    async def get_active_admin_by_user_id(self, user_id: int) -> Optional[Admin]:
+        """Resolve the admins.id identity used by all administrative foreign keys."""
+        result = await self.session.execute(
+            select(Admin).where(Admin.user_id == user_id, Admin.is_active.is_(True))
+        )
+        return result.scalars().first()
 
     async def search_users(self, search_text: str, limit: int = 20) -> Sequence[User]:
         """

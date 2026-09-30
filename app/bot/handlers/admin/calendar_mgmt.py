@@ -25,6 +25,7 @@ from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.repositories.settings_repository import SettingsRepository
+from app.repositories.user_repository import UserRepository
 from app.utils.formatters import RU_WEEKDAYS_FULL, format_rub
 
 router = Router(name="admin_calendar_mgmt")
@@ -374,11 +375,15 @@ async def msg_admin_calendar_save_blocked_slot(
 
     await state.clear()
     schedule_repo = ScheduleRepository(session)
+    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
+    if admin is None:
+        await message.answer("Профиль администратора не найден")
+        return
     await schedule_repo.create_blocked_interval(
         start_time=start_dt,
         end_time=end_dt,
         reason=reason.strip() if reason else "Заблокировано мастером",
-        created_by_admin_id=db_user.id if db_user else None,
+        created_by_admin_id=admin.id,
         master_id=1,
     )
 

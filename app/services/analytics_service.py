@@ -120,6 +120,7 @@ class AnalyticsService:
             .where(
                 Appointment.master_id == master_id,
                 Payment.status == PaymentStatus.RETAINED,
+                Payment.confirmed_at.is_not(None),
             )
         )
         if start_dt:

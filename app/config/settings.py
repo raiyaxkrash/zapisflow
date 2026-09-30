@@ -2,9 +2,11 @@
 Configuration settings for the application using Pydantic Settings v2.
 """
 
+from pathlib import Path
 from typing import List
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL, make_url
 
 
 class Settings(BaseSettings):
@@ -20,11 +22,15 @@ class Settings(BaseSettings):
     admin_ids: List[int] = Field(default_factory=list, alias="ADMIN_IDS")
 
     # PostgreSQL Database
-    postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
-    postgres_port: int = Field(default=5432, alias="POSTGRES_PORT")
-    postgres_db: str = Field(default="beauty_bot_db", alias="POSTGRES_DB")
-    postgres_user: str = Field(default="postgres", alias="POSTGRES_USER")
-    postgres_password: str = Field(default="postgres_secure_password", alias="POSTGRES_PASSWORD")
+    database_url: str = Field(
+        default="postgresql+asyncpg://postgres:postgres@localhost:5432/beauty_bot",
+        alias="DATABASE_URL",
+    )
+    db_pool_size: int = Field(default=10, alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=20, alias="DB_MAX_OVERFLOW")
+    db_pool_timeout: int = Field(default=30, alias="DB_POOL_TIMEOUT")
+    db_pool_recycle: int = Field(default=1800, alias="DB_POOL_RECYCLE")
+    db_pool_pre_ping: bool = Field(default=True, alias="DB_POOL_PRE_PING")
 
     # Redis
     redis_host: str = Field(default="localhost", alias="REDIS_HOST")
@@ -41,43 +47,27 @@ class Settings(BaseSettings):
     grid_step_minutes: int = Field(default=30, alias="GRID_STEP_MINUTES")
 
     # Requisites
-    default_bank_name: str = Field(default="Сбербанк", alias="DEFAULT_BANK_NAME")
-    default_card_number: str = Field(default="2202 2000 0000 0000", alias="DEFAULT_CARD_NUMBER")
+    bank_name: str = Field(default="Сбербанк", alias="BANK_NAME")
+    bank_card_number: str = Field(default="2202 2000 0000 0000", alias="BANK_CARD_NUMBER")
     default_phone_requisites: str = Field(default="+7 (999) 000-00-00", alias="DEFAULT_PHONE_REQUISITES")
-    default_recipient_name: str = Field(default="Иван И.", alias="DEFAULT_RECIPIENT_NAME")
-
-    @field_validator("admin_ids", mode="before")
-    @classmethod
-    def parse_admin_ids(cls, v):
-        if isinstance(v, str):
-            if not v.strip():
-                return []
-            return [int(x.strip()) for x in v.split(",") if x.strip().isdigit()]
-        elif isinstance(v, int):
-            return [v]
-        elif isinstance(v, list):
-            return [int(x) for x in v]
-        return []
-
-    @property
-    def database_url(self) -> str:
-        """
-        Constructs asyncpg database connection URL.
-        """
-        return (
-            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@"
-            f"{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
+    bank_recipient_name: str = Field(default="Иван И.", alias="BANK_RECIPIENT_NAME")
 
     @property
     def sync_database_url(self) -> str:
-        """
-        Constructs psycopg/sync database connection URL for Alembic migrations if needed.
-        """
-        return (
-            f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}@"
-            f"{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
+        """Synchronous URL for migrations/tools if needed."""
+        url = self.database_url
+        if "+asyncpg" in url:
+            return url.replace("+asyncpg", "")
+        return url
+
+    @property
+    def safe_database_url(self) -> str:
+        """Database URL with obscured password for logs."""
+        try:
+            parsed = make_url(self.database_url)
+            return parsed.render_as_string(hide_password=True)
+        except Exception:
+            return "postgresql://***@***"
 
     @property
     def redis_url(self) -> str:

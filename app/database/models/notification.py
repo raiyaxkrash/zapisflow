@@ -6,11 +6,10 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 from sqlalchemy import (
-    BigInteger,
     DateTime,
+    Integer,
     Enum as SQLEnum,
     ForeignKey,
-    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,12 +38,12 @@ class Notification(Base):
     """
     __tablename__ = "notifications"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     appointment_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False, index=True
     )
     type: Mapped[NotificationType] = mapped_column(
-        SQLEnum(NotificationType, name="notification_type_enum"),
+        SQLEnum(NotificationType, name="notification_type_enum", native_enum=True),
         default=NotificationType.REMINDER_24H,
         nullable=False,
     )
@@ -52,7 +51,7 @@ class Notification(Base):
         DateTime(timezone=True), nullable=False, index=True
     )
     status: Mapped[NotificationStatus] = mapped_column(
-        SQLEnum(NotificationStatus, name="notification_status_enum"),
+        SQLEnum(NotificationStatus, name="notification_status_enum", native_enum=True),
         default=NotificationStatus.PENDING,
         nullable=False,
         index=True,

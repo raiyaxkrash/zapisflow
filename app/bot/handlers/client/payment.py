@@ -2,6 +2,9 @@
 Payment confirmation, receipt uploading and cancellation handlers.
 """
 
+import logging
+from html import escape
+
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -23,6 +26,7 @@ from app.services.payment_service import PaymentService
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="client_payment")
+logger = logging.getLogger(__name__)
 
 
 @router.callback_query(BookingActionCallback.filter(F.action == "i_paid"))
@@ -91,7 +95,7 @@ async def msg_receive_proof(
     user_comment = message.caption or None
 
     payment_service = PaymentService(session)
-    appointment, payment, proof = await payment_service.submit_payment_proof(
+    appointment, payment, _proof = await payment_service.submit_payment_proof(
         appointment_id=appointment_id,
         user_id=db_user.id,
         telegram_file_id=telegram_file_id,
@@ -100,18 +104,7 @@ async def msg_receive_proof(
         comment=user_comment,
     )
 
-    await state.clear()
-
-    # Inform client
-    await message.answer(
-        "Чек успешно получен! 🌸\n\n"
-        "Мастер уже проверяет поступление перевода. "
-        "Обычно это занимает от 5 до 30 минут.\n\n"
-        "Как только оплата будет подтверждена, вам придёт уведомление ✅",
-        reply_markup=get_main_menu_keyboard(),
-    )
-
-    # Notify admins about new payment submission
+    # Prepare notification data while the transaction and loaded objects are available.
     settings_repo = SettingsRepository(session)
     tz_str = await settings_repo.get_value("timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
@@ -120,16 +113,16 @@ async def msg_receive_proof(
 
     admin_caption = (
         f"🔥 <b>НОВАЯ ОПЛАТА ПО ЗАПИСИ #{appointment.id}</b>\n\n"
-        f"👤 <b>Клиент:</b> {db_user.first_name} {db_user.last_name or ''}\n"
-        f"📱 <b>Телефон:</b> {db_user.phone or 'Не указан'}\n"
-        f"💬 <b>Username:</b> @{db_user.username or 'отсутствует'}\n"
-        f"🌸 <b>Услуга:</b> {appointment.snapshot_service_title}\n"
+        f"👤 <b>Клиент:</b> {escape(db_user.first_name)} {escape(db_user.last_name or '')}\n"
+        f"📱 <b>Телефон:</b> {escape(db_user.phone or 'Не указан')}\n"
+        f"💬 <b>Username:</b> @{escape(db_user.username or 'отсутствует')}\n"
+        f"🌸 <b>Услуга:</b> {escape(appointment.snapshot_service_title)}\n"
         f"🗓 <b>Дата и время:</b> {dt_str}\n"
         f"💰 <b>Стоимость:</b> {price_str}\n"
         f"💳 <b>Предоплата:</b> {dep_str}\n"
     )
     if user_comment:
-        admin_caption += f"💬 <b>Комментарий:</b> {user_comment}\n"
+        admin_caption += f"💬 <b>Комментарий:</b> {escape(user_comment)}\n"
 
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -154,6 +147,26 @@ async def msg_receive_proof(
         ]
     )
 
+    # The middleware commits at the end of the update. Commit here as well so a
+    # Telegram reply can never claim that an uncommitted proof was accepted.
+    await session.commit()
+
+    try:
+        await state.clear()
+    except Exception:
+        logger.exception("Could not clear upload state after committing proof %s", payment.id)
+
+    try:
+        await message.answer(
+            "Чек успешно получен! 🌸\n\n"
+            "Мастер уже проверяет поступление перевода. "
+            "Обычно это занимает от 5 до 30 минут.\n\n"
+            "Как только оплата будет подтверждена, вам придёт уведомление ✅",
+            reply_markup=get_main_menu_keyboard(),
+        )
+    except Exception:
+        logger.exception("Could not acknowledge committed proof %s to client", payment.id)
+
     for admin_tg_id in settings.admin_ids:
         try:
             if media_type == MediaType.PHOTO:
@@ -171,7 +184,11 @@ async def msg_receive_proof(
                     reply_markup=admin_keyboard,
                 )
         except Exception:
-            pass  # Admin chat may be inactive or blocked
+            logger.exception(
+                "Could not notify admin %s about committed proof %s",
+                admin_tg_id,
+                payment.id,
+            )
 
 
 @router.callback_query(BookingActionCallback.filter(F.action == "cancel_booking"))

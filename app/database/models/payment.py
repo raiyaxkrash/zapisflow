@@ -7,8 +7,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import (
-    BigInteger,
     DateTime,
+    Integer,
     Enum as SQLEnum,
     ForeignKey,
     Numeric,
@@ -44,16 +44,16 @@ class Payment(Base):
     """
     __tablename__ = "payments"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     appointment_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False, index=True
     )
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+        Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[PaymentStatus] = mapped_column(
-        SQLEnum(PaymentStatus, name="payment_status_enum"),
+        SQLEnum(PaymentStatus, name="payment_status_enum", native_enum=True),
         default=PaymentStatus.PENDING,
         nullable=False,
         index=True,
@@ -63,7 +63,7 @@ class Payment(Base):
     )
     confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_by_admin_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
     )
     rejection_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
@@ -82,14 +82,14 @@ class PaymentProof(Base):
     """
     __tablename__ = "payment_proofs"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     payment_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("payments.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("payments.id", ondelete="CASCADE"), nullable=False, index=True
     )
     telegram_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
     telegram_file_unique_id: Mapped[str] = mapped_column(String(255), nullable=False)
     media_type: Mapped[MediaType] = mapped_column(
-        SQLEnum(MediaType, name="media_type_enum"),
+        SQLEnum(MediaType, name="media_type_enum", native_enum=True),
         default=MediaType.PHOTO,
         nullable=False,
     )

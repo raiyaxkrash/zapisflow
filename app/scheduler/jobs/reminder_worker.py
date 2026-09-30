@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import logging
 import pytz
 from aiogram import Bot
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -29,10 +29,15 @@ async def send_visit_reminders(
     bot: Bot, session_maker: async_sessionmaker = async_session_maker
 ) -> int:
     """
-    Check confirmed upcoming appointments and dispatch 24h and 3h reminder messages.
+    Claim due reminders, then send them outside database write transactions.
+
+    A PENDING row is committed before an external send so a second worker cannot
+    send the same reminder. An interrupted worker leaves a visible PENDING row
+    for manual review; automatic retry could duplicate an already sent message.
     """
     sent_count = 0
     now_utc = datetime.now(pytz.UTC)
+    claims: list[tuple[int, int, int, str]] = []
 
     async with session_maker() as session:
         try:
@@ -65,17 +70,13 @@ async def send_visit_reminders(
                 if not user or not user.telegram_id or user.telegram_id <= 0 or user.is_bot_blocked:
                     continue
 
-                sent_types = {
-                    n.type
-                    for n in app.notifications
-                    if n.status == NotificationStatus.SENT
-                }
+                claimed_types = {n.type for n in app.notifications}
 
                 time_until = app.start_time - now_utc
 
                 # 1. Check 24-Hour Reminder
                 if timedelta(hours=3) < time_until <= timedelta(hours=24):
-                    if NotificationType.REMINDER_24H not in sent_types:
+                    if NotificationType.REMINDER_24H not in claimed_types:
                         dt_str = format_datetime_ru(app.start_time, tz_name=tz_str)
                         rem_amount = app.snapshot_service_price - app.snapshot_deposit_amount
                         rem_str = format_rub(rem_amount)
@@ -88,24 +89,19 @@ async def send_visit_reminders(
                             f"💰 <b>К доплате на месте:</b> {rem_str}\n\n"
                             "Если ваши планы изменились, пожалуйста, предупредите мастера заранее ❤️"
                         )
-                        try:
-                            await bot.send_message(chat_id=user.telegram_id, text=msg_text)
-                            notif = Notification(
-                                appointment_id=app.id,
-                                type=NotificationType.REMINDER_24H,
-                                scheduled_at=now_utc,
-                                status=NotificationStatus.SENT,
-                                sent_at=now_utc,
-                            )
-                            session.add(notif)
-                            sent_count += 1
-                            logger.info(f"Sent 24h reminder for appointment #{app.id} to {user.telegram_id}")
-                        except Exception as e:
-                            logger.warning(f"Failed to send 24h reminder to {user.telegram_id}: {e}")
+                        notif = Notification(
+                            appointment_id=app.id,
+                            type=NotificationType.REMINDER_24H,
+                            scheduled_at=now_utc,
+                            status=NotificationStatus.PENDING,
+                        )
+                        session.add(notif)
+                        await session.flush()
+                        claims.append((notif.id, app.id, user.telegram_id, msg_text))
 
                 # 2. Check 3-Hour Reminder
                 elif timedelta(minutes=0) < time_until <= timedelta(hours=3):
-                    if NotificationType.REMINDER_3H not in sent_types:
+                    if NotificationType.REMINDER_3H not in claimed_types:
                         time_str = format_time_ru(app.start_time, tz_name=tz_str)
                         msg_text = (
                             f"⏰ <b>Скоро ваша запись!</b>\n\n"
@@ -114,24 +110,69 @@ async def send_visit_reminders(
                             f"📍 <b>Адрес:</b> {studio_address}\n\n"
                             "Пожалуйста, приходите без опозданий. До скорой встречи! 🌸"
                         )
-                        try:
-                            await bot.send_message(chat_id=user.telegram_id, text=msg_text)
-                            notif = Notification(
-                                appointment_id=app.id,
-                                type=NotificationType.REMINDER_3H,
-                                scheduled_at=now_utc,
-                                status=NotificationStatus.SENT,
-                                sent_at=now_utc,
-                            )
-                            session.add(notif)
-                            sent_count += 1
-                            logger.info(f"Sent 3h reminder for appointment #{app.id} to {user.telegram_id}")
-                        except Exception as e:
-                            logger.warning(f"Failed to send 3h reminder to {user.telegram_id}: {e}")
+                        notif = Notification(
+                            appointment_id=app.id,
+                            type=NotificationType.REMINDER_3H,
+                            scheduled_at=now_utc,
+                            status=NotificationStatus.PENDING,
+                        )
+                        session.add(notif)
+                        await session.flush()
+                        claims.append((notif.id, app.id, user.telegram_id, msg_text))
 
             await session.commit()
         except Exception as exc:
             await session.rollback()
-            logger.error(f"Error during send_visit_reminders job: {exc}", exc_info=True)
+            logger.error("Error claiming visit reminders: %s", exc, exc_info=True)
+            return 0
+
+        for notification_id, appointment_id, telegram_id, msg_text in claims:
+            try:
+                async with session.begin():
+                    status = await session.scalar(
+                        select(Appointment.status).where(Appointment.id == appointment_id)
+                    )
+                    if status != AppointmentStatus.CONFIRMED:
+                        notification = await session.get(Notification, notification_id)
+                        if notification is not None:
+                            notification.status = NotificationStatus.CANCELLED
+                if status != AppointmentStatus.CONFIRMED:
+                    continue
+
+                delivered = False
+                try:
+                    await bot.send_message(chat_id=telegram_id, text=msg_text)
+                    delivered = True
+                except Exception:
+                    logger.warning(
+                        "Failed to send reminder #%s to %s",
+                        notification_id,
+                        telegram_id,
+                        exc_info=True,
+                    )
+
+                async with session.begin():
+                    notification = await session.get(Notification, notification_id)
+                    if notification is not None:
+                        notification.status = (
+                            NotificationStatus.SENT if delivered else NotificationStatus.FAILED
+                        )
+                        if delivered:
+                            notification.sent_at = datetime.now(pytz.UTC)
+                if delivered:
+                    sent_count += 1
+                    logger.info(
+                        "Sent reminder #%s for appointment #%s to %s",
+                        notification_id,
+                        appointment_id,
+                        telegram_id,
+                    )
+            except Exception:
+                await session.rollback()
+                logger.error(
+                    "Failed to record reminder #%s outcome",
+                    notification_id,
+                    exc_info=True,
+                )
 
     return sent_count

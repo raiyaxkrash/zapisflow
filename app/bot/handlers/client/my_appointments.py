@@ -85,10 +85,10 @@ async def cb_booking_detail(
 
     # If appointment is still waiting for payment, show requisites / pay button
     if appointment.status == AppointmentStatus.WAITING_PAYMENT:
-        bank_name = await settings_repo.get_value("default_bank_name", settings.default_bank_name)
-        card_number = await settings_repo.get_value("default_card_number", settings.default_card_number)
+        bank_name = await settings_repo.get_value("bank_name", settings.bank_name)
+        card_number = await settings_repo.get_value("bank_card_number", settings.bank_card_number)
         phone_req = await settings_repo.get_value("default_phone_requisites", settings.default_phone_requisites)
-        recipient = await settings_repo.get_value("default_recipient_name", settings.default_recipient_name)
+        recipient = await settings_repo.get_value("bank_recipient_name", settings.bank_recipient_name)
 
         card_text += (
             f"\n\n<b>Реквизиты для предоплаты:</b>\n"
@@ -127,7 +127,8 @@ async def cb_client_cancel(
         )
         text = (
             "Ваша запись отменена ❌\n\n"
-            "Напоминаем, что согласно правилам бронирования, внесённая сумма предоплаты не возвращается."
+            "Подтверждённая предоплата удерживается согласно правилам бронирования. "
+            "Если ваш чек ещё проверяется, мастер отдельно проверит поступление перевода."
         )
     except Exception as e:
         text = f"Не удалось отменить запись: {e}"

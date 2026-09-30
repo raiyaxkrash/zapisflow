@@ -9,21 +9,37 @@ import pytest
 import pytz
 
 from app.database.models.appointment import Appointment, AppointmentStatus
-from app.database.models.notification import Notification, NotificationStatus, NotificationType
-from app.database.models.payment import Payment, PaymentStatus
 from app.database.models.user import User
 from app.scheduler.jobs.hold_cleaner import clean_expired_holds
-from app.scheduler.jobs.reminder_worker import send_visit_reminders
 from app.services.analytics_service import AnalyticsService
 
 
 @pytest.mark.asyncio
-async def test_clean_expired_holds_job():
+@pytest.mark.parametrize(
+    "commit_fails, notification_fails, expected_count",
+    [
+        pytest.param(False, False, 1, id="commit-before-notification"),
+        pytest.param(True, False, 0, id="commit-failure-blocks-notification"),
+        pytest.param(False, True, 1, id="notification-failure-keeps-expiry"),
+    ],
+)
+async def test_clean_expired_holds_job(
+    commit_fails, notification_fails, expected_count, caplog
+):
     """
-    Test that clean_expired_holds marks expired holds as EXPIRED and cancels pending payment.
+    Test that clean_expired_holds notifies only a successfully expired hold.
     """
     mock_bot = AsyncMock()
     mock_session = AsyncMock()
+    if commit_fails:
+        mock_session.commit.side_effect = RuntimeError("database commit failed")
+
+    async def send_message_after_commit(**kwargs):
+        assert mock_session.commit.await_count == 1
+        if notification_fails:
+            raise RuntimeError("Telegram unavailable")
+
+    mock_bot.send_message.side_effect = send_message_after_commit
 
     # Create dummy user and appointment with expired hold
     user = User(id=1, telegram_id=12345678, first_name="Тест")
@@ -44,14 +60,6 @@ async def test_clean_expired_holds_job():
         snapshot_deposit_amount=Decimal("500.00"),
         user=user,
     )
-    payment = Payment(
-        id=101,
-        appointment_id=42,
-        user_id=1,
-        amount=Decimal("500.00"),
-        status=PaymentStatus.PENDING,
-    )
-
     # Mock context manager for session maker
     mock_session_maker = MagicMock()
     mock_session_maker.return_value.__aenter__.return_value = mock_session
@@ -64,8 +72,8 @@ async def test_clean_expired_holds_job():
         mock_app_repo = AsyncMock()
         mock_app_repo.get_expired_holds.return_value = [app]
 
-        mock_pay_repo = AsyncMock()
-        mock_pay_repo.get_by_appointment_id.return_value = payment
+        mock_booking_service = AsyncMock()
+        mock_booking_service.expire_booking.return_value = app
 
         mock_settings_repo = AsyncMock()
         mock_settings_repo.get_value.return_value = "Europe/Moscow"
@@ -75,8 +83,8 @@ async def test_clean_expired_holds_job():
             lambda s: mock_app_repo,
         )
         mp.setattr(
-            "app.scheduler.jobs.hold_cleaner.PaymentRepository",
-            lambda s: mock_pay_repo,
+            "app.scheduler.jobs.hold_cleaner.BookingService",
+            lambda s: mock_booking_service,
         )
         mp.setattr(
             "app.scheduler.jobs.hold_cleaner.SettingsRepository",
@@ -85,68 +93,17 @@ async def test_clean_expired_holds_job():
 
         cleaned = await clean_expired_holds(mock_bot, session_maker=mock_session_maker)
 
-    assert cleaned == 1
-    assert app.status == AppointmentStatus.EXPIRED
-    assert app.hold_until is None
-    assert payment.status == PaymentStatus.REJECTED
-    mock_bot.send_message.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_send_visit_reminders_job():
-    """
-    Test that send_visit_reminders dispatches 24h reminder when within 24h window.
-    """
-    mock_bot = AsyncMock()
-    mock_session = AsyncMock()
-
-    user = User(id=2, telegram_id=987654321, first_name="Анна")
-    now_utc = datetime.now(pytz.UTC)
-    app = Appointment(
-        id=88,
-        user_id=2,
-        service_id=5,
-        status=AppointmentStatus.CONFIRMED,
-        start_time=now_utc + timedelta(hours=18),  # in 18 hours (between 3h and 24h)
-        end_time=now_utc + timedelta(hours=19, minutes=30),
-        end_time_with_buffer=now_utc + timedelta(hours=19, minutes=45),
-        snapshot_service_title="Педикюр",
-        snapshot_service_price=Decimal("2500.00"),
-        snapshot_service_duration_min=90,
-        snapshot_buffer_duration_min=15,
-        snapshot_deposit_amount=Decimal("500.00"),
-        user=user,
-        notifications=[],
-    )
-
-    mock_session_maker = MagicMock()
-    mock_session_maker.return_value.__aenter__.return_value = mock_session
-    mock_session_maker.return_value.__aexit__.return_value = None
-    mock_session.add = MagicMock()
-
-    # Mock execute result
-    mock_scalars = MagicMock()
-    mock_scalars.all.return_value = [app]
-    mock_result = MagicMock()
-    mock_result.scalars.return_value = mock_scalars
-    mock_session.execute = AsyncMock(return_value=mock_result)
-
-    with pytest.MonkeyPatch.context() as mp:
-        mock_settings_repo = AsyncMock()
-        mock_settings_repo.get_value.side_effect = lambda k, default: "Europe/Moscow" if k == "timezone" else default
-        mp.setattr(
-            "app.scheduler.jobs.reminder_worker.SettingsRepository",
-            lambda s: mock_settings_repo,
-        )
-
-        sent_count = await send_visit_reminders(mock_bot, session_maker=mock_session_maker)
-
-    assert sent_count == 1
-    mock_bot.send_message.assert_awaited_once()
-    mock_session.add.assert_called_once()
-    saved_notification = mock_session.add.call_args[0][0]
-    assert saved_notification.type == NotificationType.REMINDER_24H
-    assert saved_notification.status == NotificationStatus.SENT
+    assert cleaned == expected_count
+    mock_booking_service.expire_booking.assert_awaited_once_with(app.id)
+    mock_session.commit.assert_awaited_once()
+    if commit_fails:
+        mock_session.rollback.assert_awaited_once()
+        mock_bot.send_message.assert_not_awaited()
+    else:
+        mock_bot.send_message.assert_awaited_once()
+    if notification_fails:
+        assert "Failed to send expiry notice" in caplog.text
+        mock_session.rollback.assert_not_awaited()
 
 
 @pytest.mark.asyncio

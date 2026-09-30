@@ -34,6 +34,8 @@ class UserContextMiddleware(BaseMiddleware):
             )
             data["db_user"] = db_user
             data["is_admin"] = (tg_user.id in settings.admin_ids) or await user_repo.is_admin(tg_user.id)
+            # Commit user registration independently of the handler's business transaction
+            await session.commit()
         else:
             data["db_user"] = None
             data["is_admin"] = False

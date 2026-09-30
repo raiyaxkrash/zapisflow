@@ -7,7 +7,6 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import (
-    BigInteger,
     Boolean,
     DateTime,
     Enum as SQLEnum,
@@ -56,20 +55,21 @@ class AppointmentStatus(str, Enum):
 class Appointment(Base, TimestampMixin):
     """
     Client booking with immutable service snapshot and hold timestamp.
+    Timestamps are stored as TIMESTAMPTZ (DateTime(timezone=True)).
     """
     __tablename__ = "appointments"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+        Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     service_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("services.id", ondelete="RESTRICT"), nullable=False, index=True
+        Integer, ForeignKey("services.id", ondelete="RESTRICT"), nullable=False, index=True
     )
 
     status: Mapped[AppointmentStatus] = mapped_column(
-        SQLEnum(AppointmentStatus, name="appointment_status_enum"),
+        SQLEnum(AppointmentStatus, name="appointment_status_enum", native_enum=True),
         default=AppointmentStatus.WAITING_PAYMENT,
         nullable=False,
         index=True,

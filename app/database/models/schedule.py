@@ -5,7 +5,6 @@ Schedule templates, exceptions and blocked intervals models.
 from datetime import date as dt_date, datetime, time as dt_time
 from typing import List, Optional
 from sqlalchemy import (
-    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -31,8 +30,8 @@ class ScheduleTemplate(Base):
         UniqueConstraint("master_id", "day_of_week", name="uq_master_weekday"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
     day_of_week: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     is_day_off: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     work_start: Mapped[dt_time] = mapped_column(Time, default=dt_time(10, 0), nullable=False)
@@ -50,9 +49,9 @@ class ScheduleTemplateBreak(Base):
     """
     __tablename__ = "schedule_template_breaks"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     template_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("schedule_templates.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey("schedule_templates.id", ondelete="CASCADE"), nullable=False
     )
     break_start: Mapped[dt_time] = mapped_column(Time, nullable=False)
     break_end: Mapped[dt_time] = mapped_column(Time, nullable=False)
@@ -70,8 +69,8 @@ class ScheduleException(Base):
         UniqueConstraint("master_id", "date", name="uq_master_date"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
     date: Mapped[dt_date] = mapped_column(Date, nullable=False, index=True)
     is_day_off: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     work_start: Mapped[Optional[dt_time]] = mapped_column(Time, nullable=True)
@@ -90,9 +89,9 @@ class ScheduleExceptionBreak(Base):
     """
     __tablename__ = "schedule_exception_breaks"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     exception_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("schedule_exceptions.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey("schedule_exceptions.id", ondelete="CASCADE"), nullable=False
     )
     break_start: Mapped[dt_time] = mapped_column(Time, nullable=False)
     break_end: Mapped[dt_time] = mapped_column(Time, nullable=False)
@@ -107,13 +106,13 @@ class BlockedInterval(Base):
     """
     __tablename__ = "blocked_intervals"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    master_id: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_by_admin_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

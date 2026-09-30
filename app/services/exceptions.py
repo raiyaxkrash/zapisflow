@@ -66,3 +66,9 @@ class PaymentNotFoundError(AppException):
     Raised when a payment record is not found.
     """
     pass
+
+
+class InvalidPaymentStatusError(AppException):
+    """Raised when a payment decision violates the allowed state machine."""
+
+    pass

@@ -5,14 +5,14 @@ Implements safe rate-limiting, opt-out filtering, error handling and status trac
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiolimiter import AsyncLimiter
-from sqlalchemy import func, select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.database.models.broadcast import (
     Broadcast,
@@ -44,7 +44,7 @@ class BroadcastService:
                 User.telegram_id > 0,
                 User.is_bot_blocked.is_(False),
                 (UserMarketingPreference.is_marketing_allowed.is_(True))
-                | (UserMarketingPreference.id.is_(None)),
+                | (UserMarketingPreference.user_id.is_(None)),
             )
         )
         res = await self.session.execute(query)
@@ -82,19 +82,31 @@ class BroadcastService:
         self, broadcast_id: int, bot: Bot
     ) -> Broadcast:
         """
-        Send broadcast to all recipients with 25 msg/sec rate-limiting.
+        Send a campaign without holding database locks during Telegram calls.
+
+        A campaign can start only from DRAFT. A repeated callback sees SENDING
+        or COMPLETED and cannot dispatch the same campaign again. Each outcome
+        is committed separately; a process interruption leaves SENDING for
+        operator review instead of automatically risking duplicate delivery.
         """
         query = select(Broadcast).where(Broadcast.id == broadcast_id)
         res = await self.session.execute(query)
         broadcast = res.scalars().first()
         if not broadcast:
             raise ValueError(f"Broadcast #{broadcast_id} not found")
-
-        broadcast.status = BroadcastStatus.SENDING
-        broadcast.started_at = func.now()
-        await self.session.flush()
+        if broadcast.status != BroadcastStatus.DRAFT:
+            await self.session.commit()
+            return broadcast
 
         users = await self.get_eligible_users()
+        recipient_ids = [(user.id, user.telegram_id) for user in users]
+        photo_file_id = broadcast.photo_file_id
+        message_text = broadcast.text
+        broadcast.status = BroadcastStatus.SENDING
+        broadcast.started_at = datetime.now(timezone.utc)
+        broadcast.total_count = len(recipient_ids)
+        await self.session.commit()
+
         limiter = AsyncLimiter(max_rate=25, time_period=1.0)
 
         # Inline button if configured
@@ -111,100 +123,80 @@ class BroadcastService:
                 ]
             )
 
-        success = 0
-        failed = 0
+        success = broadcast.success_count
+        failed = broadcast.fail_count
 
-        for user in users:
+        for user_id, telegram_id in recipient_ids:
             async with limiter:
+                outcome = RecipientStatus.FAILED
+                error_message = None
+                blocked = False
                 try:
-                    if broadcast.photo_file_id:
+                    if photo_file_id:
                         await bot.send_photo(
-                            chat_id=user.telegram_id,
-                            photo=broadcast.photo_file_id,
-                            caption=broadcast.text,
+                            chat_id=telegram_id,
+                            photo=photo_file_id,
+                            caption=message_text,
                             reply_markup=reply_markup,
                         )
                     else:
                         await bot.send_message(
-                            chat_id=user.telegram_id,
-                            text=broadcast.text,
+                            chat_id=telegram_id,
+                            text=message_text,
                             reply_markup=reply_markup,
                         )
-
-                    rec = BroadcastRecipient(
-                        broadcast_id=broadcast.id,
-                        user_id=user.id,
-                        status=RecipientStatus.SENT,
-                        sent_at=func.now(),
-                    )
-                    self.session.add(rec)
-                    success += 1
+                    outcome = RecipientStatus.SENT
                 except TelegramForbiddenError:
-                    # User blocked the bot
-                    user.is_bot_blocked = True
-                    rec = BroadcastRecipient(
-                        broadcast_id=broadcast.id,
-                        user_id=user.id,
-                        status=RecipientStatus.FAILED,
-                        error_message="Бот заблокирован пользователем",
-                    )
-                    self.session.add(rec)
-                    failed += 1
+                    blocked = True
+                    error_message = "Бот заблокирован пользователем"
                 except TelegramRetryAfter as e:
                     await asyncio.sleep(e.retry_after + 1)
                     try:
-                        if broadcast.photo_file_id:
+                        if photo_file_id:
                             await bot.send_photo(
-                                chat_id=user.telegram_id,
-                                photo=broadcast.photo_file_id,
-                                caption=broadcast.text,
+                                chat_id=telegram_id,
+                                photo=photo_file_id,
+                                caption=message_text,
                                 reply_markup=reply_markup,
                             )
                         else:
                             await bot.send_message(
-                                chat_id=user.telegram_id,
-                                text=broadcast.text,
+                                chat_id=telegram_id,
+                                text=message_text,
                                 reply_markup=reply_markup,
                             )
-                        rec = BroadcastRecipient(
-                            broadcast_id=broadcast.id,
-                            user_id=user.id,
-                            status=RecipientStatus.SENT,
-                            sent_at=func.now(),
-                        )
-                        self.session.add(rec)
-                        success += 1
+                        outcome = RecipientStatus.SENT
                     except Exception as err:
-                        rec = BroadcastRecipient(
-                            broadcast_id=broadcast.id,
-                            user_id=user.id,
-                            status=RecipientStatus.FAILED,
-                            error_message=str(err)[:250],
-                        )
-                        self.session.add(rec)
-                        failed += 1
+                        error_message = str(err)[:250]
                 except Exception as exc:
-                    rec = BroadcastRecipient(
-                        broadcast_id=broadcast.id,
-                        user_id=user.id,
-                        status=RecipientStatus.FAILED,
-                        error_message=str(exc)[:250],
-                    )
-                    self.session.add(rec)
-                    failed += 1
+                    error_message = str(exc)[:250]
 
-                # Flush periodically
-                if (success + failed) % 30 == 0:
+                if outcome == RecipientStatus.SENT:
+                    success += 1
+                else:
+                    failed += 1
+                async with self.session.begin():
+                    if blocked:
+                        user = await self.session.get(User, user_id)
+                        if user is not None:
+                            user.is_bot_blocked = True
+                    self.session.add(
+                        BroadcastRecipient(
+                            broadcast_id=broadcast.id,
+                            user_id=user_id,
+                            status=outcome,
+                            error_message=error_message,
+                            sent_at=datetime.now(timezone.utc)
+                            if outcome == RecipientStatus.SENT
+                            else None,
+                        )
+                    )
                     broadcast.success_count = success
                     broadcast.fail_count = failed
-                    await self.session.flush()
 
-        broadcast.status = BroadcastStatus.COMPLETED
-        broadcast.success_count = success
-        broadcast.fail_count = failed
-        broadcast.finished_at = func.now()
-        await self.session.flush()
-        await self.session.refresh(broadcast)
+        async with self.session.begin():
+            broadcast.status = BroadcastStatus.COMPLETED
+            broadcast.finished_at = datetime.now(timezone.utc)
 
         logger.info(
             f"Broadcast #{broadcast.id} completed: {success} sent, {failed} failed."
