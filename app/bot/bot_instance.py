@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
 from redis.asyncio import Redis
 
+from app.bot.handlers.admin import admin_router
 from app.bot.handlers.client import client_router
 from app.bot.middlewares import DbSessionMiddleware, UserContextMiddleware
 from app.config.settings import settings
@@ -50,6 +51,7 @@ async def create_dispatcher() -> Dispatcher:
     dp.update.middleware(UserContextMiddleware())
 
     # 3. Include routers
+    dp.include_router(admin_router)
     dp.include_router(client_router)
 
     return dp

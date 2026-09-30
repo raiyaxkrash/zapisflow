@@ -48,6 +48,7 @@ RU_WEEKDAYS = [
     "Суббота",
     "Воскресенье",
 ]
+RU_WEEKDAYS_FULL = RU_WEEKDAYS
 
 RU_WEEKDAYS_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -89,6 +90,15 @@ def format_datetime_ru(dt: datetime, tz_name: str = "Europe/Moscow") -> str:
     local_dt = dt.astimezone(tz)
     weekday = RU_WEEKDAYS[local_dt.weekday()]
     return f"{local_dt.day} {RU_MONTHS[local_dt.month]} {local_dt.year} ({weekday}) в {local_dt.strftime('%H:%M')}"
+
+
+def format_time_ru(dt: datetime, tz_name: str = "Europe/Moscow") -> str:
+    """
+    Format time portion as '14:30' localized to timezone.
+    """
+    tz = pytz.timezone(tz_name)
+    local_dt = dt.astimezone(tz)
+    return local_dt.strftime("%H:%M")
 
 
 def render_appointment_card(appointment, tz_name: str = "Europe/Moscow") -> str:
