@@ -10,10 +10,15 @@ from app.bot.bot_instance import create_bot, create_dispatcher
 from app.config.settings import settings
 from app.database.session import close_db, init_db
 
+from app.core.security import SensitiveDataFilter
+
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.addFilter(SensitiveDataFilter())
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[_stdout_handler],
 )
 logger = logging.getLogger("app.main")
 

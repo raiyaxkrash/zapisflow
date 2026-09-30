@@ -10,3 +10,4 @@ aiolimiter==1.1.0
 python-dateutil==2.9.0.post0
 pytz==2024.2
 structlog==24.4.0
+cryptography>=42.0.0

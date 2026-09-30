@@ -78,3 +78,57 @@ class AccessDeniedError(AppException):
     """Raised when an operation is forbidden due to insufficient tenant administrative privileges."""
 
     pass
+
+
+class TokenCryptoError(AppException):
+    """Base exception for token cryptographic operations."""
+
+    pass
+
+
+class TokenCryptoConfigError(TokenCryptoError):
+    """Raised when encryption configuration or key length/format is invalid."""
+
+    pass
+
+
+class TokenDecryptionError(TokenCryptoError):
+    """Raised when token decryption fails due to corrupted ciphertext, bad key, or tampered AAD."""
+
+    pass
+
+
+class BotRegistryError(AppException):
+    """Base exception for BotRegistry runtime operations."""
+
+    pass
+
+
+class BotNotFoundError(BotRegistryError):
+    """Raised when a BotInstance is not found in database."""
+
+    pass
+
+
+class BotDisabledError(BotRegistryError):
+    """Raised when attempting to obtain a bot that is disabled."""
+
+    pass
+
+
+class BotUnavailableError(BotRegistryError):
+    """Raised when a bot is in an error state and cannot be used."""
+
+    pass
+
+
+class BotProvisioningError(BotRegistryError):
+    """Raised when a bot is still in provisioning state."""
+
+    pass
+
+
+class BotSetupRequiredError(BotRegistryError):
+    """Raised when a bot requires setup before it can be used."""
+
+    pass

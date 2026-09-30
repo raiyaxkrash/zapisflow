@@ -6,6 +6,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.base import DefaultKeyBuilder
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
 from redis.asyncio import Redis
@@ -36,7 +37,10 @@ async def create_dispatcher() -> Dispatcher:
         redis_client = Redis.from_url(settings.redis_url)
         # Ping redis
         await redis_client.ping()
-        storage = RedisStorage(redis=redis_client)
+        storage = RedisStorage(
+            redis=redis_client,
+            key_builder=DefaultKeyBuilder(with_bot_id=True, with_destiny=True),
+        )
         logger.info(f"Connected to Redis at {settings.redis_host}:{settings.redis_port} for FSM storage")
     except Exception as e:
         logger.warning(f"Could not connect to Redis ({e}), falling back to in-memory FSM storage")

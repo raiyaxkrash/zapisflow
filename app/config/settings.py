@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     default_phone_requisites: str = Field(default="+7 (999) 000-00-00", alias="DEFAULT_PHONE_REQUISITES")
     bank_recipient_name: str = Field(default="Иван И.", alias="BANK_RECIPIENT_NAME")
 
+    # Phase 5: Dynamic Bot Instances, Token Security & BotRegistry
+    bot_token_encryption_key: str = Field(
+        default="",
+        alias="BOT_TOKEN_ENCRYPTION_KEY",
+    )
+    bot_registry_cache_max_size: int = Field(default=500, alias="BOT_REGISTRY_CACHE_MAX_SIZE")
+    bot_registry_cache_ttl_seconds: int = Field(default=300, alias="BOT_REGISTRY_CACHE_TTL_SECONDS")
+    bot_registry_invalidation_channel: str = Field(
+        default="bot_registry:invalidate", alias="BOT_REGISTRY_INVALIDATION_CHANNEL"
+    )
+
     @property
     def sync_database_url(self) -> str:
         """Synchronous URL for migrations/tools if needed."""
