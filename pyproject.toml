@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beauty-master-bot"
+version = "0.1.0"
+description = "Commercial Telegram Bot for Private Beauty Masters"
+authors = [{ name = "Senior Python Developer" }]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.14.0",
+    "pydantic-settings>=2.5.2",
+    "pydantic>=2.9.2",
+    "sqlalchemy>=2.0.35",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.3",
+    "redis>=5.1.0",
+    "apscheduler>=3.10.4",
+    "aiolimiter>=1.1.0",
+    "python-dateutil>=2.9.0",
+    "pytz>=2024.1",
+    "structlog>=24.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.9",
+]
