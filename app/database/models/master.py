@@ -5,6 +5,7 @@ Multi-tenant master, bot instance, master settings, clients and admins models.
 from datetime import datetime
 import enum
 from typing import List, Optional
+import uuid
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -15,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -104,6 +106,9 @@ class BotInstance(Base):
     __tablename__ = "bot_instances"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    public_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, default=uuid.uuid4, server_default=func.gen_random_uuid(), unique=True, nullable=False, index=True
+    )
     master_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("masters.id", ondelete="CASCADE"), nullable=False, index=True
     )

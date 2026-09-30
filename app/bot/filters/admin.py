@@ -9,6 +9,7 @@ from aiogram.filters import Filter
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.settings import settings
 from app.database.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.services.master_authorization_service import MasterAuthorizationService
@@ -31,7 +32,10 @@ class IsAdminFilter(Filter):
             return False
 
         if master_id is None:
-            master_id = await LegacyTenantResolver.get_master_id(session)
+            if settings.app_mode == "polling":
+                master_id = await LegacyTenantResolver.get_master_id(session)
+            else:
+                return False
 
         if db_user is None:
             user_repo = UserRepository(session)

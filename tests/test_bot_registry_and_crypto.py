@@ -323,10 +323,11 @@ async def test_registry_provisioning_and_setup_required_states(
         encrypted_token=encrypted,
         status=BotInstanceStatus.PROVISIONING,
     )
+    enc_setup = token_crypto.encrypt(raw_token, associated_data=13010002)
     inst_setup = await repo.create_bot_instance(
         master_id=master.id,
         telegram_bot_id=13010002,
-        encrypted_token=encrypted,
+        encrypted_token=enc_setup,
         status=BotInstanceStatus.SETUP_REQUIRED,
     )
 
@@ -335,8 +336,10 @@ async def test_registry_provisioning_and_setup_required_states(
         with pytest.raises(BotProvisioningError):
             await registry.get_by_instance_id(inst_prov.id, session=pg_session)
 
-        with pytest.raises(BotSetupRequiredError):
-            await registry.get_by_instance_id(inst_setup.id, session=pg_session)
+        # Per Phase 6 (Section 0.2), SETUP_REQUIRED is permitted at BotRegistry layer
+        bot_setup = await registry.get_by_instance_id(inst_setup.id, session=pg_session)
+        assert isinstance(bot_setup, Bot)
+        assert bot_setup.token == raw_token
     finally:
         await registry.close()
 
@@ -726,3 +729,22 @@ def test_mask_token_preview():
     assert preview == "123456789:***"
     assert "ABCdef" not in preview
     assert mask_token(None) == "[EMPTY]"
+
+
+def test_future_proof_token_redaction():
+    """Scenario 26: Redaction works for future bot IDs with 12+ digits and variable secret length."""
+    future_token = "123456789012:ABCdefGHIjklMNOpqrsTUVwxyz_1234567890"
+    log_text = f"Telegram error at https://api.telegram.org/bot{future_token}/sendMessage with token {future_token}"
+    redacted = redact_token(log_text)
+    assert future_token not in redacted
+    assert "123456789012:[REDACTED_SECRET]" in redacted
+    assert "[REDACTED_BOT_TOKEN]" in redacted
+
+
+def test_placeholder_key_rejected_fail_fast():
+    """Scenario 27: Explicitly reject placeholder or all-zero encryption keys."""
+    with pytest.raises(TokenCryptoConfigError):
+        TokenCrypto(master_key="CHANGE_ME_GENERATE_32_BYTE_HEX_KEY")
+
+    with pytest.raises(TokenCryptoConfigError):
+        TokenCrypto(master_key="0" * 64)

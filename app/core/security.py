@@ -4,9 +4,9 @@ import logging
 import re
 from typing import Any
 
-# Telegram bot token pattern: <bot_id>:<secret_35_chars>
-TOKEN_REGEX = re.compile(r"\b(\d{8,10}):([A-Za-z0-9_-]{35})\b")
-TELEGRAM_API_URL_REGEX = re.compile(r"(api\.telegram\.org/bot)(\d{8,10}:[A-Za-z0-9_-]{35})")
+# Telegram bot token pattern: <bot_id>:<secret> (future-proofed for 5-16 digits and 30-50 char secrets)
+TOKEN_REGEX = re.compile(r"\b(\d{5,16}):([A-Za-z0-9_-]{30,50})\b")
+TELEGRAM_API_URL_REGEX = re.compile(r"(api\.telegram\.org/bot)(\d{5,16}:[A-Za-z0-9_-]{30,50})")
 
 
 def redact_token(text: str) -> str:

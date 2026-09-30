@@ -87,7 +87,11 @@ class BotRegistry:
         self._pubsub = None
 
     def _validate_status_policy(self, instance: BotInstance) -> None:
-        """Validate whether a BotInstance is currently permitted to execute."""
+        """Validate whether a BotInstance is permitted to obtain an aiogram.Bot runtime object.
+
+        ACTIVE and SETUP_REQUIRED are permitted (SETUP_REQUIRED allows the master to run /admin setup).
+        DISABLED, ERROR, and unfinished PROVISIONING are rejected.
+        """
         if instance.status == BotInstanceStatus.DISABLED:
             raise BotDisabledError(f"BotInstance #{instance.id} is DISABLED")
         if instance.status == BotInstanceStatus.ERROR:
@@ -95,9 +99,7 @@ class BotRegistry:
             raise BotUnavailableError(f"BotInstance #{instance.id} is in ERROR status: {err}")
         if instance.status == BotInstanceStatus.PROVISIONING:
             raise BotProvisioningError(f"BotInstance #{instance.id} is still PROVISIONING")
-        if instance.status == BotInstanceStatus.SETUP_REQUIRED:
-            raise BotSetupRequiredError(f"BotInstance #{instance.id} requires SETUP_REQUIRED")
-        if instance.status != BotInstanceStatus.ACTIVE:
+        if instance.status not in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED):
             raise BotUnavailableError(f"BotInstance #{instance.id} status is {instance.status}")
 
     async def _close_bot_session(self, bot: Bot) -> None:
@@ -161,7 +163,7 @@ class BotRegistry:
             # If cached entry exists but TTL expired, check if metadata changed
             if cached:
                 if (
-                    instance.status == BotInstanceStatus.ACTIVE
+                    instance.status in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED)
                     and instance.token_version == cached.token_version
                 ):
                     # Metadata unchanged: refresh TTL and return cached bot

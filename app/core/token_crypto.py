@@ -60,10 +60,26 @@ class TokenCrypto:
                 "BOT_TOKEN_ENCRYPTION_KEY is empty or not configured"
             )
 
-        if isinstance(key, bytes):
-            if len(key) != cls.KEY_LENGTH:
+        if isinstance(key, str):
+            key_str = key.strip()
+            if (
+                key_str.startswith("CHANGE_ME")
+                or key_str == "0" * 64
+                or "placeholder" in key_str.lower()
+                or key_str.lower() in {
+                    "change_me_generate_32_byte_hex_key",
+                    "change_me_generate_32_byte_key",
+                }
+            ):
                 raise TokenCryptoConfigError(
-                    f"Master encryption key must be {cls.KEY_LENGTH} bytes (got {len(key)})"
+                    "BOT_TOKEN_ENCRYPTION_KEY is configured with an insecure placeholder value. "
+                    "Generate a secure key using: python -c 'import secrets; print(secrets.token_hex(32))'"
+                )
+
+        if isinstance(key, bytes):
+            if len(key) != cls.KEY_LENGTH or key == b"\x00" * cls.KEY_LENGTH:
+                raise TokenCryptoConfigError(
+                    f"Master encryption key must be {cls.KEY_LENGTH} non-zero bytes (got {len(key)})"
                 )
             return key
 

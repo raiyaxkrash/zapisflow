@@ -33,8 +33,31 @@ async def main() -> None:
     logger.info("Timezone: %s", settings.timezone)
     logger.info("Configured Admins Count: %s", len(settings.admin_ids))
 
+    logger.info("Application Mode: %s", settings.app_mode)
+
+    if settings.app_mode.lower() == "webhook":
+        logger.info(
+            "Starting Webhook Ingestion Engine on %s:%s (Base URL: %s)...",
+            settings.webhook_host,
+            settings.webhook_port,
+            settings.webhook_base_url or "direct",
+        )
+        import uvicorn
+        from app.web.app import create_app
+
+        config = uvicorn.Config(
+            app=create_app(),
+            host=settings.webhook_host,
+            port=settings.webhook_port,
+            log_level="info",
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+        return
+
+    # Polling mode (legacy single-tenant development)
     if not settings.bot_token or settings.bot_token == "dummy_token_for_init":
-        raise RuntimeError("BOT_TOKEN must be configured before starting the bot")
+        raise RuntimeError("BOT_TOKEN must be configured before starting the bot in polling mode")
     try:
         await init_db()
     except Exception:
@@ -43,7 +66,7 @@ async def main() -> None:
 
     bot = create_bot()
     dp = await create_dispatcher()
-    
+
     from app.scheduler import setup_scheduler
     scheduler = setup_scheduler(bot)
 

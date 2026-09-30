@@ -4,6 +4,7 @@ Manages tenant bot instances, encrypted tokens, lifecycle statuses and errors.
 """
 
 from typing import Optional, Sequence
+import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +20,17 @@ class BotInstanceRepository:
     async def get_by_id(self, bot_instance_id: int) -> Optional[BotInstance]:
         """Fetch bot instance by its primary key ID."""
         return await self.session.get(BotInstance, bot_instance_id)
+
+    async def get_by_public_id(self, public_id: uuid.UUID | str) -> Optional[BotInstance]:
+        """Fetch bot instance by its public UUID."""
+        if isinstance(public_id, str):
+            try:
+                public_id = uuid.UUID(public_id)
+            except (ValueError, AttributeError):
+                return None
+        query = select(BotInstance).where(BotInstance.public_id == public_id)
+        result = await self.session.execute(query)
+        return result.scalars().first()
 
     async def get_by_telegram_bot_id(self, telegram_bot_id: int) -> Optional[BotInstance]:
         """Fetch bot instance by its Telegram Bot ID."""
@@ -108,6 +120,8 @@ class BotInstanceRepository:
         encrypted_token: str,
         telegram_username: Optional[str] = None,
         telegram_first_name: Optional[str] = None,
+        webhook_secret: Optional[str] = None,
+        public_id: Optional[uuid.UUID] = None,
         status: BotInstanceStatus = BotInstanceStatus.ACTIVE,
         token_version: int = 1,
     ) -> BotInstance:
@@ -118,9 +132,12 @@ class BotInstanceRepository:
             encrypted_token=encrypted_token,
             telegram_username=telegram_username,
             telegram_first_name=telegram_first_name,
+            webhook_secret=webhook_secret,
             status=status,
             token_version=token_version,
         )
+        if public_id is not None:
+            instance.public_id = public_id
         self.session.add(instance)
         await self.session.flush()
         await self.session.refresh(instance)

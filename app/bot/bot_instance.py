@@ -13,7 +13,11 @@ from redis.asyncio import Redis
 
 from app.bot.handlers.admin import admin_router
 from app.bot.handlers.client import client_router
-from app.bot.middlewares import DbSessionMiddleware, UserContextMiddleware
+from app.bot.middlewares import (
+    DbSessionMiddleware,
+    TenantContextMiddleware,
+    UserContextMiddleware,
+)
 from app.config.settings import settings
 
 logger = logging.getLogger("app.bot")
@@ -51,7 +55,10 @@ async def create_dispatcher() -> Dispatcher:
     # 1. Outer middleware: DB session (available in all inner filters and handlers)
     dp.update.outer_middleware(DbSessionMiddleware())
 
-    # 2. Inner middleware: User context (registration, CRM profile, admin checks)
+    # 2. Outer middleware: Tenant context (enforces tenant isolation and fail-closed security)
+    dp.update.outer_middleware(TenantContextMiddleware())
+
+    # 3. Inner middleware: User context (registration, CRM profile, admin checks)
     dp.update.middleware(UserContextMiddleware())
 
     # 3. Include routers

@@ -63,6 +63,14 @@ class Settings(BaseSettings):
         default="bot_registry:invalidate", alias="BOT_REGISTRY_INVALIDATION_CHANNEL"
     )
 
+    # Phase 6: Multi-Bot Webhook Ingestion Engine
+    app_mode: str = Field(default="polling", alias="APP_MODE")
+    webhook_base_url: str = Field(default="", alias="WEBHOOK_BASE_URL")
+    webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")
+    webhook_port: int = Field(default=8000, alias="WEBHOOK_PORT")
+    webhook_max_body_bytes: int = Field(default=1_048_576, alias="WEBHOOK_MAX_BODY_BYTES")
+    webhook_update_dedup_ttl: int = Field(default=86400, alias="WEBHOOK_UPDATE_DEDUP_TTL")
+
     @property
     def sync_database_url(self) -> str:
         """Synchronous URL for migrations/tools if needed."""
