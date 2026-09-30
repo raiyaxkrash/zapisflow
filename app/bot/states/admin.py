@@ -86,3 +86,14 @@ class AdminRejectPaymentSG(StatesGroup):
     Entering custom rejection explanation for payment receipt.
     """
     entering_reason = State()
+
+
+class AdminBroadcastSG(StatesGroup):
+    """
+    Broadcast campaign creation wizard.
+    """
+    entering_text = State()
+    attaching_photo = State()
+    setting_button = State()
+    confirming = State()
+

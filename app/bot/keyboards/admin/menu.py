@@ -46,6 +46,16 @@ def get_admin_dashboard_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(
+            text="📊 Статистика и доходы",
+            callback_data=AdminMenuCallback(action="analytics").pack(),
+        ),
+        InlineKeyboardButton(
+            text="📢 Рассылка клиентам",
+            callback_data=AdminMenuCallback(action="broadcast").pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
             text="🏠 Выйти в меню клиента",
             callback_data=AdminMenuCallback(action="exit").pack(),
         )

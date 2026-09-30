@@ -9,6 +9,7 @@ from app.bot.states.admin import (
     AdminClientSearchSG,
     AdminSettingsSG,
     AdminRejectPaymentSG,
+    AdminBroadcastSG,
 )
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "AdminClientSearchSG",
     "AdminSettingsSG",
     "AdminRejectPaymentSG",
+    "AdminBroadcastSG",
 ]
 

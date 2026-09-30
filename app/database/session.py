@@ -30,6 +30,7 @@ async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
     expire_on_commit=False,
     autoflush=False,
 )
+async_session_maker = async_session_factory
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:

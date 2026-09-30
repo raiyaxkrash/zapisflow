@@ -53,12 +53,18 @@ async def main() -> None:
 
     bot = create_bot()
     dp = await create_dispatcher()
+    
+    from app.scheduler import setup_scheduler
+    scheduler = setup_scheduler(bot)
 
-    logger.info("Starting bot polling...")
+    logger.info("Starting bot polling and background scheduler...")
     try:
+        scheduler.start()
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
         await bot.session.close()
         await close_db()
 
