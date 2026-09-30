@@ -22,6 +22,7 @@ from app.repositories.payment_repository import PaymentRepository
 from app.repositories.user_repository import UserRepository
 from app.services.payment_service import PaymentService
 from app.services.exceptions import InvalidBookingStatusError
+from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
@@ -195,13 +196,13 @@ async def cb_approve_payment(
     1-click approve payment: confirm payment, confirm appointment, notify client.
     """
     payment_id = int(callback.data.split(":")[2])
-    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
-    if admin is None:
-        await callback.answer("Профиль администратора не найден", show_alert=True)
-        return
-    payment_service = PaymentService(session)
-
     master_id = await LegacyTenantResolver.get_master_id(session)
+    auth_service = MasterAuthorizationService(session)
+    if not await auth_service.is_admin(master_id, db_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+    admin = await UserRepository(session).get_or_create_legacy_admin(db_user.id)
+    payment_service = PaymentService(session)
     try:
         decision = await payment_service.approve_payment(
             payment_id=payment_id,
@@ -349,12 +350,12 @@ async def cb_do_reject_payment(
     }
     reason_text = reasons.get(preset_key, "Платёж не прошёл проверку")
 
-    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
-    if admin is None:
-        await callback.answer("Профиль администратора не найден", show_alert=True)
-        return
-
     master_id = await LegacyTenantResolver.get_master_id(session)
+    auth_service = MasterAuthorizationService(session)
+    if not await auth_service.is_admin(master_id, db_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+    admin = await UserRepository(session).get_or_create_legacy_admin(db_user.id)
     payment_service = PaymentService(session)
     try:
         decision = await payment_service.reject_payment(
@@ -418,12 +419,12 @@ async def cb_resolve_cancelled_payment(
     """Resolve a submitted proof after client cancellation without inventing income."""
     payment_id = int(callback.data.rsplit(":", 1)[1])
     received = callback.data.startswith("adm_pay:retain_cancelled:")
-    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
-    if admin is None:
-        await callback.answer("Профиль администратора не найден", show_alert=True)
-        return
-
     master_id = await LegacyTenantResolver.get_master_id(session)
+    auth_service = MasterAuthorizationService(session)
+    if not await auth_service.is_admin(master_id, db_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+    admin = await UserRepository(session).get_or_create_legacy_admin(db_user.id)
     decision = await PaymentService(session).resolve_cancelled_payment(
         payment_id=payment_id,
         admin_id=admin.id,

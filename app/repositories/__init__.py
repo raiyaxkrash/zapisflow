@@ -12,6 +12,7 @@ from app.repositories.settings_repository import SettingsRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.master_client_repository import MasterClientRepository
 from app.repositories.portfolio_repository import PortfolioRepository
+from app.repositories.master_admin_repository import MasterAdminRepository
 
 __all__ = [
     "BaseRepository",
@@ -24,5 +25,6 @@ __all__ = [
     "MasterSettingsRepository",
     "MasterClientRepository",
     "PortfolioRepository",
+    "MasterAdminRepository",
 ]
 

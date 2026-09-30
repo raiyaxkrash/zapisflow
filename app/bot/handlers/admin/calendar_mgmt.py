@@ -26,6 +26,7 @@ from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.repositories.user_repository import UserRepository
+from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import RU_WEEKDAYS_FULL, format_rub
 
@@ -381,11 +382,12 @@ async def msg_admin_calendar_save_blocked_slot(
     end_dt = tz.localize(datetime.combine(target_date, end_t))
 
     await state.clear()
-    schedule_repo = ScheduleRepository(session)
-    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
-    if admin is None:
-        await message.answer("Профиль администратора не найден")
+    auth_service = MasterAuthorizationService(session)
+    if not await auth_service.is_admin(master_id, db_user.id):
+        await message.answer("Доступ запрещен")
         return
+    admin = await UserRepository(session).get_or_create_legacy_admin(db_user.id)
+    schedule_repo = ScheduleRepository(session)
     await schedule_repo.create_blocked_interval(
         start_time=start_dt,
         end_time=end_dt,

@@ -22,6 +22,7 @@ from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.services.booking_service import BookingService
+from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.payment_service import PaymentService
 from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
@@ -170,7 +171,10 @@ async def msg_receive_proof(
     except Exception:
         logger.exception("Could not acknowledge committed proof %s to client", payment.id)
 
-    for admin_tg_id in settings.admin_ids:
+    auth_service = MasterAuthorizationService(session)
+    admin_recipients = await auth_service.get_admin_recipients(master_id=master_id)
+
+    for admin_tg_id in admin_recipients:
         try:
             if media_type == MediaType.PHOTO:
                 await bot.send_photo(

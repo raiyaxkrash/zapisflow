@@ -72,3 +72,9 @@ class InvalidPaymentStatusError(AppException):
     """Raised when a payment decision violates the allowed state machine."""
 
     pass
+
+
+class AccessDeniedError(AppException):
+    """Raised when an operation is forbidden due to insufficient tenant administrative privileges."""
+
+    pass

@@ -31,6 +31,7 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
 from app.services.exceptions import BookingNotFoundError, InvalidBookingStatusError, SlotAlreadyBookedError
+from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.slot_engine import SlotEngine
 from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
@@ -521,13 +522,13 @@ async def cb_reschedule_confirm_slot(
 
     data = await state.get_data()
     appointment_id = data["appointment_id"]
-    filter_type = data.get("filter_type", "today")
-    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
-    if admin is None:
-        await callback.answer("Профиль администратора не найден", show_alert=True)
-        return
-
     master_id = await LegacyTenantResolver.get_master_id(session)
+    auth_service = MasterAuthorizationService(session)
+    if not await auth_service.is_admin(master_id, db_user.id):
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+    admin = await UserRepository(session).get_or_create_legacy_admin(db_user.id)
+
     booking_service = BookingService(session)
     try:
         appointment = await booking_service.reschedule_booking_by_admin(

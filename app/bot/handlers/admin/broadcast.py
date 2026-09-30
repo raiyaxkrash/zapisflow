@@ -16,6 +16,7 @@ from app.database.models.broadcast import BroadcastStatus
 from app.database.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.services.broadcast_service import BroadcastService
+from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="admin_broadcast")
@@ -219,14 +220,15 @@ async def show_broadcast_preview(
     Create campaign in DRAFT and render preview card.
     """
     data = await state.get_data()
-    admin = await UserRepository(session).get_active_admin_by_user_id(db_user.id)
-    if admin is None:
-        if isinstance(event, Message):
-            await event.answer("Профиль администратора не найден")
-        else:
-            await event.answer("Профиль администратора не найден", show_alert=True)
-        return
     master_id = await LegacyTenantResolver.get_master_id(session)
+    auth_service = MasterAuthorizationService(session)
+    if not await auth_service.is_admin(master_id, db_user.id):
+        if isinstance(event, Message):
+            await event.answer("Доступ запрещен")
+        else:
+            await event.answer("Доступ запрещен", show_alert=True)
+        return
+    admin = await UserRepository(session).get_or_create_legacy_admin(db_user.id)
     broadcast_svc = BroadcastService(session)
 
     broadcast = await broadcast_svc.create_broadcast(

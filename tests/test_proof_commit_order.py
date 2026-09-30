@@ -43,6 +43,13 @@ def _context(monkeypatch, *, media_type=MediaType.PHOTO):
     )
     monkeypatch.setattr(
         payment_handler,
+        "MasterAuthorizationService",
+        lambda session: SimpleNamespace(
+            get_admin_recipients=AsyncMock(return_value=[1001])
+        ),
+    )
+    monkeypatch.setattr(
+        payment_handler,
         "settings",
         SimpleNamespace(admin_ids=[1001], timezone="UTC"),
     )

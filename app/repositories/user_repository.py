@@ -172,6 +172,18 @@ class UserRepository(BaseRepository[User]):
         )
         return result.scalars().first()
 
+    async def get_or_create_legacy_admin(self, user_id: int) -> Admin:
+        """Resolve or create an admins.id identity strictly for legacy FK compatibility."""
+        admin = await self.session.scalar(select(Admin).where(Admin.user_id == user_id))
+        if admin is None:
+            admin = Admin(user_id=user_id, is_active=True)
+            self.session.add(admin)
+            await self.session.flush()
+        elif not admin.is_active:
+            admin.is_active = True
+            await self.session.flush()
+        return admin
+
     async def search_users_for_master(
         self, master_id: int, search_text: str, limit: int = 20
     ) -> Sequence[User]:
