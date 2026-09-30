@@ -48,3 +48,5 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS uq_bot_instances_current_per_master;")
     op.drop_column("bot_instances", "is_current")
+    # Clean up any audit logs without admin_id so that 0005 downgrade (which is immutable) can safely SET NOT NULL
+    op.execute("DELETE FROM audit_logs WHERE admin_id IS NULL;")

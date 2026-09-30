@@ -1,18 +1,20 @@
 """Broadcast engine service for marketing and informational mass mailings.
 
 Implements strict tenant recipient filtering via master_clients, safe rate-limiting,
-and per-master status tracking.
+per-master status tracking, and multi-replica batch claiming via FOR UPDATE SKIP LOCKED.
 """
 
 import asyncio
-import logging
 from datetime import datetime, timezone
+import logging
 from typing import List, Optional
+import uuid
+
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiolimiter import AsyncLimiter
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.broadcast import (
@@ -28,14 +30,14 @@ logger = logging.getLogger("app.broadcast")
 
 
 class BroadcastService:
-    """Mass messaging service with tenant recipient isolation and status tracking."""
+    """Mass messaging service with tenant recipient isolation, claiming, and status tracking."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
     async def get_eligible_users(self, master_id: int) -> List[User]:
         """Get active users who have opted into marketing specifically for this master.
-        
+
         Reads exclusively from master_clients where master_id = master_id
         and is_marketing_allowed = TRUE and is_bot_blocked = FALSE.
         """
@@ -87,9 +89,15 @@ class BroadcastService:
         return broadcast
 
     async def execute_broadcast(
-        self, master_id: int, broadcast_id: int, bot: Bot
+        self,
+        master_id: int,
+        broadcast_id: int,
+        bot: Optional[Bot] = None,
+        registry: Optional[object] = None,
+        worker_id: Optional[str] = None,
+        batch_size: int = 50,
     ) -> Broadcast:
-        """Send a campaign ensuring it strictly belongs to master_id."""
+        """Send a campaign ensuring it strictly belongs to master_id with multi-replica claiming."""
         query = select(Broadcast).where(
             Broadcast.id == broadcast_id,
             Broadcast.master_id == master_id,
@@ -98,15 +106,38 @@ class BroadcastService:
         broadcast = res.scalars().first()
         if not broadcast:
             raise ValueError(f"Broadcast #{broadcast_id} not found for master {master_id}")
-        if broadcast.status != BroadcastStatus.DRAFT:
+        if broadcast.status not in (BroadcastStatus.DRAFT, BroadcastStatus.SENDING):
             await self.session.commit()
             return broadcast
 
-        recipients = await self.get_eligible_users(master_id)
-        broadcast.total_count = len(recipients)
-        broadcast.status = BroadcastStatus.SENDING
-        broadcast.started_at = datetime.now(timezone.utc)
-        await self.session.commit()
+        if broadcast.status == BroadcastStatus.DRAFT:
+            recipients = await self.get_eligible_users(master_id)
+            broadcast.total_count = len(recipients)
+            broadcast.status = BroadcastStatus.SENDING
+            broadcast.started_at = datetime.now(timezone.utc)
+            for u in recipients:
+                rcpt = BroadcastRecipient(
+                    broadcast_id=broadcast_id,
+                    user_id=u.id,
+                    status=RecipientStatus.PENDING,
+                )
+                self.session.add(rcpt)
+            await self.session.commit()
+
+        # Resolve tenant bot
+        target_bot: Optional[Bot] = None
+        if registry and hasattr(registry, "get_by_master_id"):
+            try:
+                target_bot = await registry.get_by_master_id(master_id)
+            except Exception as exc:
+                logger.warning("BotRegistry failed to get bot for master %s: %s", master_id, exc)
+        if not target_bot:
+            target_bot = bot
+
+        if not target_bot:
+            raise ValueError(
+                f"No active Bot available for master #{master_id} to send broadcast #{broadcast_id}"
+            )
 
         reply_markup = None
         if broadcast.button_text and broadcast.button_url:
@@ -119,81 +150,133 @@ class BroadcastService:
                 ]]
             )
 
+        actual_worker_id = worker_id or f"worker_{uuid.uuid4().hex[:8]}"
         limiter = AsyncLimiter(25, 1.0)
-        success_count = 0
-        fail_count = 0
 
-        for user in recipients:
-            async with limiter:
-                delivered = False
-                error_msg = None
-                for attempt in range(3):
-                    try:
-                        if broadcast.photo_file_id:
-                            await bot.send_photo(
-                                chat_id=user.telegram_id,
-                                photo=broadcast.photo_file_id,
-                                caption=broadcast.text,
-                                reply_markup=reply_markup,
-                            )
-                        else:
-                            await bot.send_message(
-                                chat_id=user.telegram_id,
-                                text=broadcast.text,
-                                reply_markup=reply_markup,
-                            )
-                        delivered = True
-                        break
-                    except TelegramRetryAfter as exc:
-                        logger.warning(
-                            "Telegram rate limited broadcast #%s, sleeping %s s",
-                            broadcast_id,
-                            exc.retry_after,
-                        )
-                        await asyncio.sleep(exc.retry_after)
-                    except TelegramForbiddenError:
-                        error_msg = "Bot blocked by user"
-                        break
-                    except Exception as exc:
-                        error_msg = str(exc)
-                        break
+        while True:
+            # Atomic claim batch of recipients with FOR UPDATE SKIP LOCKED
+            claim_stmt = (
+                select(BroadcastRecipient)
+                .where(
+                    BroadcastRecipient.broadcast_id == broadcast_id,
+                    BroadcastRecipient.status == RecipientStatus.PENDING,
+                )
+                .limit(batch_size)
+                .with_for_update(skip_locked=True)
+            )
+            claim_res = await self.session.execute(claim_stmt)
+            claimed = list(claim_res.scalars().all())
+            if not claimed:
+                break
 
-                async with self.session.begin():
-                    # Record per-recipient outcome
-                    rcpt = BroadcastRecipient(
-                        broadcast_id=broadcast_id,
-                        user_id=user.id,
-                        status=RecipientStatus.SENT if delivered else RecipientStatus.FAILED,
-                        error_message=error_msg,
-                        sent_at=datetime.now(timezone.utc) if delivered else None,
-                    )
-                    self.session.add(rcpt)
+            now_utc = datetime.now(timezone.utc)
+            batch_items = []
+            for r in claimed:
+                r.status = RecipientStatus.PROCESSING
+                r.claimed_at = now_utc
+                r.claimed_by = actual_worker_id
+                r.attempt_count += 1
+                batch_items.append((r.id, r.user_id))
+
+            await self.session.commit()
+
+            # Process claimed batch outside the claim transaction
+            for rcpt_id, user_id in batch_items:
+                user = await self.session.get(User, user_id)
+                if not user or not user.telegram_id or user.telegram_id <= 0:
+                    async with self.session.begin():
+                        r = await self.session.get(BroadcastRecipient, rcpt_id)
+                        if r:
+                            r.status = RecipientStatus.FAILED
+                            r.error_message = "Invalid user or telegram_id"
+                    continue
+
+                async with limiter:
+                    delivered = False
+                    error_msg = None
+                    for attempt in range(3):
+                        try:
+                            if broadcast.photo_file_id:
+                                await target_bot.send_photo(
+                                    chat_id=user.telegram_id,
+                                    photo=broadcast.photo_file_id,
+                                    caption=broadcast.text,
+                                    reply_markup=reply_markup,
+                                )
+                            else:
+                                await target_bot.send_message(
+                                    chat_id=user.telegram_id,
+                                    text=broadcast.text,
+                                    reply_markup=reply_markup,
+                                )
+                            delivered = True
+                            break
+                        except TelegramRetryAfter as exc:
+                            logger.warning(
+                                "Telegram rate limited broadcast #%s, sleeping %s s",
+                                broadcast_id,
+                                exc.retry_after,
+                            )
+                            await asyncio.sleep(exc.retry_after)
+                        except TelegramForbiddenError:
+                            error_msg = "Bot blocked by user"
+                            break
+                        except Exception as exc:
+                            error_msg = str(exc)
+                            break
+
+                    r = await self.session.get(BroadcastRecipient, rcpt_id)
+                    if r:
+                        r.status = RecipientStatus.SENT if delivered else RecipientStatus.FAILED
+                        r.error_message = error_msg
+                        r.sent_at = datetime.now(timezone.utc) if delivered else None
 
                     if not delivered and error_msg == "Bot blocked by user":
-                        # Mark bot as blocked for this master
                         mc_res = await self.session.execute(
                             select(MasterClient).where(
                                 MasterClient.master_id == master_id,
-                                MasterClient.user_id == user.id,
+                                MasterClient.user_id == user_id,
                             )
                         )
                         mc = mc_res.scalars().first()
                         if mc:
                             mc.is_bot_blocked = True
+                    await self.session.commit()
 
-                    if delivered:
-                        success_count += 1
-                    else:
-                        fail_count += 1
+        # Final recount and completion check
+        res_sent = await self.session.execute(
+            select(func.count(BroadcastRecipient.id)).where(
+                BroadcastRecipient.broadcast_id == broadcast_id,
+                BroadcastRecipient.status == RecipientStatus.SENT,
+            )
+        )
+        success_count = res_sent.scalar() or 0
 
-        async with self.session.begin():
-            refreshed = await self.session.get(Broadcast, broadcast_id)
-            if refreshed:
-                refreshed.success_count = success_count
-                refreshed.fail_count = fail_count
+        res_fail = await self.session.execute(
+            select(func.count(BroadcastRecipient.id)).where(
+                BroadcastRecipient.broadcast_id == broadcast_id,
+                BroadcastRecipient.status == RecipientStatus.FAILED,
+            )
+        )
+        fail_count = res_fail.scalar() or 0
+
+        res_pending = await self.session.execute(
+            select(func.count(BroadcastRecipient.id)).where(
+                BroadcastRecipient.broadcast_id == broadcast_id,
+                BroadcastRecipient.status.in_([RecipientStatus.PENDING, RecipientStatus.PROCESSING]),
+            )
+        )
+        pending_count = res_pending.scalar() or 0
+
+        refreshed = await self.session.get(Broadcast, broadcast_id)
+        if refreshed:
+            refreshed.success_count = success_count
+            refreshed.fail_count = fail_count
+            if pending_count == 0:
                 refreshed.status = BroadcastStatus.COMPLETED
                 refreshed.finished_at = datetime.now(timezone.utc)
-                broadcast = refreshed
+            broadcast = refreshed
+        await self.session.commit()
 
         logger.info(
             "Broadcast #%s completed for master %s: %s sent, %s failed",

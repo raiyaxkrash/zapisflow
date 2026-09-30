@@ -67,6 +67,50 @@ class AppointmentRepository(BaseRepository[Appointment]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none() is not None
 
+    async def claim_and_expire_holds(
+        self, batch_size: int = 100
+    ) -> Sequence[Appointment]:
+        """Atomically find, lock (SKIP LOCKED), and expire due WAITING_PAYMENT appointments.
+
+        Strict safety rules:
+        - Only locks appointments where status == WAITING_PAYMENT and hold_until <= now.
+        - Never touches PAYMENT_PROOF_SENT (protected from automatic expiration).
+        - Multiple concurrent workers skip each other's locked rows without blocking.
+        - Updates status to EXPIRED and returns appointments for external notification.
+        """
+        now_utc = datetime.now(timezone.utc)
+        candidate_ids_stmt = (
+            select(Appointment.id)
+            .where(
+                Appointment.status == AppointmentStatus.WAITING_PAYMENT,
+                Appointment.hold_until.is_not(None),
+                Appointment.hold_until <= now_utc,
+            )
+            .order_by(Appointment.hold_until.asc())
+            .limit(batch_size)
+            .with_for_update(skip_locked=True)
+        )
+        res = await self.session.execute(candidate_ids_stmt)
+        candidate_ids = list(res.scalars().all())
+        if not candidate_ids:
+            return []
+
+        # Load appointments with relations for notification dispatching
+        query = (
+            select(Appointment)
+            .where(Appointment.id.in_(candidate_ids))
+            .options(selectinload(Appointment.user))
+        )
+        appointments_res = await self.session.execute(query)
+        appointments = list(appointments_res.scalars().all())
+
+        for app in appointments:
+            app.status = AppointmentStatus.EXPIRED
+            app.hold_until = None
+
+        await self.session.flush()
+        return appointments
+
     async def get_active_overlapping(
         self,
         master_id: int,

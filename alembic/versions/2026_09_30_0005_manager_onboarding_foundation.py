@@ -52,5 +52,4 @@ def downgrade() -> None:
     op.drop_constraint("fk_audit_logs_actor_user_id_users", "audit_logs", type_="foreignkey")
     op.drop_column("audit_logs", "actor_user_id")
     op.alter_column("audit_logs", "entity_id", existing_type=sa.Integer(), nullable=False)
-    op.execute("DELETE FROM audit_logs WHERE admin_id IS NULL;")
     op.alter_column("audit_logs", "admin_id", existing_type=sa.Integer(), nullable=False)

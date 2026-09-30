@@ -28,6 +28,7 @@ from app.database.models.master import BotInstanceStatus
 from app.database.session import async_session_factory, close_db, engine, init_db
 from app.manager_bot.dispatcher import create_manager_dispatcher
 from app.repositories.bot_instance_repository import BotInstanceRepository
+from app.scheduler import MultiTenantScheduler
 from app.services.bot_registry import BotRegistry
 from app.services.exceptions import (
     BotDisabledError,
@@ -94,9 +95,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if settings.manager_bot_token:
             app.state.manager_bot = Bot(token=settings.manager_bot_token)
 
+    # Initialize MultiTenantScheduler if enabled and not explicitly injected
+    if not hasattr(app.state, "scheduler") or app.state.scheduler is None:
+        if settings.scheduler_enabled:
+            scheduler = MultiTenantScheduler(
+                registry=app.state.registry,
+                session_maker=app.state.session_factory,
+            )
+            scheduler.start()
+            app.state.scheduler = scheduler
+            logger.info("MultiTenantScheduler started in webhook application")
+        else:
+            app.state.scheduler = None
+
     yield
 
     logger.info("Shutting down Multi-Bot Webhook Ingestion Engine...")
+    if hasattr(app.state, "scheduler") and app.state.scheduler:
+        try:
+            app.state.scheduler.shutdown(wait=False)
+            logger.info("MultiTenantScheduler stopped")
+        except Exception as e:
+            logger.warning("Error stopping MultiTenantScheduler: %s", e)
+
     if hasattr(app.state, "manager_bot") and app.state.manager_bot:
         try:
             await app.state.manager_bot.session.close()
@@ -122,6 +143,7 @@ def create_app(
     redis_client: Optional[Redis] = None,
     manager_dp: Optional[Dispatcher] = None,
     manager_bot: Optional[Bot] = None,
+    scheduler: Optional[MultiTenantScheduler] = None,
 ) -> FastAPI:
     """FastAPI application factory supporting dependency injection for testing."""
     app = FastAPI(
@@ -138,6 +160,7 @@ def create_app(
     app.state.redis_client = redis_client
     app.state.manager_dp = manager_dp
     app.state.manager_bot = manager_bot
+    app.state.scheduler = scheduler
 
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next: Any) -> Response:

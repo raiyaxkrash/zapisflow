@@ -1,47 +1,133 @@
-"""
-APScheduler configuration and background task runner.
-Manages periodic jobs for hold expiration cleaning and client visit reminders.
+"""Multi-replica aware scheduler and periodic background jobs orchestrator.
+
+Manages periodic jobs for:
+- Hold expiration cleaner (PostgreSQL SKIP LOCKED)
+- Client visit reminder generation (idempotent ON CONFLICT)
+- Client visit reminder delivery worker (PostgreSQL SKIP LOCKED & BotRegistry routing)
 """
 
 import logging
+from typing import Optional
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config.settings import settings
+from app.database.session import async_session_maker
 from app.scheduler.jobs.hold_cleaner import clean_expired_holds
+from app.scheduler.jobs.reminder_generator import generate_visit_reminders
 from app.scheduler.jobs.reminder_worker import send_visit_reminders
+from app.services.bot_registry import BotRegistry
 
 logger = logging.getLogger("app.scheduler")
 
 
-def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
-    """
-    Initialize and configure AsyncIOScheduler with periodic background jobs.
-    """
-    scheduler = AsyncIOScheduler(timezone=pytz.timezone(settings.timezone))
+class MultiTenantScheduler:
+    """Multi-replica background scheduler for tenant jobs."""
 
-    # 1. Hold cleaner job: runs every 60 seconds
-    scheduler.add_job(
-        clean_expired_holds,
-        trigger="interval",
-        seconds=60,
-        id="clean_expired_holds",
-        name="Clean Expired Holds",
-        replace_existing=True,
-        kwargs={"bot": bot},
+    def __init__(
+        self,
+        registry: Optional[BotRegistry] = None,
+        bot: Optional[Bot] = None,
+        session_maker: async_sessionmaker = async_session_maker,
+    ) -> None:
+        self.registry = registry
+        self.bot = bot
+        self.session_maker = session_maker
+        self._scheduler = AsyncIOScheduler(timezone=pytz.timezone(settings.timezone))
+        self._setup_jobs()
+
+    def _setup_jobs(self) -> None:
+        """Register periodic jobs based on application settings."""
+        # 1. Hold cleaner job
+        self._scheduler.add_job(
+            clean_expired_holds,
+            trigger="interval",
+            seconds=settings.hold_cleaner_interval_seconds,
+            id="clean_expired_holds",
+            name="Clean Expired Booking Holds",
+            replace_existing=True,
+            kwargs={
+                "bot": self.bot,
+                "registry": self.registry,
+                "session_maker": self.session_maker,
+                "batch_size": settings.scheduler_batch_size,
+            },
+        )
+
+        # 2. Reminder generator job
+        self._scheduler.add_job(
+            generate_visit_reminders,
+            trigger="interval",
+            seconds=settings.reminder_generation_interval_seconds,
+            id="generate_visit_reminders",
+            name="Generate Upcoming Visit Reminders",
+            replace_existing=True,
+            kwargs={
+                "session_maker": self.session_maker,
+            },
+        )
+
+        # 3. Reminder delivery worker job
+        self._scheduler.add_job(
+            send_visit_reminders,
+            trigger="interval",
+            seconds=settings.reminder_delivery_interval_seconds,
+            id="send_visit_reminders",
+            name="Dispatch Due Visit Reminders",
+            replace_existing=True,
+            kwargs={
+                "bot": self.bot,
+                "registry": self.registry,
+                "session_maker": self.session_maker,
+                "batch_size": settings.scheduler_batch_size,
+                "max_attempts": settings.job_max_attempts,
+                "auto_generate": False,
+            },
+        )
+
+        logger.info(
+            "MultiTenantScheduler configured with hold_cleaner (%ss), reminder_generator (%ss), reminder_worker (%ss)",
+            settings.hold_cleaner_interval_seconds,
+            settings.reminder_generation_interval_seconds,
+            settings.reminder_delivery_interval_seconds,
+        )
+
+    @property
+    def running(self) -> bool:
+        """Return True if scheduler is active."""
+        if getattr(self, "_is_shutdown", False):
+            return False
+        return self._scheduler.running
+
+    def start(self) -> None:
+        """Start the background scheduler."""
+        self._is_shutdown = False
+        if not self._scheduler.running:
+            self._scheduler.start()
+            logger.info("MultiTenantScheduler started")
+
+    def shutdown(self, wait: bool = False) -> None:
+        """Shutdown the background scheduler."""
+        self._is_shutdown = True
+        if self._scheduler.running:
+            self._scheduler.shutdown(wait=wait)
+            logger.info("MultiTenantScheduler stopped")
+
+    def add_job(self, *args, **kwargs):
+        """Pass-through for custom job registration."""
+        return self._scheduler.add_job(*args, **kwargs)
+
+
+def setup_scheduler(
+    bot: Optional[Bot] = None,
+    registry: Optional[BotRegistry] = None,
+    session_maker: async_sessionmaker = async_session_maker,
+) -> MultiTenantScheduler:
+    """Initialize and configure MultiTenantScheduler with periodic background jobs."""
+    return MultiTenantScheduler(
+        registry=registry,
+        bot=bot,
+        session_maker=session_maker,
     )
-
-    # 2. Visit reminders job: runs every 120 seconds
-    scheduler.add_job(
-        send_visit_reminders,
-        trigger="interval",
-        seconds=120,
-        id="send_visit_reminders",
-        name="Send Visit Reminders",
-        replace_existing=True,
-        kwargs={"bot": bot},
-    )
-
-    logger.info("APScheduler initialized with hold cleaner (60s) and visit reminders (120s)")
-    return scheduler

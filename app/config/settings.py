@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     manager_webhook_secret: str = Field(default="", alias="MANAGER_WEBHOOK_SECRET")
     trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
 
+    # Phase 8: Multi-Replica Multi-Tenant Scheduler & Reliable Background Jobs
+    scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
+    scheduler_tick_seconds: int = Field(default=30, alias="SCHEDULER_TICK_SECONDS")
+    scheduler_batch_size: int = Field(default=100, alias="SCHEDULER_BATCH_SIZE")
+    job_processing_timeout_seconds: int = Field(default=300, alias="JOB_PROCESSING_TIMEOUT_SECONDS")
+    job_max_attempts: int = Field(default=5, alias="JOB_MAX_ATTEMPTS")
+    hold_cleaner_interval_seconds: int = Field(default=60, alias="HOLD_CLEANER_INTERVAL_SECONDS")
+    reminder_generation_interval_seconds: int = Field(default=120, alias="REMINDER_GENERATION_INTERVAL_SECONDS")
+    reminder_delivery_interval_seconds: int = Field(default=30, alias="REMINDER_DELIVERY_INTERVAL_SECONDS")
+
     @property
     def sync_database_url(self) -> str:
         """Synchronous URL for migrations/tools if needed."""

@@ -33,6 +33,7 @@ class BroadcastStatus(str, Enum):
 
 class RecipientStatus(str, Enum):
     PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
     SENT = "SENT"
     FAILED = "FAILED"
 
@@ -82,9 +83,12 @@ class Broadcast(Base):
 
 class BroadcastRecipient(Base):
     """
-    Individual recipient tracking for a broadcast.
+    Individual recipient tracking for a broadcast with multi-replica claiming metadata.
     """
     __tablename__ = "broadcast_recipients"
+    __table_args__ = (
+        Index("ix_broadcast_recipients_claim", "broadcast_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     broadcast_id: Mapped[int] = mapped_column(
@@ -98,6 +102,9 @@ class BroadcastRecipient(Base):
         default=RecipientStatus.PENDING,
         nullable=False,
     )
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     error_message: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
