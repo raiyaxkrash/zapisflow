@@ -17,6 +17,7 @@ Covers:
 import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 import json
+from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
@@ -110,18 +111,28 @@ class MockGateway(TelegramProvisioningGateway):
 
     def __init__(self) -> None:
         super().__init__()
+        self.last_webhook_url: Optional[str] = None
         self.validate_token_mock = AsyncMock(
             return_value=BotIdentity(id=7770001, username="test_tenant_bot", first_name="Tenant Bot")
         )
         self.set_webhook_mock = AsyncMock(return_value=True)
         self.delete_webhook_mock = AsyncMock(return_value=True)
-        self.get_webhook_info_mock = AsyncMock(return_value=MagicMock(url="https://example.com"))
+        self.get_webhook_info_mock = AsyncMock(return_value=None)
 
     async def validate_token(self, token: str) -> BotIdentity:
         return await self.validate_token_mock(token)
 
     async def set_webhook(self, token: str, url: str, secret_token=None, **kwargs) -> bool:
+        self.last_webhook_url = url
         return await self.set_webhook_mock(token=token, url=url, secret_token=secret_token, **kwargs)
+
+    async def get_webhook_info(self, token: str) -> Any:
+        if self.get_webhook_info_mock.side_effect is not None:
+            return await self.get_webhook_info_mock(token)
+        explicit = self.get_webhook_info_mock.return_value
+        if explicit is not None:
+            return explicit
+        return MagicMock(url=self.last_webhook_url, has_custom_certificate=False, pending_update_count=0)
 
     async def delete_webhook(self, token: str, drop_pending_updates: bool = False) -> bool:
         return await self.delete_webhook_mock(token=token, drop_pending_updates=drop_pending_updates)

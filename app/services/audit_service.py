@@ -3,6 +3,7 @@
 from typing import Any, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import TOKEN_REGEX, redact_token
 from app.database.models.audit import AuditLog
 
 
@@ -25,27 +26,41 @@ class AuditService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    @staticmethod
-    def _sanitize_payload(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Scrub tokens, secrets and ciphertexts from audit dictionaries."""
+    @classmethod
+    def _sanitize_value(cls, val: Any) -> Any:
+        if isinstance(val, dict):
+            return cls._sanitize_dict(val)
+        if isinstance(val, (list, tuple, set)):
+            sanitized_list = [cls._sanitize_value(item) for item in val]
+            return type(val)(sanitized_list) if not isinstance(val, set) else set(sanitized_list)
+        if isinstance(val, str):
+            if val.startswith("v1:"):
+                return "[REDACTED]"
+            if val.startswith("whsec_"):
+                return "[REDACTED]"
+            if TOKEN_REGEX.search(val):
+                return "[REDACTED]"
+            return redact_token(val)
+        return val
+
+    @classmethod
+    def _sanitize_dict(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        sensitive_key_terms = ("token", "secret", "password", "key", "cipher", "credential", "auth")
+        result = {}
+        for k, v in payload.items():
+            k_lower = str(k).lower()
+            if any(term in k_lower for term in sensitive_key_terms):
+                result[k] = "[REDACTED]"
+            else:
+                result[k] = cls._sanitize_value(v)
+        return result
+
+    @classmethod
+    def _sanitize_payload(cls, payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Scrub tokens, secrets, ciphertexts and sensitive fields recursively."""
         if not payload:
             return None
-        sensitive_keys = {
-            "token",
-            "raw_token",
-            "bot_token",
-            "encrypted_token",
-            "ciphertext",
-            "webhook_secret",
-            "secret_token",
-            "password",
-            "master_key",
-            "key",
-        }
-        return {
-            k: "[REDACTED]" if k.lower() in sensitive_keys else v
-            for k, v in payload.items()
-        }
+        return cls._sanitize_dict(payload)
 
     async def log_event(
         self,

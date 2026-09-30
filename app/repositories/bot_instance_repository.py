@@ -5,7 +5,7 @@ Manages tenant bot instances, encrypted tokens, lifecycle statuses and errors.
 
 from typing import Optional, Sequence
 import uuid
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.master import BotInstance, BotInstanceStatus, Master
@@ -114,22 +114,30 @@ class BotInstanceRepository:
             await self.session.flush()
 
     async def get_current_for_master(self, master_id: int) -> Optional[BotInstance]:
-        """Fetch current non-disabled bot instance for the master."""
+        """Fetch current bot instance for the master using deterministic is_current flag."""
         stmt = (
             select(BotInstance)
             .where(
                 BotInstance.master_id == master_id,
-                BotInstance.status.in_([
-                    BotInstanceStatus.ACTIVE,
-                    BotInstanceStatus.SETUP_REQUIRED,
-                    BotInstanceStatus.PROVISIONING,
-                    BotInstanceStatus.ERROR,
-                ]),
+                BotInstance.is_current == True,  # noqa: E712
             )
-            .order_by(BotInstance.id.desc())
         )
         result = await self.session.execute(stmt)
         return result.scalars().first()
+
+    async def deprecate_current_for_master(self, master_id: int) -> int:
+        """Mark previous current bot instances for this master as non-current."""
+        stmt = (
+            update(BotInstance)
+            .where(
+                BotInstance.master_id == master_id,
+                BotInstance.is_current == True,  # noqa: E712
+            )
+            .values(is_current=False)
+        )
+        res = await self.session.execute(stmt)
+        await self.session.flush()
+        return res.rowcount or 0
 
     async def get_by_id_and_owner(
         self, bot_instance_id: int, owner_user_id: int
@@ -157,6 +165,7 @@ class BotInstanceRepository:
         public_id: Optional[uuid.UUID] = None,
         status: BotInstanceStatus = BotInstanceStatus.ACTIVE,
         token_version: int = 1,
+        is_current: bool = True,
     ) -> BotInstance:
         """Create and persist a new BotInstance."""
         instance = BotInstance(
@@ -168,6 +177,7 @@ class BotInstanceRepository:
             webhook_secret=webhook_secret,
             status=status,
             token_version=token_version,
+            is_current=is_current,
         )
         if public_id is not None:
             instance.public_id = public_id

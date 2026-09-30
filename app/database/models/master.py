@@ -18,6 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -121,6 +122,9 @@ class BotInstance(Base):
         Enum(BotInstanceStatus, name="bot_instance_status_enum", native_enum=True),
         default=BotInstanceStatus.PROVISIONING,
         nullable=False,
+    )
+    is_current: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
     )
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     token_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

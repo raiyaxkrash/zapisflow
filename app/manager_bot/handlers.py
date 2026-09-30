@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
 from app.core.security import mask_token
+from app.core.token_crypto import TokenCrypto
 from app.database.models.master import BotInstanceStatus, Master, MasterSettings, MasterStatus, SubscriptionStatus
 from app.database.models.user import User
 from app.manager_bot.keyboards import (
@@ -87,6 +88,13 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession) 
             "Выберите проект для управления или создайте новый:"
         )
         await message.answer(text, reply_markup=project_list_keyboard(masters))
+
+
+@manager_router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    """Manager Bot /cancel command to clear active FSM state."""
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
 
 
 @manager_router.callback_query(F.data == "mgr:menu")
@@ -360,11 +368,16 @@ async def msg_receive_bot_token(
         )
         return
 
+    # Encrypt candidate token with TokenCrypto before storing in FSM (zero plaintext in Redis/Memory)
+    crypto = TokenCrypto()
+    encrypted_candidate_token = crypto.encrypt(token, associated_data=identity.id)
+    del token
+
     # Store candidate data in FSM for confirmation
     await state.set_state(ConnectBotStates.confirm_connect)
     await state.update_data(
         master_id=master_id,
-        candidate_token=token,
+        encrypted_candidate_token=encrypted_candidate_token,
         candidate_bot_id=identity.id,
         candidate_username=identity.username,
         candidate_first_name=identity.first_name,
@@ -389,22 +402,38 @@ async def cb_confirm_bot_connection(
     """Commit bot provisioning and set webhook."""
     data = await state.get_data()
     master_id = data.get("master_id")
-    token = data.get("candidate_token")
+    encrypted_token = data.get("encrypted_candidate_token")
     bot_id = data.get("candidate_bot_id")
     bot_username = data.get("candidate_username")
     bot_first_name = data.get("candidate_first_name")
 
-    # Immediately scrub plaintext token from FSM (Section 9, 42)
-    await state.update_data(candidate_token=None)
+    # Immediately clear FSM before provisioning (0 residual data in Redis/Memory)
     await state.clear()
 
-    if not master_id or not token or not bot_id:
+    if not master_id or not encrypted_token or not bot_id:
         await callback.answer("Данные устарели. Начните сначала.", show_alert=True)
         return
 
     user = await _get_or_create_user(session, callback.from_user)
+
+    # Fail-closed ownership check
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    # Decrypt candidate token only for provisioning
+    crypto = TokenCrypto()
+    try:
+        token = crypto.decrypt(encrypted_token, associated_data=bot_id)
+    except Exception as exc:
+        logger.error("Failed to decrypt candidate token for bot %s: %s", bot_id, exc)
+        await callback.answer("Ошибка расшифровки токена. Повторите попытку.", show_alert=True)
+        return
+
     gateway = TelegramProvisioningGateway()
-    service = BotProvisioningService(session=session, gateway=gateway)
+    service = BotProvisioningService(session=session, gateway=gateway, crypto=crypto)
     identity = BotIdentity(id=bot_id, username=bot_username, first_name=bot_first_name)
 
     try:
@@ -430,6 +459,8 @@ async def cb_confirm_bot_connection(
         )
         await callback.answer()
         return
+    finally:
+        del token
 
     text = (
         f"🎉 <b>Бот @{bot_instance.telegram_username} успешно подключён!</b>\n\n"
@@ -498,6 +529,12 @@ async def cb_activate_bot(callback: CallbackQuery, session: AsyncSession) -> Non
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
 
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
     service = BotProvisioningService(session=session)
     try:
         is_ready, missing = await service.activate_master_and_bot(master_id, user.id)
@@ -505,8 +542,6 @@ async def cb_activate_bot(callback: CallbackQuery, session: AsyncSession) -> Non
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
         return
 
-    master_repo = MasterRepository(session)
-    master = await master_repo.get_by_id(master_id)
     bot_repo = BotInstanceRepository(session)
     bot = await bot_repo.get_current_for_master(master_id)
 
@@ -537,6 +572,12 @@ async def cb_retry_provisioning(callback: CallbackQuery, session: AsyncSession) 
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
 
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
     bot_repo = BotInstanceRepository(session)
     bot = await bot_repo.get_current_for_master(master_id)
     if not bot:
@@ -564,6 +605,12 @@ async def cb_disable_bot(callback: CallbackQuery, session: AsyncSession) -> None
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
 
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
     bot_repo = BotInstanceRepository(session)
     bot = await bot_repo.get_current_for_master(master_id)
     if not bot:
@@ -587,6 +634,12 @@ async def cb_enable_bot(callback: CallbackQuery, session: AsyncSession) -> None:
     """Re-enable a disabled bot."""
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
+
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
 
     bot_repo = BotInstanceRepository(session)
     bot = await bot_repo.get_current_for_master(master_id)
@@ -614,6 +667,12 @@ async def cb_rotate_token_prompt(callback: CallbackQuery, state: FSMContext, ses
     """Prompt for new token to rotate."""
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
+
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
 
     bot_repo = BotInstanceRepository(session)
     bot = await bot_repo.get_current_for_master(master_id)
@@ -669,6 +728,8 @@ async def msg_receive_rotated_token(message: Message, state: FSMContext, session
             f"❌ <b>Ошибка ротации токена:</b> {str(exc)[:200]}",
             reply_markup=main_menu_keyboard(),
         )
+    finally:
+        del new_token
 
 
 @manager_router.callback_query(F.data == "mgr:cancel")

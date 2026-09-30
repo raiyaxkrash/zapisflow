@@ -322,6 +322,7 @@ async def test_registry_provisioning_and_setup_required_states(
         telegram_bot_id=13010001,
         encrypted_token=encrypted,
         status=BotInstanceStatus.PROVISIONING,
+        is_current=False,
     )
     enc_setup = token_crypto.encrypt(raw_token, associated_data=13010002)
     inst_setup = await repo.create_bot_instance(
@@ -329,6 +330,7 @@ async def test_registry_provisioning_and_setup_required_states(
         telegram_bot_id=13010002,
         encrypted_token=enc_setup,
         status=BotInstanceStatus.SETUP_REQUIRED,
+        is_current=True,
     )
 
     registry = BotRegistry(token_crypto=token_crypto)

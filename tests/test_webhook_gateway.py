@@ -449,6 +449,7 @@ async def test_webhook_inactive_bot_states_rejected(
         telegram_bot_id=444555661,
         webhook_secret="sec_disabled",
         status=BotInstanceStatus.DISABLED,
+        is_current=True,
     )
     # Error Bot
     bot_error = BotInstance(
@@ -457,6 +458,7 @@ async def test_webhook_inactive_bot_states_rejected(
         telegram_bot_id=444555662,
         webhook_secret="sec_error",
         status=BotInstanceStatus.ERROR,
+        is_current=False,
     )
     # Provisioning Bot
     bot_prov = BotInstance(
@@ -465,6 +467,7 @@ async def test_webhook_inactive_bot_states_rejected(
         telegram_bot_id=444555663,
         webhook_secret="sec_prov",
         status=BotInstanceStatus.PROVISIONING,
+        is_current=False,
     )
     pg_session.add_all([bot_disabled, bot_error, bot_prov])
     await pg_session.commit()

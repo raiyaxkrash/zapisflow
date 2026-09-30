@@ -3,9 +3,11 @@
 import logging
 import secrets
 from typing import List, Optional, Tuple
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
+from app.core.security import redact_token
 from app.core.token_crypto import TokenCrypto
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterStatus
 from app.repositories.bot_instance_repository import BotInstanceRepository
@@ -15,6 +17,7 @@ from app.services.bot_registry import BotRegistry
 from app.services.exceptions import (
     AccessDeniedError,
     DuplicateBotError,
+    InvalidBotTokenError,
     ManagerTokenCollisionError,
     ProvisioningWebhookError,
     TelegramGatewayError,
@@ -53,6 +56,11 @@ class BotProvisioningService:
     ) -> BotIdentity:
         """Validate candidate token with Telegram getMe and ensure uniqueness."""
         clean_token = token.strip()
+        if not clean_token or ":" not in clean_token:
+            raise InvalidBotTokenError("Некорректный синтаксис токена Telegram бота.")
+        prefix, _, _ = clean_token.partition(":")
+        if not prefix.isdigit():
+            raise InvalidBotTokenError("Некорректный синтаксис токена Telegram бота.")
 
         # 1. Prevent collision with platform Manager Bot token
         if settings.manager_bot_token and clean_token == settings.manager_bot_token.strip():
@@ -92,24 +100,44 @@ class BotProvisioningService:
         if not master or master.owner_user_id != actor_user_id:
             raise AccessDeniedError("У вас нет прав на управление данным проектом.")
 
-        # 2. Encrypt token via AES-256-GCM with telegram_bot_id as associated data
+        # 2. Check current bot instance for this master
+        existing_current = await self.bot_repo.get_current_for_master(master_id)
+        if existing_current and existing_current.status in (
+            BotInstanceStatus.ACTIVE,
+            BotInstanceStatus.PROVISIONING,
+        ):
+            raise DuplicateBotError("У этого проекта уже есть подключённый активный бот.")
+
+        # Deprecate previous current bot if exists
+        if existing_current:
+            await self.bot_repo.deprecate_current_for_master(master_id)
+
+        # 3. Encrypt token via AES-256-GCM with telegram_bot_id as associated data
         encrypted_token = self.crypto.encrypt(clean_token, associated_data=bot_identity.id)
         webhook_secret = secrets.token_urlsafe(32)
 
-        # 3. Create BotInstance in PROVISIONING state
-        bot_instance = await self.bot_repo.create_bot_instance(
-            master_id=master_id,
-            telegram_bot_id=bot_identity.id,
-            telegram_username=bot_identity.username,
-            telegram_first_name=bot_identity.first_name,
-            encrypted_token=encrypted_token,
-            webhook_secret=webhook_secret,
-            status=BotInstanceStatus.PROVISIONING,
-            token_version=1,
-        )
-
-        # 4. DB COMMIT BEFORE Network call (Transaction boundary separation)
-        await self.session.commit()
+        # 4. Create BotInstance in PROVISIONING state and commit BEFORE network call
+        try:
+            bot_instance = await self.bot_repo.create_bot_instance(
+                master_id=master_id,
+                telegram_bot_id=bot_identity.id,
+                telegram_username=bot_identity.username,
+                telegram_first_name=bot_identity.first_name,
+                encrypted_token=encrypted_token,
+                webhook_secret=webhook_secret,
+                status=BotInstanceStatus.PROVISIONING,
+                token_version=1,
+                is_current=True,
+            )
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            orig_str = str(exc.orig) if hasattr(exc, "orig") else str(exc)
+            if "telegram_bot_id" in orig_str:
+                raise DuplicateBotError("Этот Telegram-бот уже подключён к платформе.") from exc
+            if "current_per_master" in orig_str:
+                raise DuplicateBotError("Для данного проекта уже выполняется подключение бота.") from exc
+            raise DuplicateBotError("Конфликт при подключении бота.") from exc
 
         await self.audit_service.log_event(
             action=AuditEvent.BOT_PROVISION_STARTED,
@@ -132,6 +160,14 @@ class BotProvisioningService:
                 secret_token=webhook_secret,
                 drop_pending_updates=False,
             )
+
+            # 7. Verification of webhook info (Section 14)
+            info = await self.gateway.get_webhook_info(clean_token)
+            if clean_token in (info.url or "") or (webhook_secret and webhook_secret in (info.url or "")):
+                raise ProvisioningWebhookError("В URL вебхука обнаружены секретные данные.")
+            if info.url != webhook_url:
+                raise ProvisioningWebhookError(f"URL вебхука в Telegram ({info.url}) не совпадает с ожидаемым ({webhook_url}).")
+
             # Success -> advance status to SETUP_REQUIRED
             bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
             bot_instance.last_error = None
@@ -148,7 +184,7 @@ class BotProvisioningService:
             return bot_instance
         except Exception as exc:
             # Failure -> mark ERROR status with safe description
-            error_desc = f"Ошибка подключения вебхука: {str(exc)[:200]}"
+            error_desc = f"Ошибка подключения вебхука: {redact_token(str(exc)[:200])}"
             bot_instance.status = BotInstanceStatus.ERROR
             bot_instance.last_error = error_desc
             await self.session.commit()
@@ -192,6 +228,14 @@ class BotProvisioningService:
                 secret_token=bot_instance.webhook_secret,
                 drop_pending_updates=False,
             )
+
+            # Webhook URL verification
+            info = await self.gateway.get_webhook_info(raw_token)
+            if raw_token in (info.url or "") or (bot_instance.webhook_secret and bot_instance.webhook_secret in (info.url or "")):
+                raise ProvisioningWebhookError("В URL вебхука обнаружены секретные данные.")
+            if info.url != webhook_url:
+                raise ProvisioningWebhookError(f"URL вебхука в Telegram ({info.url}) не совпадает с ожидаемым ({webhook_url}).")
+
             bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
             bot_instance.last_error = None
             await self.session.commit()
@@ -206,7 +250,7 @@ class BotProvisioningService:
             await self.session.commit()
             return bot_instance
         except Exception as exc:
-            error_desc = f"Ошибка повторного подключения: {str(exc)[:200]}"
+            error_desc = f"Ошибка повторного подключения: {redact_token(str(exc)[:200])}"
             bot_instance.status = BotInstanceStatus.ERROR
             bot_instance.last_error = error_desc
             await self.session.commit()
@@ -241,7 +285,11 @@ class BotProvisioningService:
         bot_instance.telegram_first_name = identity.first_name
         await self.session.commit()
 
-        # 5. Update webhook with new token
+        # 5. Invalidate BotRegistry runtime pool and Redis bus immediately so old token v1 is discarded
+        if self.registry:
+            await self.registry.invalidate_bot(bot_instance.id)
+
+        # 6. Update webhook with new token
         base_url = settings.webhook_base_url.rstrip("/")
         webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
 
@@ -251,15 +299,17 @@ class BotProvisioningService:
                 url=webhook_url,
                 secret_token=bot_instance.webhook_secret,
             )
+            # Verify webhook info (Section 14)
+            info = await self.gateway.get_webhook_info(clean_token)
+            if clean_token in (info.url or "") or (bot_instance.webhook_secret and bot_instance.webhook_secret in (info.url or "")):
+                raise ProvisioningWebhookError("В URL вебхука обнаружены секретные данные.")
+            if info.url != webhook_url:
+                raise ProvisioningWebhookError(f"URL вебхука в Telegram ({info.url}) не совпадает с ожидаемым ({webhook_url}).")
         except Exception as exc:
             bot_instance.status = BotInstanceStatus.ERROR
-            bot_instance.last_error = f"Ошибка вебхука при ротации: {str(exc)[:200]}"
+            bot_instance.last_error = f"Ошибка вебхука при ротации: {redact_token(str(exc)[:200])}"
             await self.session.commit()
             raise ProvisioningWebhookError("Токен сохранен, но вебхук не удалось обновить.") from exc
-
-        # 6. Invalidate BotRegistry runtime pool and Redis bus
-        if self.registry:
-            await self.registry.invalidate_bot(bot_instance.id)
 
         await self.audit_service.log_event(
             action=AuditEvent.BOT_TOKEN_ROTATED,
@@ -295,6 +345,7 @@ class BotProvisioningService:
                     bot_instance.id,
                     exc,
                 )
+                bot_instance.last_error = f"Ошибка отзыва вебхука в Telegram: {redact_token(str(exc)[:200])}"
 
         # 2. Update status in database
         bot_instance.status = BotInstanceStatus.DISABLED
@@ -332,22 +383,39 @@ class BotProvisioningService:
             associated_data=bot_instance.telegram_bot_id,
         )
 
-        # Re-validate with getMe
-        await self.gateway.validate_token(raw_token)
+        try:
+            # Re-validate with getMe
+            await self.gateway.validate_token(raw_token)
 
-        # Re-install webhook
-        base_url = settings.webhook_base_url.rstrip("/")
-        webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
+            # Re-install webhook
+            base_url = settings.webhook_base_url.rstrip("/")
+            webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
 
-        await self.gateway.set_webhook(
-            token=raw_token,
-            url=webhook_url,
-            secret_token=bot_instance.webhook_secret,
-        )
+            await self.gateway.set_webhook(
+                token=raw_token,
+                url=webhook_url,
+                secret_token=bot_instance.webhook_secret,
+            )
 
-        bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
-        bot_instance.last_error = None
-        await self.session.commit()
+            # Webhook URL verification
+            info = await self.gateway.get_webhook_info(raw_token)
+            if raw_token in (info.url or "") or (bot_instance.webhook_secret and bot_instance.webhook_secret in (info.url or "")):
+                raise ProvisioningWebhookError("В URL вебхука обнаружены секретные данные.")
+            if info.url != webhook_url:
+                raise ProvisioningWebhookError(f"URL вебхука в Telegram ({info.url}) не совпадает с ожидаемым ({webhook_url}).")
+
+            bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
+            bot_instance.last_error = None
+            await self.session.commit()
+        except Exception as exc:
+            bot_instance.status = BotInstanceStatus.ERROR
+            bot_instance.last_error = f"Ошибка включения бота: {redact_token(str(exc)[:200])}"
+            await self.session.commit()
+            raise ProvisioningWebhookError(bot_instance.last_error) from exc
+
+        # Invalidate BotRegistry so fresh bot instance is used
+        if self.registry:
+            await self.registry.invalidate_bot(bot_instance.id)
 
         await self.audit_service.log_event(
             action=AuditEvent.BOT_ENABLED,
@@ -379,7 +447,14 @@ class BotProvisioningService:
         if bot_instance and bot_instance.status == BotInstanceStatus.SETUP_REQUIRED:
             bot_instance.status = BotInstanceStatus.ACTIVE
 
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            orig_str = str(exc.orig) if hasattr(exc, "orig") else str(exc)
+            if "uq_bot_instances_active_per_master" in orig_str:
+                return False, ["У этого мастера уже есть активный бот."]
+            return False, [f"Ошибка активации: {exc}"]
 
         await self.audit_service.log_event(
             action=AuditEvent.MASTER_ACTIVATED,
