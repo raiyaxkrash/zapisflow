@@ -16,6 +16,7 @@ from app.database.models.broadcast import BroadcastStatus
 from app.database.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.services.broadcast_service import BroadcastService
+from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="admin_broadcast")
 router.message.filter(IsAdminFilter())
@@ -30,8 +31,9 @@ async def cb_admin_broadcast_root(
     Open mass broadcast management menu with subscriber statistics.
     """
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     broadcast_svc = BroadcastService(session)
-    eligible_users = await broadcast_svc.get_eligible_users()
+    eligible_users = await broadcast_svc.get_eligible_users(master_id=master_id)
 
     text = (
         "<b>📢 Массовые рассылки клиентам</b>\n\n"
@@ -224,9 +226,11 @@ async def show_broadcast_preview(
         else:
             await event.answer("Профиль администратора не найден", show_alert=True)
         return
+    master_id = await LegacyTenantResolver.get_master_id(session)
     broadcast_svc = BroadcastService(session)
 
     broadcast = await broadcast_svc.create_broadcast(
+        master_id=master_id,
         text=data["text"],
         admin_id=admin.id,
         photo_file_id=data.get("photo_file_id"),
@@ -301,8 +305,11 @@ async def cb_broadcast_execute(
 
     await callback.answer("Рассылка запущена! 🚀", show_alert=False)
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     broadcast_svc = BroadcastService(session)
-    completed_bc = await broadcast_svc.execute_broadcast(broadcast_id=broadcast_id, bot=bot)
+    completed_bc = await broadcast_svc.execute_broadcast(
+        master_id=master_id, broadcast_id=broadcast_id, bot=bot
+    )
 
     if completed_bc.status == BroadcastStatus.SENDING:
         await bot.send_message(

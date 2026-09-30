@@ -19,7 +19,7 @@ from app.database.models.notification import (
     NotificationType,
 )
 from app.database.session import async_session_maker
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
 
 logger = logging.getLogger("app.scheduler.reminder_worker")
@@ -41,11 +41,7 @@ async def send_visit_reminders(
 
     async with session_maker() as session:
         try:
-            settings_repo = SettingsRepository(session)
-            tz_str = await settings_repo.get_value("timezone", settings.timezone)
-            studio_address = await settings_repo.get_value(
-                "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
-            )
+            master_settings_repo = MasterSettingsRepository(session)
 
             # Look ahead up to 26 hours
             horizon_dt = now_utc + timedelta(hours=26)
@@ -70,13 +66,22 @@ async def send_visit_reminders(
                 if not user or not user.telegram_id or user.telegram_id <= 0 or user.is_bot_blocked:
                     continue
 
-                claimed_types = {n.type for n in app.notifications}
+                m_settings = await master_settings_repo.get_by_master_id(app.master_id)
+                tz_str = settings.timezone
+                studio_address = (
+                    m_settings.studio_address
+                    if m_settings and m_settings.studio_address
+                    else "Адрес студии мастера"
+                )
+                reminder_24h_ok = m_settings.reminder_24h_enabled if m_settings else True
+                reminder_3h_ok = m_settings.reminder_3h_enabled if m_settings else True
 
+                claimed_types = {n.type for n in app.notifications}
                 time_until = app.start_time - now_utc
 
                 # 1. Check 24-Hour Reminder
                 if timedelta(hours=3) < time_until <= timedelta(hours=24):
-                    if NotificationType.REMINDER_24H not in claimed_types:
+                    if reminder_24h_ok and NotificationType.REMINDER_24H not in claimed_types:
                         dt_str = format_datetime_ru(app.start_time, tz_name=tz_str)
                         rem_amount = app.snapshot_service_price - app.snapshot_deposit_amount
                         rem_str = format_rub(rem_amount)
@@ -101,7 +106,7 @@ async def send_visit_reminders(
 
                 # 2. Check 3-Hour Reminder
                 elif timedelta(minutes=0) < time_until <= timedelta(hours=3):
-                    if NotificationType.REMINDER_3H not in claimed_types:
+                    if reminder_3h_ok and NotificationType.REMINDER_3H not in claimed_types:
                         time_str = format_time_ru(app.start_time, tz_name=tz_str)
                         msg_text = (
                             f"⏰ <b>Скоро ваша запись!</b>\n\n"

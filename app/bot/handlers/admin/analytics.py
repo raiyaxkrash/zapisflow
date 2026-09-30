@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.filters import IsAdminFilter
 from app.bot.keyboards.admin import AdminMenuCallback
 from app.services.analytics_service import AnalyticsService
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_rub
 
 router = Router(name="admin_analytics")
@@ -64,17 +65,18 @@ async def cb_admin_analytics_view(
     if callback.data and callback.data.startswith("adm_an:period:"):
         period = callback.data.split(":")[2]
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     analytics_svc = AnalyticsService(session)
 
     if period == "today":
-        metrics = await analytics_svc.get_today_analytics(master_id=1)
+        metrics = await analytics_svc.get_today_analytics(master_id=master_id)
     elif period == "prev_month":
-        metrics = await analytics_svc.get_previous_month_analytics(master_id=1)
+        metrics = await analytics_svc.get_previous_month_analytics(master_id=master_id)
     elif period == "all_time":
-        metrics = await analytics_svc.get_all_time_analytics(master_id=1)
+        metrics = await analytics_svc.get_all_time_analytics(master_id=master_id)
     else:
         period = "month"
-        metrics = await analytics_svc.get_current_month_analytics(master_id=1)
+        metrics = await analytics_svc.get_current_month_analytics(master_id=master_id)
 
     text = (
         f"<b>📊 Статистика и аналитика мастера</b>\n"

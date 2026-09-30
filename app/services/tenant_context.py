@@ -26,6 +26,11 @@ class DefaultMasterProvider:
         """Returns the canonical fallback master ID for legacy single-tenant operations."""
         return DEFAULT_MASTER_ID
 
+    @classmethod
+    async def get_master_id(cls, session: Optional[AsyncSession] = None) -> int:
+        """Async compatibility resolver for current single-bot runtime."""
+        return cls.get_default_master_id()
+
     @staticmethod
     async def get_default_master(session: AsyncSession) -> Optional[Master]:
         """Fetch the primary default master entity from database if provisioned."""

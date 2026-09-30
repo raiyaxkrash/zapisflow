@@ -19,8 +19,9 @@ from app.config.settings import settings
 from app.database.models.appointment import AppointmentStatus
 from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.services.booking_service import BookingService
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import render_appointment_card
 
 router = Router(name="client_my_appointments")
@@ -34,11 +35,12 @@ async def cb_my_bookings(
     session: AsyncSession,
 ) -> None:
     """
-    List user's active upcoming bookings.
+    List user's active upcoming bookings for current master.
     """
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     appointment_repo = AppointmentRepository(session)
-    appointments = await appointment_repo.get_user_upcoming(db_user.id)
+    appointments = await appointment_repo.get_user_upcoming(user_id=db_user.id, master_id=master_id)
 
     if not appointments:
         text = (
@@ -70,25 +72,28 @@ async def cb_booking_detail(
     """
     Show full appointment card.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     appointment_repo = AppointmentRepository(session)
-    appointment = await appointment_repo.get_by_id_with_relations(callback_data.appointment_id)
+    appointment = await appointment_repo.get_by_id_with_relations(
+        appointment_id=callback_data.appointment_id, master_id=master_id
+    )
 
     if not appointment or appointment.user_id != db_user.id:
         await callback.answer("Запись не найдена", show_alert=True)
         return
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
-    master_contact = await settings_repo.get_value("master_telegram", "https://t.me/")
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
+    master_contact = await settings_repo.get_value(master_id, "master_telegram", "https://t.me/")
 
     card_text = render_appointment_card(appointment, tz_name=tz_str)
 
     # If appointment is still waiting for payment, show requisites / pay button
     if appointment.status == AppointmentStatus.WAITING_PAYMENT:
-        bank_name = await settings_repo.get_value("bank_name", settings.bank_name)
-        card_number = await settings_repo.get_value("bank_card_number", settings.bank_card_number)
-        phone_req = await settings_repo.get_value("default_phone_requisites", settings.default_phone_requisites)
-        recipient = await settings_repo.get_value("bank_recipient_name", settings.bank_recipient_name)
+        bank_name = await settings_repo.get_value(master_id, "bank_name", settings.bank_name)
+        card_number = await settings_repo.get_value(master_id, "bank_card_number", settings.bank_card_number)
+        phone_req = await settings_repo.get_value(master_id, "default_phone_requisites", settings.default_phone_requisites)
+        recipient = await settings_repo.get_value(master_id, "bank_recipient_name", settings.bank_recipient_name)
 
         card_text += (
             f"\n\n<b>Реквизиты для предоплаты:</b>\n"
@@ -117,10 +122,12 @@ async def cb_client_cancel(
     """
     Client initiates cancellation: marks status CANCELLED_BY_CLIENT and retains deposit.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
 
     try:
         await booking_service.cancel_booking_by_client(
+            master_id=master_id,
             appointment_id=callback_data.appointment_id,
             user_id=db_user.id,
             reason="Отменено клиентом через Telegram-бота",

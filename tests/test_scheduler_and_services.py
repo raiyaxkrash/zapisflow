@@ -46,6 +46,7 @@ async def test_clean_expired_holds_job(
     now = datetime.now(pytz.UTC)
     app = Appointment(
         id=42,
+        master_id=1,
         user_id=1,
         service_id=10,
         status=AppointmentStatus.WAITING_PAYMENT,
@@ -87,14 +88,14 @@ async def test_clean_expired_holds_job(
             lambda s: mock_booking_service,
         )
         mp.setattr(
-            "app.scheduler.jobs.hold_cleaner.SettingsRepository",
+            "app.scheduler.jobs.hold_cleaner.MasterSettingsRepository",
             lambda s: mock_settings_repo,
         )
 
         cleaned = await clean_expired_holds(mock_bot, session_maker=mock_session_maker)
 
     assert cleaned == expected_count
-    mock_booking_service.expire_booking.assert_awaited_once_with(app.id)
+    mock_booking_service.expire_booking.assert_awaited_once_with(app.id, master_id=1)
     mock_session.commit.assert_awaited_once()
     if commit_fails:
         mock_session.rollback.assert_awaited_once()

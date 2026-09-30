@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.config.settings import settings
 from app.database.session import async_session_maker
 from app.repositories.appointment_repository import AppointmentRepository
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.services.booking_service import BookingService
 from app.utils.formatters import format_datetime_ru
 
@@ -23,27 +23,27 @@ async def clean_expired_holds(bot: Bot, session_maker: async_sessionmaker = asyn
     Search for WAITING_PAYMENT appointments where hold deadline passed and expire them.
     """
     expired_ids: list[int] = []
-    notifications: list[tuple[int, int, datetime, str]] = []
+    notifications: list[tuple[int, int, datetime, str, str]] = []
     async with session_maker() as session:
         try:
             app_repo = AppointmentRepository(session)
             booking_service = BookingService(session)
-            settings_repo = SettingsRepository(session)
+            master_settings_repo = MasterSettingsRepository(session)
 
-            tz_str = await settings_repo.get_value("timezone", settings.timezone)
             expired_appointments = await app_repo.get_expired_holds()
 
             if not expired_appointments:
                 return 0
 
             for app in expired_appointments:
-                if await booking_service.expire_booking(app.id) is None:
+                if await booking_service.expire_booking(app.id, master_id=app.master_id) is None:
                     continue
 
                 expired_ids.append(app.id)
+                tz_str = await master_settings_repo.get_value(app.master_id, "timezone", settings.timezone)
                 if app.user and app.user.telegram_id and app.user.telegram_id > 0:
                     notifications.append(
-                        (app.id, app.user.telegram_id, app.start_time, app.snapshot_service_title)
+                        (app.id, app.user.telegram_id, app.start_time, app.snapshot_service_title, tz_str)
                     )
 
             await session.commit()
@@ -56,7 +56,7 @@ async def clean_expired_holds(bot: Bot, session_maker: async_sessionmaker = asyn
     for appointment_id in expired_ids:
         logger.info("Released expired hold for appointment #%s", appointment_id)
 
-    for appointment_id, telegram_id, start_time, service_title in notifications:
+    for appointment_id, telegram_id, start_time, service_title, tz_str in notifications:
         try:
             dt_str = format_datetime_ru(start_time, tz_name=tz_str)
             client_text = (

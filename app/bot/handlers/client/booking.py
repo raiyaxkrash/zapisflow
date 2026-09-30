@@ -27,12 +27,13 @@ from app.bot.keyboards.client import (
 from app.bot.states.client import ClientBookingSG
 from app.config.settings import settings
 from app.database.models.user import User
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.service_repository import ServiceRepository
-from app.repositories.settings_repository import SettingsRepository
 from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
 from app.services.exceptions import SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import (
     format_date_ru,
     format_datetime_ru,
@@ -51,8 +52,9 @@ async def cb_start_booking(
     Start booking flow: prompt client to choose a service.
     """
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    services = await service_repo.list_active()
+    services = await service_repo.list_active(master_id=master_id)
 
     if not services:
         text = "К сожалению, в данный момент онлайн-запись временно недоступна. Пожалуйста, свяжитесь с мастером напрямую 🌸"
@@ -83,8 +85,9 @@ async def cb_service_selected(
     Service selected: calculate available calendar days and show inline calendar.
     """
     service_id = callback_data.service_id
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    service = await service_repo.get_by_id(service_id)
+    service = await service_repo.get_by_id(service_id, master_id=master_id)
 
     if not service or not service.is_active or service.is_archived:
         await callback.answer("Услуга недоступна", show_alert=True)
@@ -94,13 +97,13 @@ async def cb_service_selected(
 
     # Calculate available dates for the next 30 days
     slot_engine = SlotEngine(session)
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
 
     available_dates_list = await slot_engine.get_available_dates(
-        service_id=service_id, start_date=today, days_count=35
+        service_id=service_id, start_date=today, days_count=35, master_id=master_id
     )
     available_dates = set(available_dates_list)
 
@@ -148,21 +151,22 @@ async def cb_calendar_navigation(
         await callback.answer("Сессия устарела. Пожалуйста, начните заново.", show_alert=True)
         return
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     slot_engine = SlotEngine(session)
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
 
     if action in ["prev_month", "next_month"]:
         # Month switch
         available_dates_list = await slot_engine.get_available_dates(
-            service_id=service_id, start_date=today, days_count=45
+            service_id=service_id, start_date=today, days_count=45, master_id=master_id
         )
         available_dates = set(available_dates_list)
 
         service_repo = ServiceRepository(session)
-        service = await service_repo.get_by_id(service_id)
+        service = await service_repo.get_by_id(service_id, master_id=master_id)
 
         text = (
             f"🌸 <b>Услуга:</b> {service.title}\n\n"
@@ -187,11 +191,11 @@ async def cb_calendar_navigation(
         if callback_data.day == 0:
             # Re-render calendar
             available_dates_list = await slot_engine.get_available_dates(
-                service_id=service_id, start_date=today, days_count=35
+                service_id=service_id, start_date=today, days_count=35, master_id=master_id
             )
             available_dates = set(available_dates_list)
             service_repo = ServiceRepository(session)
-            service = await service_repo.get_by_id(service_id)
+            service = await service_repo.get_by_id(service_id, master_id=master_id)
 
             text = f"🌸 <b>Услуга:</b> {service.title}\n\nВыберите дату:"
             if callback.message:
@@ -210,7 +214,7 @@ async def cb_calendar_navigation(
 
         # Day chosen! Calculate available slots
         chosen_date = date(callback_data.year, callback_data.month, callback_data.day)
-        slots = await slot_engine.get_available_slots(service_id, chosen_date)
+        slots = await slot_engine.get_available_slots(service_id, chosen_date, master_id=master_id)
 
         await state.update_data(chosen_date_iso=chosen_date.isoformat())
         await state.set_state(ClientBookingSG.choosing_time)
@@ -246,8 +250,9 @@ async def cb_slot_selected(
 
     data = await state.get_data()
     service_id = data.get("service_id") or callback_data.service_id
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    service = await service_repo.get_by_id(service_id)
+    service = await service_repo.get_by_id(service_id, master_id=master_id)
 
     if not db_user.phone:
         # Prompt for phone number using native Telegram contact button
@@ -267,7 +272,7 @@ async def cb_slot_selected(
         return
 
     # User already has phone number registered
-    await _show_policy_screen(callback, state, service, slot_dt, session)
+    await _show_policy_screen(callback, state, service, slot_dt, session, master_id=master_id)
 
 
 async def _show_policy_screen(
@@ -276,12 +281,13 @@ async def _show_policy_screen(
     service,
     slot_dt: datetime,
     session: AsyncSession,
+    master_id: int,
 ) -> None:
     """
     Render confirmation screen with cancellation and deposit policy.
     """
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(slot_dt, tz_name=tz_str)
     dur_str = format_duration(service.duration_min)
     price_str = format_rub(service.price)
@@ -364,12 +370,13 @@ async def msg_receive_phone(
         await state.clear()
         return
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    service = await service_repo.get_by_id(service_id)
+    service = await service_repo.get_by_id(service_id, master_id=master_id)
     slot_dt = datetime.fromtimestamp(slot_ts, pytz.UTC)
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(slot_dt, tz_name=tz_str)
     dur_str = format_duration(service.duration_min)
     price_str = format_rub(service.price)
@@ -437,9 +444,11 @@ async def cb_agree_policy(
 
     slot_dt = datetime.fromtimestamp(slot_ts, pytz.UTC)
     booking_service = BookingService(session)
+    master_id = await LegacyTenantResolver.get_master_id(session)
 
     try:
         appointment, payment = await booking_service.create_hold_booking(
+            master_id=master_id,
             user_id=db_user.id,
             service_id=service_id,
             start_time=slot_dt,
@@ -455,14 +464,14 @@ async def cb_agree_policy(
     await state.clear()
 
     # Fetch requisites from settings
-    settings_repo = SettingsRepository(session)
-    bank_name = await settings_repo.get_value("bank_name", settings.bank_name)
-    card_number = await settings_repo.get_value("bank_card_number", settings.bank_card_number)
-    phone_req = await settings_repo.get_value("default_phone_requisites", settings.default_phone_requisites)
-    recipient = await settings_repo.get_value("bank_recipient_name", settings.bank_recipient_name)
-    hold_mins = int(await settings_repo.get_value("hold_duration_minutes", settings.hold_duration_minutes))
+    settings_repo = MasterSettingsRepository(session)
+    bank_name = await settings_repo.get_value(master_id, "bank_name", settings.bank_name)
+    card_number = await settings_repo.get_value(master_id, "bank_card_number", settings.bank_card_number)
+    phone_req = await settings_repo.get_value(master_id, "default_phone_requisites", settings.default_phone_requisites)
+    recipient = await settings_repo.get_value(master_id, "bank_recipient_name", settings.bank_recipient_name)
+    hold_mins = int(await settings_repo.get_value(master_id, "hold_duration_minutes", settings.hold_duration_minutes))
 
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
     deposit_str = format_rub(appointment.snapshot_deposit_amount)
 

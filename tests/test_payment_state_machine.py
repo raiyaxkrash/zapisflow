@@ -60,6 +60,7 @@ async def test_submit_payment_proof_workflow() -> None:
     now = datetime.now(timezone.utc)
     appointment = Appointment(
         id=20,
+        master_id=1,
         user_id=5,
         service_id=1,
         status=AppointmentStatus.WAITING_PAYMENT,
@@ -75,6 +76,7 @@ async def test_submit_payment_proof_workflow() -> None:
     )
     payment = Payment(
         id=30,
+        master_id=1,
         appointment_id=20,
         user_id=5,
         amount=Decimal("500.00"),
@@ -92,6 +94,7 @@ async def test_submit_payment_proof_workflow() -> None:
         telegram_file_id="photo_123",
         telegram_file_unique_id="unique_123",
         media_type=MediaType.PHOTO,
+        master_id=1,
     )
 
     assert pay_res.status == PaymentStatus.SUBMITTED

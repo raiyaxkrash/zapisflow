@@ -21,12 +21,13 @@ from app.bot.keyboards.admin.callbacks import (
 from app.bot.states.admin import AdminManualBookingSG
 from app.config.settings import settings
 from app.database.models.user import User
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.service_repository import ServiceRepository
-from app.repositories.settings_repository import SettingsRepository
 from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
 from app.services.exceptions import SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="admin_manual_booking")
@@ -50,8 +51,9 @@ async def cb_manual_booking_start(
     await state.set_state(AdminManualBookingSG.choosing_service)
     await state.update_data(target_date_iso=target_date.isoformat())
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    services = await service_repo.list_active(master_id=1)
+    services = await service_repo.list_active(master_id=master_id)
 
     if not services:
         await callback.answer("Нет активных услуг для записи.", show_alert=True)
@@ -105,15 +107,16 @@ async def cb_manual_booking_choose_service(
     data = await state.get_data()
     target_date = date.fromisoformat(data["target_date_iso"])
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    service = await service_repo.get_by_id(service_id)
+    service = await service_repo.get_by_id(service_id, master_id=master_id)
     if not service:
         await callback.answer("Услуга не найдена", show_alert=True)
         return
 
     slot_engine = SlotEngine(session)
     slots = await slot_engine.get_available_slots(
-        service_id=service_id, target_date=target_date, master_id=1
+        service_id=service_id, target_date=target_date, master_id=master_id
     )
 
     if not slots:
@@ -364,13 +367,14 @@ async def finalize_manual_booking(
         await session.refresh(user)
 
     # 2. Create manual confirmed appointment
+    master_id = await LegacyTenantResolver.get_master_id(session)
     try:
         appointment, _ = await booking_service.create_hold_booking(
+            master_id=master_id,
             user_id=user.id,
             service_id=service_id,
             start_time=start_time,
             cancel_policy_agreed=True,
-            master_id=1,
             is_manual=True,
             admin_notes=notes,
         )
@@ -384,8 +388,8 @@ async def finalize_manual_booking(
 
     await state.clear()
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
 
     success_text = (

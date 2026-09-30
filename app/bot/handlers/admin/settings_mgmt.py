@@ -3,6 +3,7 @@ Admin settings and studio payment details management handlers.
 Allows viewing and editing payment requisites, studio address, and booking policies.
 """
 
+from typing import Any
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -12,7 +13,8 @@ from app.bot.filters import IsAdminFilter
 from app.bot.keyboards.admin import AdminMenuCallback, get_admin_dashboard_keyboard
 from app.bot.states.admin import AdminSettingsSG
 from app.config.settings import settings
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
+from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="admin_settings_mgmt")
 router.message.filter(IsAdminFilter())
@@ -23,16 +25,17 @@ async def format_settings_text(session: AsyncSession) -> tuple[str, InlineKeyboa
     """
     Load settings and build text and keyboard.
     """
-    repo = SettingsRepository(session)
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    repo = MasterSettingsRepository(session)
 
-    card = await repo.get_value("bank_card_number", settings.bank_card_number)
-    bank = await repo.get_value("bank_name", settings.bank_name)
-    recipient = await repo.get_value("bank_recipient_name", settings.bank_recipient_name)
+    card = await repo.get_value(master_id, "bank_card_number", settings.bank_card_number)
+    bank = await repo.get_value(master_id, "bank_name", settings.bank_name)
+    recipient = await repo.get_value(master_id, "bank_recipient_name", settings.bank_recipient_name)
     address = await repo.get_value(
-        "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
+        master_id, "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
     )
-    hold_min = await repo.get_value("hold_duration_minutes", settings.hold_duration_minutes)
-    cancel_hours = await repo.get_value("cancel_policy_hours", 24)
+    hold_min = await repo.get_value(master_id, "hold_duration_minutes", settings.hold_duration_minutes)
+    cancel_hours = await repo.get_value(master_id, "cancel_policy_hours", 24)
 
     text = (
         "<b>⚙️ Настройки и реквизиты студии</b>\n\n"
@@ -150,10 +153,27 @@ async def msg_admin_settings_save_value(
     """
     data = await state.get_data()
     setting_key = data["setting_key"]
-    val = message.text.strip()
+    raw_val = message.text.strip()
 
-    repo = SettingsRepository(session)
-    await repo.set_value(setting_key, val)
+    val: Any = raw_val
+    if setting_key in (
+        "hold_duration_minutes",
+        "cancel_policy_hours",
+        "booking_horizon_days",
+        "min_advance_hours",
+        "grid_step_minutes",
+        "default_buffer_minutes",
+    ):
+        try:
+            val = int(raw_val)
+        except ValueError:
+            await message.answer("⚠️ Введите целое число.")
+            return
+
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    repo = MasterSettingsRepository(session)
+    await repo.update_settings(master_id, **{setting_key: val})
+    await session.commit()
     await state.clear()
 
     text, keyboard = await format_settings_text(session)

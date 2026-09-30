@@ -1,6 +1,4 @@
-"""
-Payment service handling proof submission, verification and admin approval workflows.
-"""
+"""Payment service handling proof submission, verification and admin approval workflows with strict tenant isolation."""
 
 from datetime import datetime, timedelta
 from dataclasses import dataclass
@@ -30,9 +28,7 @@ class PaymentDecision:
 
 
 class PaymentService:
-    """
-    Business service managing payment receipts, client verification proofs and admin approvals.
-    """
+    """Business service managing payment receipts, client verification proofs and admin approvals per master_id."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -57,6 +53,7 @@ class PaymentService:
 
     async def submit_payment_proof(
         self,
+        master_id: int,
         appointment_id: int,
         user_id: int,
         telegram_file_id: str,
@@ -64,14 +61,12 @@ class PaymentService:
         media_type: MediaType = MediaType.PHOTO,
         comment: Optional[str] = None,
     ) -> Tuple[Appointment, Payment, PaymentProof]:
-        """
-        Record receipt upload by client, freeze hold and transition to PAYMENT_PROOF_SENT.
-        """
+        """Record receipt upload by client, freeze hold and transition to PAYMENT_PROOF_SENT strictly within master_id."""
         payment = await self.payment_repo.get_by_appointment_id(
-            appointment_id, for_update=True
+            appointment_id, master_id=master_id, for_update=True
         )
         appointment = await self.appointment_repo.get_by_id_with_relations(
-            appointment_id, for_update=True
+            appointment_id, master_id=master_id, for_update=True
         )
         if not appointment:
             raise BookingNotFoundError(f"Запись #{appointment_id} не найдена")
@@ -102,14 +97,17 @@ class PaymentService:
         ):
             raise HoldExpiredError("Время для загрузки чека истекло")
 
-        # Attach receipt proof
+        # Attach receipt proof strictly verified by master_id
         proof = await self.payment_repo.add_proof(
             payment_id=payment.id,
+            master_id=master_id,
             telegram_file_id=telegram_file_id,
             telegram_file_unique_id=telegram_file_unique_id,
             media_type=media_type,
             user_comment=comment,
         )
+        if not proof:
+            raise PaymentNotFoundError("Не удалось прикрепить чек: доступ к платежу ограничен")
 
         if payment.status != PaymentStatus.SUBMITTED:
             self._transition_payment(payment, PaymentStatus.SUBMITTED)
@@ -124,16 +122,16 @@ class PaymentService:
         return appointment, payment, proof
 
     async def approve_payment(
-        self, payment_id: int, admin_id: int
+        self, master_id: int, payment_id: int, admin_id: int
     ) -> PaymentDecision:
-        """
-        Admin approves payment receipt: confirms both payment and appointment.
-        """
-        payment = await self.payment_repo.get_by_id_with_proofs(payment_id, for_update=True)
+        """Admin approves payment receipt strictly within master_id."""
+        payment = await self.payment_repo.get_by_id_with_proofs(
+            payment_id, master_id=master_id, for_update=True
+        )
         if not payment:
             raise PaymentNotFoundError(f"Платеж #{payment_id} не найден")
         appointment = await self.appointment_repo.get_by_id_with_relations(
-            payment.appointment_id, for_update=True
+            payment.appointment_id, master_id=master_id, for_update=True
         )
         if not appointment:
             raise BookingNotFoundError(f"Связанная запись #{payment.appointment_id} не найдена")
@@ -157,20 +155,20 @@ class PaymentService:
 
     async def reject_payment(
         self,
+        master_id: int,
         payment_id: int,
         admin_id: int,
         reason: str,
         extend_hold_minutes: int = 15,
     ) -> PaymentDecision:
-        """
-        Admin rejects payment receipt with explanation.
-        Reverts appointment back to WAITING_PAYMENT with extended hold window.
-        """
-        payment = await self.payment_repo.get_by_id_with_proofs(payment_id, for_update=True)
+        """Admin rejects payment receipt with explanation strictly within master_id."""
+        payment = await self.payment_repo.get_by_id_with_proofs(
+            payment_id, master_id=master_id, for_update=True
+        )
         if not payment:
             raise PaymentNotFoundError(f"Платеж #{payment_id} не найден")
         appointment = await self.appointment_repo.get_by_id_with_relations(
-            payment.appointment_id, for_update=True
+            payment.appointment_id, master_id=master_id, for_update=True
         )
         if not appointment:
             raise BookingNotFoundError(f"Связанная запись #{payment.appointment_id} не найдена")
@@ -203,14 +201,16 @@ class PaymentService:
         return True
 
     async def resolve_cancelled_payment(
-        self, payment_id: int, admin_id: int, *, received: bool
+        self, master_id: int, payment_id: int, admin_id: int, *, received: bool
     ) -> PaymentDecision:
-        """Review an unconfirmed transfer after the client canceled its appointment."""
-        payment = await self.payment_repo.get_by_id_with_proofs(payment_id, for_update=True)
+        """Review an unconfirmed transfer after client cancellation strictly within master_id."""
+        payment = await self.payment_repo.get_by_id_with_proofs(
+            payment_id, master_id=master_id, for_update=True
+        )
         if payment is None:
             raise PaymentNotFoundError(f"Платеж #{payment_id} не найден")
         appointment = await self.appointment_repo.get_by_id_with_relations(
-            payment.appointment_id, for_update=True
+            payment.appointment_id, master_id=master_id, for_update=True
         )
         if appointment is None:
             raise BookingNotFoundError(f"Связанная запись #{payment.appointment_id} не найдена")
@@ -234,8 +234,6 @@ class PaymentService:
         await self.session.flush()
         return PaymentDecision(appointment, payment, changed=True)
 
-    async def list_pending_inbox(self, master_id: int = 1) -> Sequence[Payment]:
-        """
-        Get all submitted payments waiting for master's validation.
-        """
+    async def list_pending_inbox(self, master_id: int) -> Sequence[Payment]:
+        """Get all submitted payments waiting for master's validation."""
         return await self.payment_repo.list_pending_inbox(master_id=master_id)

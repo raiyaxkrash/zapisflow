@@ -88,12 +88,12 @@ async def test_slot_engine_calculation_with_active_booking():
     )
 
     # Mock settings
-    engine.settings_repo.get_value = AsyncMock(side_effect=lambda key, default: default)
+    engine.master_settings_repo.get_value = AsyncMock(side_effect=lambda master_id, key, default: default)
 
     # 1. First scenario: No appointments -> Slots from 10:00 to 14:00 (since 14:00 + 90m = 15:30 <= 16:00)
     engine._collect_busy_intervals = AsyncMock(return_value=[])
 
-    slots = await engine.get_available_slots(service_id=1, target_date=target_date)
+    slots = await engine.get_available_slots(service_id=1, target_date=target_date, master_id=1)
     # Expected slots with 30 min step:
     # 10:00, 10:30, 11:00, 11:30, 12:00, 12:30, 13:00, 13:30, 14:00 (14:30 + 90m = 16:00, with 30m buffer is 16:30 which ends after 16:00)
     assert len(slots) > 0
@@ -108,7 +108,7 @@ async def test_slot_engine_calculation_with_active_booking():
     booking_end_with_buffer = tz.localize(datetime(2026, 10, 20, 14, 0))
     engine._collect_busy_intervals = AsyncMock(return_value=[(booking_start, booking_end_with_buffer)])
 
-    slots_with_booking = await engine.get_available_slots(service_id=1, target_date=target_date)
+    slots_with_booking = await engine.get_available_slots(service_id=1, target_date=target_date, master_id=1)
     slot_hours_with_booking = [s.strftime("%H:%M") for s in slots_with_booking]
 
     # Slot 10:00 (service 10:00-11:30, buffer to 12:00): ends at 12:00, exactly touches 12:00 without overlapping [12:00, 14:00) -> VALID!

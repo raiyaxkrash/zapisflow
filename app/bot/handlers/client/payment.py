@@ -20,9 +20,10 @@ from app.config.settings import settings
 from app.database.models.payment import MediaType
 from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.services.booking_service import BookingService
 from app.services.payment_service import PaymentService
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="client_payment")
@@ -94,8 +95,10 @@ async def msg_receive_proof(
 
     user_comment = message.caption or None
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     payment_service = PaymentService(session)
     appointment, payment, _proof = await payment_service.submit_payment_proof(
+        master_id=master_id,
         appointment_id=appointment_id,
         user_id=db_user.id,
         telegram_file_id=telegram_file_id,
@@ -105,8 +108,8 @@ async def msg_receive_proof(
     )
 
     # Prepare notification data while the transaction and loaded objects are available.
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
     dep_str = format_rub(appointment.snapshot_deposit_amount)
     price_str = format_rub(appointment.snapshot_service_price)
@@ -203,10 +206,12 @@ async def cb_cancel_hold_booking(
     Cancel booking on requisites screen before payment is confirmed.
     """
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
 
     try:
         await booking_service.cancel_booking_by_client(
+            master_id=master_id,
             appointment_id=callback_data.appointment_id,
             user_id=db_user.id,
             reason="Отменено клиентом на экране оплаты",

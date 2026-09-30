@@ -17,11 +17,12 @@ from app.database.models.user import User
 from app.database.models.payment import MediaType, PaymentStatus
 from app.database.models.appointment import AppointmentStatus
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.payment_repository import PaymentRepository
-from app.repositories.settings_repository import SettingsRepository
 from app.repositories.user_repository import UserRepository
 from app.services.payment_service import PaymentService
 from app.services.exceptions import InvalidBookingStatusError
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="admin_payments")
@@ -36,8 +37,9 @@ async def cb_payments_inbox(
     """
     List of payments waiting for review (inbox).
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     payment_service = PaymentService(session)
-    pending_payments = await payment_service.list_pending_inbox()
+    pending_payments = await payment_service.list_pending_inbox(master_id=master_id)
 
     if not pending_payments:
         text = "<b>💳 Входящие чеки</b>\n\nВсе чеки проверены! Очередь пуста ✅"
@@ -80,8 +82,9 @@ async def cb_view_payment_detail(
     Display details of an individual pending payment receipt from inbox.
     """
     payment_id = int(callback.data.split(":")[2])
+    master_id = await LegacyTenantResolver.get_master_id(session)
     payment_repo = PaymentRepository(session)
-    payment = await payment_repo.get_by_id_with_proofs(payment_id)
+    payment = await payment_repo.get_by_id_with_proofs(payment_id, master_id=master_id)
 
     if not payment or not payment.appointment:
         await callback.answer("Платёж или запись не найдены", show_alert=True)
@@ -198,10 +201,12 @@ async def cb_approve_payment(
         return
     payment_service = PaymentService(session)
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     try:
         decision = await payment_service.approve_payment(
             payment_id=payment_id,
             admin_id=admin.id,
+            master_id=master_id,
         )
     except InvalidBookingStatusError:
         await callback.answer("Запись отменена. Проверьте перевод во входящих чеках.", show_alert=True)
@@ -216,11 +221,11 @@ async def cb_approve_payment(
         return
     appointment = decision.appointment
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
     studio_address = await settings_repo.get_value(
-        "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
+        master_id, "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
     )
     await session.commit()
 
@@ -270,7 +275,8 @@ async def cb_reject_payment_presets(
     Prompt admin with quick presets for rejection reason.
     """
     payment_id = int(callback.data.split(":")[2])
-    payment = await PaymentRepository(session).get_by_id_with_proofs(payment_id)
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    payment = await PaymentRepository(session).get_by_id_with_proofs(payment_id, master_id=master_id)
     if payment is None:
         await callback.answer("Платёж не найден", show_alert=True)
         return
@@ -348,6 +354,7 @@ async def cb_do_reject_payment(
         await callback.answer("Профиль администратора не найден", show_alert=True)
         return
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     payment_service = PaymentService(session)
     try:
         decision = await payment_service.reject_payment(
@@ -355,6 +362,7 @@ async def cb_do_reject_payment(
             admin_id=admin.id,
             reason=reason_text,
             extend_hold_minutes=15,
+            master_id=master_id,
         )
     except InvalidBookingStatusError:
         await callback.answer("Запись отменена. Проверьте перевод во входящих чеках.", show_alert=True)
@@ -415,8 +423,12 @@ async def cb_resolve_cancelled_payment(
         await callback.answer("Профиль администратора не найден", show_alert=True)
         return
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     decision = await PaymentService(session).resolve_cancelled_payment(
-        payment_id, admin.id, received=received
+        payment_id=payment_id,
+        admin_id=admin.id,
+        received=received,
+        master_id=master_id,
     )
     if not decision.changed:
         await callback.answer("Платёж уже обработан", show_alert=True)

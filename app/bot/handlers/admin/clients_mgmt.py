@@ -20,8 +20,10 @@ from app.bot.states.admin import AdminClientNoteSG, AdminClientSearchSG
 from app.config.settings import settings
 from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_client_repository import MasterClientRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.user_repository import UserRepository
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="admin_clients_mgmt")
@@ -30,13 +32,15 @@ router.callback_query.filter(IsAdminFilter())
 
 
 async def format_client_crm_card(
-    user: User, session: AsyncSession, tz_name: str
+    user: User, session: AsyncSession, tz_name: str, master_id: int
 ) -> str:
     """
-    Format rich CRM profile with stats and LTV.
+    Format rich CRM profile with stats and LTV strictly for the given master.
     """
     user_repo = UserRepository(session)
-    stats = await user_repo.get_user_crm_stats(user.id)
+    stats = await user_repo.get_user_crm_stats(user.id, master_id=master_id)
+    mc_repo = MasterClientRepository(session)
+    mc = await mc_repo.get_client(master_id, user.id)
 
     full_name = user.first_name
     if user.last_name:
@@ -73,8 +77,9 @@ async def format_client_crm_card(
         f"🗓 <b>Последний визит:</b> {last_visit}\n"
     )
 
-    if user.admin_notes:
-        card += f"\n📝 <b>Заметка мастера:</b> {user.admin_notes}\n"
+    notes = (mc.notes if mc and mc.notes else None) or user.admin_notes
+    if notes:
+        card += f"\n📝 <b>Заметка мастера:</b> {notes}\n"
 
     return card
 
@@ -140,8 +145,9 @@ async def msg_admin_client_search_results(
     query_text = message.text.strip()
     await state.clear()
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     user_repo = UserRepository(session)
-    users = await user_repo.search_users(search_text=query_text, limit=20)
+    users = await user_repo.search_users_for_master(master_id=master_id, search_text=query_text, limit=20)
 
     if not users:
         text = (
@@ -205,6 +211,7 @@ async def cb_admin_client_detail(
     Show full CRM profile card for a client.
     """
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     user_repo = UserRepository(session)
     user = await user_repo.get_by_id(callback_data.user_id)
 
@@ -212,10 +219,10 @@ async def cb_admin_client_detail(
         await callback.answer("Клиент не найден", show_alert=True)
         return
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
 
-    text = await format_client_crm_card(user, session, tz_name=tz_str)
+    text = await format_client_crm_card(user, session, tz_name=tz_str, master_id=master_id)
     # Only show telegram link if real positive telegram_id
     tg_id = user.telegram_id if (user.telegram_id and user.telegram_id > 0) else None
     keyboard = get_admin_client_card_keyboard(user_id=user.id, telegram_id=tg_id)
@@ -271,21 +278,25 @@ async def msg_admin_client_save_note(
     user_id = data["user_id"]
     await state.clear()
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     user_repo = UserRepository(session)
     user = await user_repo.get_by_id(user_id)
     if not user:
         await message.answer("Клиент не найден.")
         return
 
-    user.admin_notes = message.text.strip()
+    note_text = message.text.strip()
+    user.admin_notes = note_text
+    mc_repo = MasterClientRepository(session)
+    await mc_repo.update_notes(master_id=master_id, user_id=user_id, notes=note_text)
     await session.flush()
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
 
     text = (
         f"✅ <b>Заметка сохранена!</b>\n\n"
-        + await format_client_crm_card(user, session, tz_name=tz_str)
+        + await format_client_crm_card(user, session, tz_name=tz_str, master_id=master_id)
     )
     tg_id = user.telegram_id if (user.telegram_id and user.telegram_id > 0) else None
     keyboard = get_admin_client_card_keyboard(user_id=user.id, telegram_id=tg_id)

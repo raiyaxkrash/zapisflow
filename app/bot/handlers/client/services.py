@@ -14,6 +14,7 @@ from app.bot.keyboards.client import (
     get_services_list_keyboard,
 )
 from app.repositories.service_repository import ServiceRepository
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_duration, format_rub
 
 router = Router(name="client_services")
@@ -27,8 +28,9 @@ async def cb_services_list(
     """
     Display catalog of all active services with prices.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    services = await service_repo.list_active()
+    services = await service_repo.list_active(master_id=master_id)
 
     if not services:
         text = "В данный момент список услуг обновляется мастером. Пожалуйста, загляните позже 🌸"
@@ -55,8 +57,9 @@ async def cb_service_view(
     """
     Display detailed card for a single selected service.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    service = await service_repo.get_by_id(callback_data.service_id)
+    service = await service_repo.get_by_id(callback_data.service_id, master_id=master_id)
 
     if not service or not service.is_active or service.is_archived:
         await callback.answer("Услуга недоступна", show_alert=True)

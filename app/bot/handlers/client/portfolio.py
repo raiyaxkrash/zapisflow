@@ -17,6 +17,8 @@ from app.bot.keyboards.client import (
     get_portfolio_item_keyboard,
 )
 from app.database.models.portfolio import PortfolioCategory, PortfolioItem
+from app.repositories.portfolio_repository import PortfolioRepository
+from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="client_portfolio")
 
@@ -27,16 +29,12 @@ async def cb_portfolio_categories(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
     """
-    List active portfolio categories.
+    List active portfolio categories for current master.
     """
     await state.clear()
-    query = (
-        select(PortfolioCategory)
-        .where(PortfolioCategory.is_active.is_(True))
-        .order_by(PortfolioCategory.display_order.asc(), PortfolioCategory.id.asc())
-    )
-    result = await session.execute(query)
-    categories = result.scalars().all()
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    portfolio_repo = PortfolioRepository(session)
+    categories = await portfolio_repo.list_categories(master_id=master_id, active_only=True)
 
     if not categories:
         text = "Раздел портфолио в данный момент наполняется новыми работами 🌸"
@@ -70,19 +68,15 @@ async def cb_portfolio_view_item(
     session: AsyncSession,
 ) -> None:
     """
-    View works within a category with slider navigation.
+    View works within a category with slider navigation strictly verifying master ownership.
     """
     category_id = callback_data.category_id
     index = callback_data.item_index
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    portfolio_repo = PortfolioRepository(session)
 
-    # Fetch items for this category
-    query = (
-        select(PortfolioItem)
-        .where(PortfolioItem.category_id == category_id)
-        .order_by(PortfolioItem.display_order.asc(), PortfolioItem.id.asc())
-    )
-    result = await session.execute(query)
-    items = result.scalars().all()
+    # Fetch items for this category ensuring tenant ownership
+    items = await portfolio_repo.list_items(category_id=category_id, master_id=master_id)
 
     if not items:
         await callback.answer("В этой категории пока нет опубликованных работ", show_alert=True)

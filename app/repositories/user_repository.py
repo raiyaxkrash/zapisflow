@@ -1,6 +1,4 @@
-"""
-User repository for client management and CRM queries.
-"""
+"""User repository for client profile management and tenant-aware CRM queries."""
 
 from decimal import Decimal
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -9,22 +7,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database.models.appointment import Appointment, AppointmentStatus
+from app.database.models.master import MasterClient
 from app.database.models.user import Admin, User, UserMarketingPreference
 from app.repositories.base import BaseRepository
 
 
 class UserRepository(BaseRepository[User]):
-    """
-    Repository for managing User entities and calculating CRM metrics.
-    """
+    """Repository for managing User entities and calculating CRM metrics."""
 
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(User, session)
 
     async def get_by_telegram_id(self, telegram_id: int) -> Optional[User]:
-        """
-        Retrieve user by unique Telegram ID.
-        """
+        """Retrieve user by unique Telegram ID."""
         query = (
             select(User)
             .where(User.telegram_id == telegram_id)
@@ -48,9 +43,12 @@ class UserRepository(BaseRepository[User]):
         first_name: str,
         last_name: Optional[str] = None,
         username: Optional[str] = None,
+        master_id: Optional[int] = None,
     ) -> Tuple[User, bool]:
-        """
-        Find existing user or create a new user profile with marketing preferences.
+        """Find existing user or create a new user profile.
+        
+        If master_id is provided, automatically links user to master_clients
+        with marketing consent default=False per tenant security rules.
         """
         user = await self.get_by_telegram_id(telegram_id)
         if user:
@@ -65,11 +63,27 @@ class UserRepository(BaseRepository[User]):
             if user.username != username:
                 user.username = username
                 updated = True
-            if user.is_bot_blocked:
-                user.is_bot_blocked = False
-                updated = True
             if updated:
                 await self.session.flush()
+
+            if master_id is not None:
+                # Ensure master_client record exists
+                mc_res = await self.session.execute(
+                    select(MasterClient).where(
+                        MasterClient.master_id == master_id,
+                        MasterClient.user_id == user.id,
+                    )
+                )
+                if not mc_res.scalars().first():
+                    mc = MasterClient(
+                        master_id=master_id,
+                        user_id=user.id,
+                        is_marketing_allowed=False,
+                        is_bot_blocked=False,
+                    )
+                    self.session.add(mc)
+                    await self.session.flush()
+
             return user, False
 
         # Create new user
@@ -82,24 +96,30 @@ class UserRepository(BaseRepository[User]):
         self.session.add(user)
         await self.session.flush()
 
-        # Create default marketing preferences
-        pref = UserMarketingPreference(user_id=user.id, is_marketing_allowed=True)
+        # Create default legacy marketing preferences for DB backward compatibility
+        pref = UserMarketingPreference(user_id=user.id, is_marketing_allowed=False)
         self.session.add(pref)
         await self.session.flush()
+
+        if master_id is not None:
+            mc = MasterClient(
+                master_id=master_id,
+                user_id=user.id,
+                is_marketing_allowed=False,
+                is_bot_blocked=False,
+            )
+            self.session.add(mc)
+            await self.session.flush()
 
         await self.session.refresh(user)
         return user, True
 
     async def update_phone(self, user_id: int, phone: str) -> Optional[User]:
-        """
-        Update user's contact phone number.
-        """
+        """Update user's contact phone number."""
         return await self.update(user_id, phone=phone)
 
     async def update_last_activity(self, user_id: int) -> None:
-        """
-        Update last activity timestamp.
-        """
+        """Update last activity timestamp."""
         stmt = (
             update(User)
             .where(User.id == user_id)
@@ -108,9 +128,12 @@ class UserRepository(BaseRepository[User]):
         await self.session.execute(stmt)
         await self.session.flush()
 
-    async def set_bot_blocked(self, telegram_id: int, is_blocked: bool) -> None:
-        """
-        Mark user as having blocked or unblocked the bot.
+    async def set_bot_blocked(
+        self, telegram_id: int, is_blocked: bool, master_id: Optional[int] = None
+    ) -> None:
+        """Mark user as having blocked or unblocked the bot.
+        
+        Updates both the global user flag and tenant-scoped MasterClient flag.
         """
         stmt = (
             update(User)
@@ -118,12 +141,22 @@ class UserRepository(BaseRepository[User]):
             .values(is_bot_blocked=is_blocked)
         )
         await self.session.execute(stmt)
+        if master_id is not None:
+            user = await self.get_by_telegram_id(telegram_id)
+            if user:
+                mc_stmt = (
+                    update(MasterClient)
+                    .where(
+                        MasterClient.master_id == master_id,
+                        MasterClient.user_id == user.id,
+                    )
+                    .values(is_bot_blocked=is_blocked)
+                )
+                await self.session.execute(mc_stmt)
         await self.session.flush()
 
     async def is_admin(self, telegram_id: int) -> bool:
-        """
-        Check if a given Telegram ID has an active admin role.
-        """
+        """Check if a given Telegram ID has an active admin role."""
         query = (
             select(Admin.id)
             .join(User, Admin.user_id == User.id)
@@ -139,20 +172,22 @@ class UserRepository(BaseRepository[User]):
         )
         return result.scalars().first()
 
-    async def search_users(self, search_text: str, limit: int = 20) -> Sequence[User]:
-        """
-        Search users by name, username or phone.
-        """
+    async def search_users_for_master(
+        self, master_id: int, search_text: str, limit: int = 20
+    ) -> Sequence[User]:
+        """Search users strictly belonging to the master's client base via master_clients."""
         pattern = f"%{search_text.strip()}%"
         query = (
             select(User)
+            .join(MasterClient, MasterClient.user_id == User.id)
             .where(
+                MasterClient.master_id == master_id,
                 or_(
                     User.first_name.ilike(pattern),
                     User.last_name.ilike(pattern),
                     User.username.ilike(pattern),
                     User.phone.ilike(pattern),
-                )
+                ),
             )
             .order_by(User.last_activity_at.desc())
             .limit(limit)
@@ -160,10 +195,8 @@ class UserRepository(BaseRepository[User]):
         result = await self.session.execute(query)
         return result.scalars().all()
 
-    async def get_user_crm_stats(self, user_id: int) -> Dict[str, Any]:
-        """
-        Calculate CRM statistics for a user: total bookings, completed, cancelled, no-show, LTV.
-        """
+    async def get_user_crm_stats(self, user_id: int, master_id: int) -> Dict[str, Any]:
+        """Calculate CRM statistics strictly for a user within a specific master_id."""
         query = (
             select(
                 func.count(Appointment.id).label("total_bookings"),
@@ -184,7 +217,10 @@ class UserRepository(BaseRepository[User]):
                 func.min(Appointment.start_time).label("first_booking_at"),
                 func.max(Appointment.start_time).label("last_booking_at"),
             )
-            .where(Appointment.user_id == user_id)
+            .where(
+                Appointment.user_id == user_id,
+                Appointment.master_id == master_id,
+            )
         )
         result = await self.session.execute(query)
         row = result.one()

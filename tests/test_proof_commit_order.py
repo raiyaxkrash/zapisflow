@@ -33,7 +33,12 @@ def _context(monkeypatch, *, media_type=MediaType.PHOTO):
     )
     monkeypatch.setattr(
         payment_handler,
-        "SettingsRepository",
+        "LegacyTenantResolver",
+        SimpleNamespace(get_master_id=AsyncMock(return_value=1)),
+    )
+    monkeypatch.setattr(
+        payment_handler,
+        "MasterSettingsRepository",
         lambda session: SimpleNamespace(get_value=AsyncMock(return_value="UTC")),
     )
     monkeypatch.setattr(

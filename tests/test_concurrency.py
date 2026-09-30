@@ -56,9 +56,13 @@ async def test_concurrent_booking_race_condition() -> None:
     # Mock repos
     service_a.appointment_repo = AsyncMock()
     service_a.appointment_repo.get_active_overlapping.return_value = []
+    service_a.master_settings_repo = AsyncMock()
+    service_a.master_settings_repo.get_value.return_value = 30
 
     service_b.appointment_repo = AsyncMock()
     service_b.appointment_repo.get_active_overlapping.return_value = []
+    service_b.master_settings_repo = AsyncMock()
+    service_b.master_settings_repo.get_value.return_value = 30
 
     # First session flush succeeds
     first_session.flush = AsyncMock()

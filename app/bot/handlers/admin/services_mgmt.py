@@ -20,6 +20,7 @@ from app.bot.keyboards.admin import (
 from app.bot.states.admin import AdminServiceSG
 from app.database.models.service import DepositType, Service
 from app.repositories.service_repository import ServiceRepository
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_rub
 
 router = Router(name="admin_services_mgmt")
@@ -63,8 +64,9 @@ async def cb_admin_services_list(
     List all master services.
     """
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    services = await service_repo.list_all_for_admin(master_id=1)
+    services = await service_repo.list_all_for_admin(master_id=master_id)
 
     text = (
         "<b>💰 Управление услугами и прайс-листом</b>\n\n"
@@ -91,8 +93,9 @@ async def cb_admin_service_detail(
     Show individual service management card.
     """
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    service = await service_repo.get_by_id(callback_data.service_id)
+    service = await service_repo.get_by_id(callback_data.service_id, master_id=master_id)
 
     if not service:
         await callback.answer("Услуга не найдена", show_alert=True)
@@ -115,14 +118,15 @@ async def cb_admin_service_toggle(
     """
     Toggle service active status.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    new_status = await service_repo.toggle_active(callback_data.service_id)
+    new_status = await service_repo.toggle_active(callback_data.service_id, master_id=master_id)
 
     if new_status is None:
         await callback.answer("Услуга не найдена", show_alert=True)
         return
 
-    service = await service_repo.get_by_id(callback_data.service_id)
+    service = await service_repo.get_by_id(callback_data.service_id, master_id=master_id)
     text = format_service_card(service)
     keyboard = get_admin_service_card_keyboard(service)
 
@@ -142,10 +146,11 @@ async def cb_admin_service_archive(
     """
     Soft-delete / archive service.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    await service_repo.archive(callback_data.service_id)
+    await service_repo.archive(callback_data.service_id, master_id=master_id)
 
-    service = await service_repo.get_by_id(callback_data.service_id)
+    service = await service_repo.get_by_id(callback_data.service_id, master_id=master_id)
     text = format_service_card(service)
     keyboard = get_admin_service_card_keyboard(service)
 
@@ -163,10 +168,11 @@ async def cb_admin_service_unarchive(
     """
     Restore service from archive.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    await service_repo.unarchive(callback_data.service_id)
+    await service_repo.unarchive(callback_data.service_id, master_id=master_id)
 
-    service = await service_repo.get_by_id(callback_data.service_id)
+    service = await service_repo.get_by_id(callback_data.service_id, master_id=master_id)
     text = format_service_card(service)
     keyboard = get_admin_service_card_keyboard(service)
 
@@ -232,8 +238,9 @@ async def msg_admin_service_save_field(
     field = data["field"]
     raw_val = message.text.strip()
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
-    service = await service_repo.get_by_id(service_id)
+    service = await service_repo.get_by_id(service_id, master_id=master_id)
     if not service:
         await message.answer("Услуга не найдена.")
         await state.clear()
@@ -418,8 +425,9 @@ async def msg_add_service_finalize(
     if deposit_val > price:
         deposit_val = price
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     new_service = Service(
-        master_id=1,
+        master_id=master_id,
         title=data["title"],
         description=data["description"],
         price=price,

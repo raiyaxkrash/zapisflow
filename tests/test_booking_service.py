@@ -29,7 +29,7 @@ async def test_booking_service_validates_user_and_service() -> None:
 
     start = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
     with pytest.raises(UserNotFoundError):
-        await service.create_hold_booking(user_id=999, service_id=1, start_time=start)
+        await service.create_hold_booking(user_id=999, service_id=1, start_time=start, master_id=1)
 
     # 2. Non-existent service
     service.user_repo.get_by_id.return_value = User(id=1, telegram_id=123, first_name="Тест")
@@ -37,7 +37,7 @@ async def test_booking_service_validates_user_and_service() -> None:
     service.service_repo.get_by_id.return_value = None
 
     with pytest.raises(ServiceNotFoundError):
-        await service.create_hold_booking(user_id=1, service_id=999, start_time=start)
+        await service.create_hold_booking(user_id=1, service_id=999, start_time=start, master_id=1)
 
 
 @pytest.mark.asyncio
@@ -63,6 +63,9 @@ async def test_booking_service_catches_postgres_exclusion_violation() -> None:
     )
     service.service_repo = AsyncMock()
     service.service_repo.get_by_id.return_value = svc
+
+    service.master_settings_repo = AsyncMock()
+    service.master_settings_repo.get_value.return_value = 30
 
     start = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 

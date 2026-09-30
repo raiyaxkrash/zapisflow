@@ -1,6 +1,7 @@
-"""
-Analytics and financial statistics service for master performance metrics.
-Computes revenues, average check, completion rates, no-shows, and service popularities.
+"""Analytics and financial statistics service for master performance metrics.
+
+Computes revenues, average check, completion rates, no-shows, and service popularities
+strictly scoped to master_id.
 """
 
 from calendar import monthrange
@@ -14,32 +15,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.settings import settings
 from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.payment import Payment, PaymentStatus
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 
 
 class AnalyticsService:
-    """
-    Service for calculating financial, operational and client retention analytics.
-    """
+    """Service for calculating financial, operational and client retention analytics per master_id."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
-        self.settings_repo = SettingsRepository(session)
+        self.master_settings_repo = MasterSettingsRepository(session)
 
-    async def _get_timezone(self) -> pytz.BaseTzInfo:
-        tz_str = await self.settings_repo.get_value("timezone", settings.timezone)
+    async def _get_timezone(self, master_id: int) -> pytz.BaseTzInfo:
+        tz_str = await self.master_settings_repo.get_value(master_id, "timezone", settings.timezone)
         return pytz.timezone(tz_str)
 
     async def get_metrics_for_range(
         self,
-        master_id: int = 1,
+        master_id: int,
         start_dt: Optional[datetime] = None,
         end_dt: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """
-        Calculate aggregated metrics for a specific datetime range.
-        """
-        # 1. Base appointment query
+        """Calculate aggregated metrics for a specific datetime range strictly for master_id."""
+        # 1. Base appointment query strictly scoped to master_id
         conditions = [Appointment.master_id == master_id]
         if start_dt:
             conditions.append(Appointment.start_time >= start_dt)
@@ -84,7 +81,7 @@ class AnalyticsService:
         completion_rate = (completed / total * 100) if total > 0 else 0.0
         no_show_rate = (no_show / total * 100) if total > 0 else 0.0
 
-        # 2. Top services in period
+        # 2. Top services in period strictly for master_id
         svc_query = (
             select(
                 Appointment.snapshot_service_title.label("title"),
@@ -111,7 +108,7 @@ class AnalyticsService:
             for r in svc_res.all()
         ]
 
-        # 3. Retained deposits from cancellations/no-shows
+        # 3. Retained deposits from cancellations/no-shows strictly for master_id
         dep_query = (
             select(
                 func.coalesce(func.sum(Payment.amount), Decimal("0.00")).label("retained_deposits")
@@ -119,6 +116,7 @@ class AnalyticsService:
             .join(Appointment, Payment.appointment_id == Appointment.id)
             .where(
                 Appointment.master_id == master_id,
+                Payment.master_id == master_id,
                 Payment.status == PaymentStatus.RETAINED,
                 Payment.confirmed_at.is_not(None),
             )
@@ -147,11 +145,9 @@ class AnalyticsService:
             "top_services": top_services,
         }
 
-    async def get_today_analytics(self, master_id: int = 1) -> Dict[str, Any]:
-        """
-        Analytics for current local day.
-        """
-        tz = await self._get_timezone()
+    async def get_today_analytics(self, master_id: int) -> Dict[str, Any]:
+        """Analytics for current local day for master_id."""
+        tz = await self._get_timezone(master_id)
         now_local = datetime.now(tz)
         today = now_local.date()
 
@@ -162,11 +158,9 @@ class AnalyticsService:
         metrics["period_name"] = f"Сегодня ({today.strftime('%d.%m.%Y')})"
         return metrics
 
-    async def get_current_month_analytics(self, master_id: int = 1) -> Dict[str, Any]:
-        """
-        Analytics for current local month.
-        """
-        tz = await self._get_timezone()
+    async def get_current_month_analytics(self, master_id: int) -> Dict[str, Any]:
+        """Analytics for current local month for master_id."""
+        tz = await self._get_timezone(master_id)
         now_local = datetime.now(tz)
         today = now_local.date()
 
@@ -181,15 +175,12 @@ class AnalyticsService:
         metrics["period_name"] = f"Текущий месяц ({today.strftime('%m.%Y')})"
         return metrics
 
-    async def get_previous_month_analytics(self, master_id: int = 1) -> Dict[str, Any]:
-        """
-        Analytics for previous local month.
-        """
-        tz = await self._get_timezone()
+    async def get_previous_month_analytics(self, master_id: int) -> Dict[str, Any]:
+        """Analytics for previous local month for master_id."""
+        tz = await self._get_timezone(master_id)
         now_local = datetime.now(tz)
         today = now_local.date()
 
-        # Compute previous month
         first_of_this_month = today.replace(day=1)
         last_of_prev_month = first_of_this_month - timedelta(days=1)
         first_of_prev_month = last_of_prev_month.replace(day=1)
@@ -201,10 +192,8 @@ class AnalyticsService:
         metrics["period_name"] = f"Прошлый месяц ({last_of_prev_month.strftime('%m.%Y')})"
         return metrics
 
-    async def get_all_time_analytics(self, master_id: int = 1) -> Dict[str, Any]:
-        """
-        All-time total metrics.
-        """
+    async def get_all_time_analytics(self, master_id: int) -> Dict[str, Any]:
+        """All-time total metrics for master_id."""
         metrics = await self.get_metrics_for_range(master_id, None, None)
         metrics["period_name"] = "За всё время работы"
         return metrics

@@ -23,9 +23,10 @@ from app.bot.states.admin import AdminScheduleDaySG
 from app.config.settings import settings
 from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.schedule_repository import ScheduleRepository
-from app.repositories.settings_repository import SettingsRepository
 from app.repositories.user_repository import UserRepository
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import RU_WEEKDAYS_FULL, format_rub
 
 router = Router(name="admin_calendar_mgmt")
@@ -34,16 +35,16 @@ router.callback_query.filter(IsAdminFilter())
 
 
 async def format_day_info(
-    target_date: date, session: AsyncSession, master_id: int = 1
+    target_date: date, session: AsyncSession, master_id: int
 ) -> tuple[str, bool]:
     """
     Format status text and determine is_day_off for a target date.
     """
     schedule_repo = ScheduleRepository(session)
-    settings_repo = SettingsRepository(session)
+    settings_repo = MasterSettingsRepository(session)
     app_repo = AppointmentRepository(session)
 
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
 
     exception = await schedule_repo.get_exception_for_date(target_date, master_id=master_id)
@@ -87,7 +88,7 @@ async def format_day_info(
     # Count appointments
     start_dt = tz.localize(datetime.combine(target_date, time.min))
     end_dt = tz.localize(datetime.combine(target_date, time.max))
-    day_apps = await app_repo.list_for_admin(date_from=start_dt, date_to=end_dt)
+    day_apps = await app_repo.list_for_admin(master_id=master_id, date_from=start_dt, date_to=end_dt)
     text += f"👥 <b>Записей на день:</b> {len(day_apps)} шт.\n"
 
     # Blocked intervals
@@ -111,8 +112,9 @@ async def cb_admin_calendar_root(
     Open master calendar month view.
     """
     await state.clear()
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
 
@@ -136,8 +138,9 @@ async def cb_admin_calendar_month_nav(
     """
     Navigate between months in calendar.
     """
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
 
@@ -160,8 +163,9 @@ async def cb_admin_calendar_day_select(
     Open day management card for the selected date.
     """
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     target_date = date(callback_data.year, callback_data.month, callback_data.day)
-    text, is_day_off = await format_day_info(target_date, session)
+    text, is_day_off = await format_day_info(target_date, session, master_id=master_id)
 
     keyboard = get_admin_day_management_keyboard(target_date, is_day_off=is_day_off)
     if callback.message:
@@ -178,10 +182,11 @@ async def cb_admin_calendar_toggle_day_off(
     """
     Toggle day off status for the date.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     target_date = date(callback_data.year, callback_data.month, callback_data.day)
     schedule_repo = ScheduleRepository(session)
 
-    _, current_is_day_off = await format_day_info(target_date, session)
+    _, current_is_day_off = await format_day_info(target_date, session, master_id=master_id)
     new_is_day_off = not current_is_day_off
 
     await schedule_repo.set_date_exception(
@@ -189,10 +194,10 @@ async def cb_admin_calendar_toggle_day_off(
         is_day_off=new_is_day_off,
         work_start=time(10, 0) if not new_is_day_off else None,
         work_end=time(19, 0) if not new_is_day_off else None,
-        master_id=1,
+        master_id=master_id,
     )
 
-    text, is_day_off = await format_day_info(target_date, session)
+    text, is_day_off = await format_day_info(target_date, session, master_id=master_id)
     keyboard = get_admin_day_management_keyboard(target_date, is_day_off=is_day_off)
 
     if callback.message:
@@ -275,16 +280,17 @@ async def msg_admin_calendar_save_hours(
         return
 
     await state.clear()
+    master_id = await LegacyTenantResolver.get_master_id(session)
     schedule_repo = ScheduleRepository(session)
     await schedule_repo.set_date_exception(
         target_date=target_date,
         is_day_off=False,
         work_start=start_t,
         work_end=end_t,
-        master_id=1,
+        master_id=master_id,
     )
 
-    text, is_day_off = await format_day_info(target_date, session)
+    text, is_day_off = await format_day_info(target_date, session, master_id=master_id)
     keyboard = get_admin_day_management_keyboard(target_date, is_day_off=is_day_off)
     await message.answer(
         text=f"✅ <b>Рабочие часы сохранены!</b>\n\n{text}", reply_markup=keyboard
@@ -366,8 +372,9 @@ async def msg_admin_calendar_save_blocked_slot(
         await message.answer("⚠️ Начало интервала должно быть раньше окончания.")
         return
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
 
     start_dt = tz.localize(datetime.combine(target_date, start_t))
@@ -384,10 +391,10 @@ async def msg_admin_calendar_save_blocked_slot(
         end_time=end_dt,
         reason=reason.strip() if reason else "Заблокировано мастером",
         created_by_admin_id=admin.id,
-        master_id=1,
+        master_id=master_id,
     )
 
-    text, is_day_off = await format_day_info(target_date, session)
+    text, is_day_off = await format_day_info(target_date, session, master_id=master_id)
     keyboard = get_admin_day_management_keyboard(target_date, is_day_off=is_day_off)
     await message.answer(
         text=f"🔒 <b>Интервал успешно заблокирован!</b>\n\n{text}",
@@ -408,15 +415,16 @@ async def cb_admin_calendar_day_bookings(
     List all appointments booked on the selected day.
     """
     target_date = date(callback_data.year, callback_data.month, callback_data.day)
-    settings_repo = SettingsRepository(session)
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    settings_repo = MasterSettingsRepository(session)
     app_repo = AppointmentRepository(session)
 
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
     start_dt = tz.localize(datetime.combine(target_date, time.min))
     end_dt = tz.localize(datetime.combine(target_date, time.max))
 
-    appointments = await app_repo.list_for_admin(date_from=start_dt, date_to=end_dt)
+    appointments = await app_repo.list_for_admin(master_id=master_id, date_from=start_dt, date_to=end_dt)
 
     if not appointments:
         text = f"<b>🗓 Записи на {target_date.strftime('%d.%m.%Y')}</b>\n\nВ этот день записей нет."

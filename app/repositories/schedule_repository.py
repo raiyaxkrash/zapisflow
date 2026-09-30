@@ -1,6 +1,4 @@
-"""
-Schedule repository for templates, exceptions, breaks and blocked intervals.
-"""
+"""Schedule repository for templates, exceptions, breaks and blocked intervals strictly scoped to master_id."""
 
 from datetime import date as dt_date, datetime, time as dt_time
 from typing import List, Optional, Sequence, Tuple
@@ -18,17 +16,13 @@ from app.database.models.schedule import (
 
 
 class ScheduleRepository:
-    """
-    Repository for managing master schedules, calendar overrides and blocked slots.
-    """
+    """Repository for managing master schedules, calendar overrides and blocked slots."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get_weekly_templates(self, master_id: int = 1) -> Sequence[ScheduleTemplate]:
-        """
-        Get all 7 days schedule templates for the master.
-        """
+    async def get_weekly_templates(self, master_id: int) -> Sequence[ScheduleTemplate]:
+        """Get all 7 days schedule templates for the master."""
         query = (
             select(ScheduleTemplate)
             .where(ScheduleTemplate.master_id == master_id)
@@ -39,11 +33,9 @@ class ScheduleRepository:
         return result.scalars().all()
 
     async def get_template_for_weekday(
-        self, weekday: int, master_id: int = 1
+        self, weekday: int, master_id: int
     ) -> Optional[ScheduleTemplate]:
-        """
-        Get template for a specific weekday (0=Mon, ..., 6=Sun).
-        """
+        """Get template for a specific weekday (0=Mon, ..., 6=Sun) of the given master."""
         query = (
             select(ScheduleTemplate)
             .where(
@@ -62,11 +54,10 @@ class ScheduleRepository:
         work_start: dt_time = dt_time(10, 0),
         work_end: dt_time = dt_time(19, 0),
         breaks: Optional[List[Tuple[dt_time, dt_time]]] = None,
-        master_id: int = 1,
+        *,
+        master_id: int,
     ) -> ScheduleTemplate:
-        """
-        Create or update a weekday template and its breaks.
-        """
+        """Create or update a weekday template and its breaks for a specific master."""
         template = await self.get_template_for_weekday(weekday, master_id=master_id)
         if not template:
             template = ScheduleTemplate(
@@ -100,11 +91,9 @@ class ScheduleRepository:
         return template
 
     async def get_exception_for_date(
-        self, target_date: dt_date, master_id: int = 1
+        self, target_date: dt_date, master_id: int
     ) -> Optional[ScheduleException]:
-        """
-        Get calendar exception override for a specific date if exists.
-        """
+        """Get calendar exception override for a specific date if exists for this master."""
         query = (
             select(ScheduleException)
             .where(
@@ -124,11 +113,10 @@ class ScheduleRepository:
         work_end: Optional[dt_time] = None,
         comment: Optional[str] = None,
         breaks: Optional[List[Tuple[dt_time, dt_time]]] = None,
-        master_id: int = 1,
+        *,
+        master_id: int,
     ) -> ScheduleException:
-        """
-        Create or override an exception for a specific date.
-        """
+        """Create or override an exception for a specific date and master."""
         exception = await self.get_exception_for_date(target_date, master_id=master_id)
         if not exception:
             exception = ScheduleException(
@@ -165,10 +153,8 @@ class ScheduleRepository:
         await self.session.refresh(exception)
         return exception
 
-    async def delete_date_exception(self, target_date: dt_date, master_id: int = 1) -> bool:
-        """
-        Remove date exception, reverting the date to default weekly template.
-        """
+    async def delete_date_exception(self, target_date: dt_date, master_id: int) -> bool:
+        """Remove date exception for this master, reverting to weekly template."""
         stmt = delete(ScheduleException).where(
             ScheduleException.master_id == master_id,
             ScheduleException.date == target_date,
@@ -178,11 +164,9 @@ class ScheduleRepository:
         return result.rowcount > 0
 
     async def get_blocked_intervals(
-        self, start_datetime: datetime, end_datetime: datetime, master_id: int = 1
+        self, start_datetime: datetime, end_datetime: datetime, master_id: int
     ) -> Sequence[BlockedInterval]:
-        """
-        Get all blocked intervals overlapping with the given range.
-        """
+        """Get blocked intervals overlapping with range strictly for this master."""
         query = select(BlockedInterval).where(
             BlockedInterval.master_id == master_id,
             BlockedInterval.start_time < end_datetime,
@@ -195,13 +179,11 @@ class ScheduleRepository:
         self,
         start_time: datetime,
         end_time: datetime,
+        master_id: int,
         reason: Optional[str] = None,
         created_by_admin_id: Optional[int] = None,
-        master_id: int = 1,
     ) -> BlockedInterval:
-        """
-        Block a time slot manually.
-        """
+        """Block a time slot manually for the given master."""
         interval = BlockedInterval(
             master_id=master_id,
             start_time=start_time,
@@ -214,11 +196,12 @@ class ScheduleRepository:
         await self.session.refresh(interval)
         return interval
 
-    async def delete_blocked_interval(self, interval_id: int) -> bool:
-        """
-        Remove a manual time block.
-        """
-        stmt = delete(BlockedInterval).where(BlockedInterval.id == interval_id)
+    async def delete_blocked_interval(self, interval_id: int, master_id: int) -> bool:
+        """Remove a manual time block ensuring it belongs to this master."""
+        stmt = delete(BlockedInterval).where(
+            BlockedInterval.id == interval_id,
+            BlockedInterval.master_id == master_id,
+        )
         result = await self.session.execute(stmt)
         await self.session.flush()
         return result.rowcount > 0

@@ -27,11 +27,12 @@ from app.config.settings import settings
 from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
 from app.services.exceptions import BookingNotFoundError, InvalidBookingStatusError, SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
+from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
 
 router = Router(name="admin_appointments")
@@ -116,9 +117,10 @@ async def cb_appointments_list(
     Show filtered list of appointments.
     """
     filter_type = callback_data.filter_type or "today"
+    master_id = await LegacyTenantResolver.get_master_id(session)
     app_repo = AppointmentRepository(session)
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
     now_local = datetime.now(tz)
     today = now_local.date()
@@ -130,28 +132,28 @@ async def cb_appointments_list(
         filter_title = "🌅 Записи на сегодня"
         start_dt = tz.localize(datetime.combine(today, time.min))
         end_dt = tz.localize(datetime.combine(today, time.max))
-        appointments = list(await app_repo.list_for_admin(date_from=start_dt, date_to=end_dt))
+        appointments = list(await app_repo.list_for_admin(master_id=master_id, date_from=start_dt, date_to=end_dt))
     elif filter_type == "tomorrow":
         filter_title = "🌄 Записи на завтра"
         tomorrow = today + timedelta(days=1)
         start_dt = tz.localize(datetime.combine(tomorrow, time.min))
         end_dt = tz.localize(datetime.combine(tomorrow, time.max))
-        appointments = list(await app_repo.list_for_admin(date_from=start_dt, date_to=end_dt))
+        appointments = list(await app_repo.list_for_admin(master_id=master_id, date_from=start_dt, date_to=end_dt))
     elif filter_type == "pending_proof":
         filter_title = "🔎 Записи, ожидающие проверки чека"
         appointments = list(
-            await app_repo.list_for_admin(status=AppointmentStatus.PAYMENT_PROOF_SENT)
+            await app_repo.list_for_admin(master_id=master_id, status=AppointmentStatus.PAYMENT_PROOF_SENT)
         )
     elif filter_type == "pending_payment":
         filter_title = "⏳ Записи, ожидающие оплаты"
         appointments = list(
-            await app_repo.list_for_admin(status=AppointmentStatus.WAITING_PAYMENT)
+            await app_repo.list_for_admin(master_id=master_id, status=AppointmentStatus.WAITING_PAYMENT)
         )
     elif filter_type == "upcoming":
         filter_title = "🔜 Все предстоящие записи"
         start_dt = now_local
         end_dt = now_local + timedelta(days=60)
-        all_future = await app_repo.list_for_admin(date_from=start_dt, date_to=end_dt)
+        all_future = await app_repo.list_for_admin(master_id=master_id, date_from=start_dt, date_to=end_dt)
         appointments = [
             a
             for a in all_future
@@ -165,11 +167,11 @@ async def cb_appointments_list(
     elif filter_type == "completed":
         filter_title = "🎉 Завершённые записи"
         appointments = list(
-            await app_repo.list_for_admin(status=AppointmentStatus.COMPLETED, limit=30)
+            await app_repo.list_for_admin(master_id=master_id, status=AppointmentStatus.COMPLETED, limit=30)
         )
     elif filter_type == "cancelled":
         filter_title = "❌ Отменённые записи"
-        all_apps = await app_repo.list_for_admin(limit=50)
+        all_apps = await app_repo.list_for_admin(master_id=master_id, limit=50)
         appointments = [
             a
             for a in all_apps
@@ -212,15 +214,16 @@ async def cb_appointment_detail(
     """
     Show full appointment details card with management actions.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     app_repo = AppointmentRepository(session)
-    appointment = await app_repo.get_by_id_with_relations(callback_data.appointment_id)
+    appointment = await app_repo.get_by_id_with_relations(callback_data.appointment_id, master_id=master_id)
 
     if not appointment:
         await callback.answer("Запись не найдена", show_alert=True)
         return
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
 
     text = format_appointment_card(appointment, tz_name=tz_str)
     keyboard = get_admin_appointment_card_keyboard(
@@ -241,16 +244,19 @@ async def cb_appointment_complete(
     """
     Mark appointment as completed.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
     try:
-        appointment = await booking_service.complete_booking(callback_data.appointment_id)
+        appointment = await booking_service.complete_booking(
+            master_id=master_id, appointment_id=callback_data.appointment_id
+        )
     except (BookingNotFoundError, InvalidBookingStatusError) as exc:
         await session.rollback()
         await callback.answer(str(exc), show_alert=True)
         return
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     text = format_appointment_card(appointment, tz_name=tz_str)
     keyboard = get_admin_appointment_card_keyboard(
         appointment, filter_type=callback_data.filter_type or "today"
@@ -271,16 +277,19 @@ async def cb_appointment_no_show(
     """
     Mark appointment as NO-SHOW.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
     try:
-        appointment = await booking_service.mark_no_show(callback_data.appointment_id)
+        appointment = await booking_service.mark_no_show(
+            master_id=master_id, appointment_id=callback_data.appointment_id
+        )
     except (BookingNotFoundError, InvalidBookingStatusError) as exc:
         await session.rollback()
         await callback.answer(str(exc), show_alert=True)
         return
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     text = format_appointment_card(appointment, tz_name=tz_str)
     keyboard = get_admin_appointment_card_keyboard(
         appointment, filter_type=callback_data.filter_type or "today"
@@ -304,9 +313,11 @@ async def cb_appointment_cancel(
     """
     Cancel appointment by admin and notify client.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
     try:
         appointment = await booking_service.cancel_booking_by_admin(
+            master_id=master_id,
             appointment_id=callback_data.appointment_id,
             reason="Отменено мастером через панель управления",
         )
@@ -315,8 +326,8 @@ async def cb_appointment_cancel(
         await callback.answer(str(exc), show_alert=True)
         return
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
     await session.commit()
 
@@ -359,8 +370,9 @@ async def cb_appointment_reschedule_start(
     """
     Start rescheduling appointment: pick target date.
     """
+    master_id = await LegacyTenantResolver.get_master_id(session)
     app_repo = AppointmentRepository(session)
-    appointment = await app_repo.get_by_id(callback_data.appointment_id)
+    appointment = await app_repo.get_by_id(callback_data.appointment_id, master_id=master_id)
     if not appointment:
         await callback.answer("Запись не найдена", show_alert=True)
         return
@@ -372,8 +384,8 @@ async def cb_appointment_reschedule_start(
         filter_type=callback_data.filter_type,
     )
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
 
@@ -399,8 +411,9 @@ async def cb_reschedule_month_nav(
 ) -> None:
     """Page the admin calendar while keeping the reschedule wizard active."""
     selected = AdminCalendarCallback.unpack(callback.data)
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     today = datetime.now(pytz.timezone(tz_str)).date()
     keyboard = get_admin_calendar_keyboard(selected.year, selected.month, today)
     if callback.message:
@@ -424,7 +437,8 @@ async def cb_reschedule_pick_date(
     data = await state.get_data()
     service_id = data["service_id"]
     appointment_id = data["appointment_id"]
-    appointment = await AppointmentRepository(session).get_by_id(appointment_id)
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    appointment = await AppointmentRepository(session).get_by_id(appointment_id, master_id=master_id)
     if appointment is None:
         await callback.answer("Запись не найдена", show_alert=True)
         return
@@ -513,10 +527,14 @@ async def cb_reschedule_confirm_slot(
         await callback.answer("Профиль администратора не найден", show_alert=True)
         return
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
     try:
         appointment = await booking_service.reschedule_booking_by_admin(
-            appointment_id=appointment_id, new_start_time=new_start_time, admin_id=admin.id
+            master_id=master_id,
+            appointment_id=appointment_id,
+            new_start_time=new_start_time,
+            admin_id=admin.id,
         )
     except (SlotAlreadyBookedError, InvalidBookingStatusError) as e:
         await callback.answer(str(e), show_alert=True)
@@ -524,8 +542,8 @@ async def cb_reschedule_confirm_slot(
 
     await state.clear()
 
-    settings_repo = SettingsRepository(session)
-    tz_str = await settings_repo.get_value("timezone", settings.timezone)
+    settings_repo = MasterSettingsRepository(session)
+    tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
 
     # Notify client
@@ -606,14 +624,15 @@ async def msg_appointment_save_note(
     filter_type = data.get("filter_type", "today")
     await state.clear()
 
+    master_id = await LegacyTenantResolver.get_master_id(session)
     app_repo = AppointmentRepository(session)
-    appointment = await app_repo.get_by_id_with_relations(appointment_id)
+    appointment = await app_repo.get_by_id_with_relations(appointment_id, master_id=master_id)
     if appointment:
         appointment.admin_notes = message.text.strip()
         await session.flush()
 
-        settings_repo = SettingsRepository(session)
-        tz_str = await settings_repo.get_value("timezone", settings.timezone)
+        settings_repo = MasterSettingsRepository(session)
+        tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
         text = (
             "✅ <b>Заметка сохранена!</b>\n\n"
             + format_appointment_card(appointment, tz_name=tz_str)

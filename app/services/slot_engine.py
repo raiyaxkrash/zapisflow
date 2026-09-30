@@ -1,5 +1,6 @@
-"""
-Slot calculation engine for master schedule, active bookings, buffers and breaks.
+"""Slot calculation engine for master schedule, active bookings, buffers and breaks.
+
+Strictly isolated per master_id.
 """
 
 from datetime import date as dt_date, datetime, timedelta
@@ -9,58 +10,60 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
 from app.repositories.appointment_repository import AppointmentRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.repositories.service_repository import ServiceRepository
-from app.repositories.settings_repository import SettingsRepository
 from app.services.exceptions import ServiceNotFoundError
 
 
 class SlotEngine:
-    """
-    Core engine responsible for dynamic slot generation and collision detection.
-    """
+    """Core engine responsible for dynamic slot generation and collision detection strictly within master_id."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.schedule_repo = ScheduleRepository(session)
         self.appointment_repo = AppointmentRepository(session)
         self.service_repo = ServiceRepository(session)
-        self.settings_repo = SettingsRepository(session)
+        self.master_settings_repo = MasterSettingsRepository(session)
 
     async def get_available_slots(
         self,
         service_id: int,
         target_date: dt_date,
-        master_id: int = 1,
+        master_id: int,
         *,
         duration_min: Optional[int] = None,
         buffer_min: Optional[int] = None,
         exclude_appointment_id: Optional[int] = None,
         allow_inactive: bool = False,
     ) -> List[datetime]:
-        """
-        Calculate and return all valid slot start datetimes for a given service and date.
-        """
-        # 1. Fetch and validate service
-        service = await self.service_repo.get_by_id(service_id)
+        """Calculate and return all valid slot start datetimes for a given service and date within master_id."""
+        # 1. Fetch and validate service strictly for this master
+        service = await self.service_repo.get_by_id(service_id, master_id=master_id)
         if not service or (not allow_inactive and (not service.is_active or service.is_archived)):
-            raise ServiceNotFoundError(f"Service id {service_id} not found or inactive")
+            raise ServiceNotFoundError(f"Service id {service_id} not found or inactive for master {master_id}")
 
-        # 2. Timezone configuration
-        tz_str = await self.settings_repo.get_value("timezone", settings.timezone)
+        # 2. Timezone configuration from master_settings
+        tz_str = await self.master_settings_repo.get_value(master_id, "timezone", settings.timezone)
         tz = pytz.timezone(tz_str)
         now_local = datetime.now(tz)
         today_local = now_local.date()
 
-        # 3. Date boundaries validation
+        # 3. Date boundaries validation from master_settings
         max_advance_days = int(
-            await self.settings_repo.get_value("max_advance_days", settings.max_advance_days)
+            await self.master_settings_repo.get_value(
+                master_id, "booking_horizon_days", settings.max_advance_days
+            )
         )
         min_advance_hours = int(
-            await self.settings_repo.get_value("min_advance_hours", settings.min_advance_hours)
+            await self.master_settings_repo.get_value(
+                master_id, "min_advance_hours", settings.min_advance_hours
+            )
         )
         grid_step_minutes = int(
-            await self.settings_repo.get_value("grid_step_minutes", settings.grid_step_minutes)
+            await self.master_settings_repo.get_value(
+                master_id, "grid_step_minutes", settings.grid_step_minutes
+            )
         )
 
         if target_date < today_local:
@@ -70,14 +73,14 @@ class SlotEngine:
 
         min_candidate_time = now_local + timedelta(hours=min_advance_hours) if target_date == today_local else None
 
-        # 4. Determine working hours and breaks for the target date
+        # 4. Determine working hours and breaks for the target date for this master
         work_hours = await self._get_working_window_and_breaks(master_id, target_date, tz)
         if not work_hours:
             return []  # Day off or closed
 
         work_start_dt, work_end_dt, breaks = work_hours
 
-        # 5. Collect all busy intervals for the day
+        # 5. Collect all busy intervals for the day strictly for this master
         busy_intervals = await self._collect_busy_intervals(
             master_id=master_id,
             target_date=target_date,
@@ -111,7 +114,6 @@ class SlotEngine:
             # Verify collision with any merged busy interval
             has_collision = False
             for b_start, b_end in merged_busy:
-                # Interval overlap condition: cand_start < b_end and cand_end > b_start
                 if current_slot < b_end and slot_end_with_buffer > b_start:
                     has_collision = True
                     break
@@ -127,19 +129,17 @@ class SlotEngine:
         self,
         service_id: int,
         slot_start: datetime,
-        master_id: int = 1,
+        master_id: int,
         *,
         duration_min: Optional[int] = None,
         buffer_min: Optional[int] = None,
         exclude_appointment_id: Optional[int] = None,
         allow_inactive: bool = False,
     ) -> bool:
-        """
-        Check if a single specific datetime slot is still free.
-        """
+        """Check if a single specific datetime slot is still free for this master."""
         if slot_start.tzinfo is None:
             return False
-        tz_str = await self.settings_repo.get_value("timezone", settings.timezone)
+        tz_str = await self.master_settings_repo.get_value(master_id, "timezone", settings.timezone)
         target_date = slot_start.astimezone(pytz.timezone(tz_str)).date()
         available = await self.get_available_slots(
             service_id,
@@ -158,13 +158,10 @@ class SlotEngine:
         self,
         service_id: int,
         start_date: dt_date,
+        master_id: int,
         days_count: int = 14,
-        master_id: int = 1,
     ) -> List[dt_date]:
-        """
-        Scan a date range and return only dates that have at least one free slot.
-        Used by the interactive inline calendar to highlight available days.
-        """
+        """Scan a date range and return only dates with at least one free slot for this master."""
         available_dates: List[dt_date] = []
         for offset in range(days_count):
             curr_date = start_date + timedelta(days=offset)
@@ -176,9 +173,7 @@ class SlotEngine:
     async def _get_working_window_and_breaks(
         self, master_id: int, target_date: dt_date, tz: pytz.BaseTzInfo
     ) -> Optional[Tuple[datetime, datetime, List[Tuple[datetime, datetime]]]]:
-        """
-        Resolve working window and breaks considering date exceptions and weekly templates.
-        """
+        """Resolve working window and breaks considering date exceptions and weekly templates for this master."""
         exception = await self.schedule_repo.get_exception_for_date(target_date, master_id=master_id)
         if exception:
             if exception.is_day_off or not exception.work_start or not exception.work_end:
@@ -201,9 +196,9 @@ class SlotEngine:
 
         breaks_dt: List[Tuple[datetime, datetime]] = []
         for b_start, b_end in raw_breaks:
-            b_s = tz.localize(datetime.combine(target_date, b_start))
-            b_e = tz.localize(datetime.combine(target_date, b_end))
-            breaks_dt.append((b_s, b_e))
+            b_start_dt = tz.localize(datetime.combine(target_date, b_start))
+            b_end_dt = tz.localize(datetime.combine(target_date, b_end))
+            breaks_dt.append((b_start_dt, b_end_dt))
 
         return work_start_dt, work_end_dt, breaks_dt
 
@@ -217,65 +212,48 @@ class SlotEngine:
         tz: pytz.BaseTzInfo,
         exclude_appointment_id: Optional[int] = None,
     ) -> List[Tuple[datetime, datetime]]:
-        """
-        Aggregate breaks, manual blocked intervals and active appointments.
-        """
-        busy_intervals: List[Tuple[datetime, datetime]] = list(breaks)
+        """Gather all blocked intervals strictly for this master_id."""
+        busy: List[Tuple[datetime, datetime]] = list(breaks)
 
-        # 1. Manual blocked intervals
-        blocked = await self.schedule_repo.get_blocked_intervals(
-            start_datetime=day_start,
-            end_datetime=day_end + timedelta(hours=4),  # check into night
-            master_id=master_id,
-        )
-        for b in blocked:
-            blocked_start = b.start_time
-            blocked_end = b.end_time
-            if blocked_start.tzinfo is None:
-                blocked_start = blocked_start.replace(tzinfo=pytz.UTC)
-            if blocked_end.tzinfo is None:
-                blocked_end = blocked_end.replace(tzinfo=pytz.UTC)
-            busy_intervals.append((blocked_start.astimezone(tz), blocked_end.astimezone(tz)))
-
-        # 2. Active appointments for the day
+        # 1. Active appointments for this master
         appointments = await self.appointment_repo.get_active_for_range(
             master_id=master_id,
             start_datetime=day_start,
-            end_datetime=day_end + timedelta(hours=4),
+            end_datetime=day_end,
             exclude_id=exclude_appointment_id,
         )
         for app in appointments:
-            appointment_start = app.start_time
-            appointment_end = app.end_time_with_buffer
-            if appointment_start.tzinfo is None:
-                appointment_start = appointment_start.replace(tzinfo=pytz.UTC)
-            if appointment_end.tzinfo is None:
-                appointment_end = appointment_end.replace(tzinfo=pytz.UTC)
-            busy_intervals.append(
-                (appointment_start.astimezone(tz), appointment_end.astimezone(tz))
-            )
+            busy.append((app.start_time, app.end_time_with_buffer))
 
-        return busy_intervals
+        # 2. Blocked intervals for this master
+        blocked = await self.schedule_repo.get_blocked_intervals(
+            master_id=master_id,
+            start_datetime=day_start,
+            end_datetime=day_end,
+        )
+        for blk in blocked:
+            busy.append((blk.start_time, blk.end_time))
+
+        return busy
 
     @staticmethod
     def _merge_intervals(
         intervals: List[Tuple[datetime, datetime]]
     ) -> List[Tuple[datetime, datetime]]:
-        """
-        Sort and merge overlapping or contiguous datetime intervals.
-        """
+        """Merge overlapping or contiguous datetime intervals."""
         if not intervals:
             return []
 
         sorted_intervals = sorted(intervals, key=lambda x: x[0])
-        merged: List[Tuple[datetime, datetime]] = [sorted_intervals[0]]
+        merged: List[Tuple[datetime, datetime]] = []
 
-        for current_start, current_end in sorted_intervals[1:]:
-            last_start, last_end = merged[-1]
-            if current_start <= last_end:
-                # Overlap or contiguous: extend previous interval
-                merged[-1] = (last_start, max(last_end, current_end))
+        curr_start, curr_end = sorted_intervals[0]
+        for next_start, next_end in sorted_intervals[1:]:
+            if next_start <= curr_end:
+                curr_end = max(curr_end, next_end)
             else:
-                merged.append((current_start, current_end))
+                merged.append((curr_start, curr_end))
+                curr_start, curr_end = next_start, next_end
 
+        merged.append((curr_start, curr_end))
         return merged

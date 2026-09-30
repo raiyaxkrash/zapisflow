@@ -7,7 +7,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.client import MenuCallback
-from app.repositories.settings_repository import SettingsRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
+from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="client_about")
 
@@ -19,17 +20,19 @@ async def cb_about_master(
     """
     Display 'About Me' master profile, experience and studio address.
     """
-    settings_repo = SettingsRepository(session)
-    master_name = await settings_repo.get_value("master_name", "Анастасия")
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    settings_repo = MasterSettingsRepository(session)
+    master_name = await settings_repo.get_value(master_id, "master_name", "Анастасия")
     description = await settings_repo.get_value(
+        master_id,
         "master_description",
         "Сертифицированный мастер ногтевого сервиса и эстетики с опытом более 5 лет. "
         "Использую только стерильные одноразовые расходники, премиальные материалы и современные техники.",
     )
     address = await settings_repo.get_value(
-        "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
+        master_id, "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
     )
-    experience = await settings_repo.get_value("master_experience", "5+ лет практики")
+    experience = await settings_repo.get_value(master_id, "master_experience", "5+ лет практики")
 
     text = (
         f"🌸 <b>О мастере — {master_name}</b>\n\n"
@@ -75,11 +78,12 @@ async def cb_contact_master(
     """
     Display contact methods and direct link to master.
     """
-    settings_repo = SettingsRepository(session)
-    phone = await settings_repo.get_value("default_phone_requisites", "+7 (999) 000-00-00")
-    telegram_link = await settings_repo.get_value("master_telegram", "https://t.me/")
+    master_id = await LegacyTenantResolver.get_master_id(session)
+    settings_repo = MasterSettingsRepository(session)
+    phone = await settings_repo.get_value(master_id, "default_phone_requisites", "+7 (999) 000-00-00")
+    telegram_link = await settings_repo.get_value(master_id, "master_telegram", "https://t.me/")
     address = await settings_repo.get_value(
-        "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
+        master_id, "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
     )
 
     text = (
