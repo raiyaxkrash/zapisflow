@@ -132,3 +132,59 @@ class BotSetupRequiredError(BotRegistryError):
     """Raised when a bot requires setup before it can be used."""
 
     pass
+
+
+class ProvisioningError(AppException):
+    """Base exception for bot onboarding and provisioning failures."""
+
+    pass
+
+
+class InvalidBotTokenError(ProvisioningError):
+    """Raised when Telegram API rejects a bot token as unauthorized or invalid."""
+
+    pass
+
+
+class ManagerTokenCollisionError(ProvisioningError):
+    """Raised when a user attempts to connect the platform manager bot token."""
+
+    pass
+
+
+class DuplicateBotError(ProvisioningError):
+    """Raised when a bot with the given Telegram Bot ID is already registered."""
+
+    pass
+
+
+class ProvisioningWebhookError(ProvisioningError):
+    """Raised when Telegram setWebhook fails during bot onboarding."""
+
+    pass
+
+
+class TokenRotationBotMismatchError(ProvisioningError):
+    """Raised when rotating token to a different Telegram Bot ID."""
+
+    pass
+
+
+class TelegramGatewayError(ProvisioningError):
+    """Raised when Telegram Bot API call encounters an unexpected error."""
+
+    pass
+
+
+class TelegramGatewayNetworkError(TelegramGatewayError):
+    """Raised on network timeouts or connectivity failures with Telegram API."""
+
+    pass
+
+
+class MasterNotReadyError(AppException):
+    """Raised when a master cannot be activated because onboarding checklist is incomplete."""
+
+    def __init__(self, message: str, missing_items: list[str]) -> None:
+        super().__init__(message)
+        self.missing_items = missing_items

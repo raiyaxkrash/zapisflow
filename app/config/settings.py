@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     webhook_max_body_bytes: int = Field(default=1_048_576, alias="WEBHOOK_MAX_BODY_BYTES")
     webhook_update_dedup_ttl: int = Field(default=86400, alias="WEBHOOK_UPDATE_DEDUP_TTL")
 
+    # Phase 7: Platform Manager Bot & Onboarding
+    manager_bot_token: str = Field(default="", alias="MANAGER_BOT_TOKEN")
+    manager_webhook_secret: str = Field(default="", alias="MANAGER_WEBHOOK_SECRET")
+    trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
+
     @property
     def sync_database_url(self) -> str:
         """Synchronous URL for migrations/tools if needed."""

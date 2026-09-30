@@ -13,7 +13,7 @@ import secrets
 from typing import Any, AsyncGenerator, Optional
 import uuid
 
-from aiogram import Dispatcher
+from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -26,6 +26,7 @@ from app.config.settings import settings
 from app.core.security import SensitiveDataFilter
 from app.database.models.master import BotInstanceStatus
 from app.database.session import async_session_factory, close_db, engine, init_db
+from app.manager_bot.dispatcher import create_manager_dispatcher
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.services.bot_registry import BotRegistry
 from app.services.exceptions import (
@@ -84,9 +85,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if not hasattr(app.state, "dp") or app.state.dp is None:
         app.state.dp = await create_dispatcher()
 
+    # Initialize Manager Dispatcher if not explicitly injected
+    if not hasattr(app.state, "manager_dp") or app.state.manager_dp is None:
+        app.state.manager_dp = await create_manager_dispatcher(redis_client=app.state.redis_client)
+
+    # Initialize Manager Bot if not explicitly injected and token configured
+    if not hasattr(app.state, "manager_bot") or app.state.manager_bot is None:
+        if settings.manager_bot_token:
+            app.state.manager_bot = Bot(token=settings.manager_bot_token)
+
     yield
 
     logger.info("Shutting down Multi-Bot Webhook Ingestion Engine...")
+    if hasattr(app.state, "manager_bot") and app.state.manager_bot:
+        try:
+            await app.state.manager_bot.session.close()
+        except Exception as e:
+            logger.warning("Error closing manager bot session: %s", e)
+
     if hasattr(app.state, "registry") and app.state.registry is None:
         pass
     elif hasattr(app.state, "registry") and app.state.registry:
@@ -104,6 +120,8 @@ def create_app(
     deduplicator: Optional[UpdateDeduplicator] = None,
     session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
     redis_client: Optional[Redis] = None,
+    manager_dp: Optional[Dispatcher] = None,
+    manager_bot: Optional[Bot] = None,
 ) -> FastAPI:
     """FastAPI application factory supporting dependency injection for testing."""
     app = FastAPI(
@@ -118,6 +136,8 @@ def create_app(
     app.state.deduplicator = deduplicator
     app.state.session_factory = session_factory
     app.state.redis_client = redis_client
+    app.state.manager_dp = manager_dp
+    app.state.manager_bot = manager_bot
 
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next: Any) -> Response:
@@ -316,6 +336,89 @@ def create_app(
                 e,
             )
             await deduplicator.release_lock(bot_instance.id, update.update_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Internal processing error",
+            )
+
+    @app.post("/telegram/manager-webhook", tags=["manager-webhook"])
+    async def telegram_manager_webhook(
+        request: Request,
+        x_telegram_bot_api_secret_token: Optional[str] = Header(
+            None, alias="X-Telegram-Bot-Api-Secret-Token"
+        ),
+    ) -> dict[str, Any]:
+        """
+        Receives Telegram webhook updates for the platform Manager Bot.
+        Enforces constant-time secret token verification (settings.manager_webhook_secret),
+        payload size limits, atomic deduplication, and feeds update to dedicated Manager Dispatcher.
+        """
+        # 1. Constant-time secret token verification
+        expected_secret = settings.manager_webhook_secret or ""
+        provided_secret = x_telegram_bot_api_secret_token or ""
+
+        if not expected_secret or not secrets.compare_digest(provided_secret, expected_secret):
+            logger.warning("Manager webhook secret token mismatch or missing")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Invalid secret token",
+            )
+
+        # 2. Check Content-Length and body size limit (413 Payload Too Large)
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > settings.webhook_max_body_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        detail="Payload Too Large",
+                    )
+            except ValueError:
+                pass
+
+        raw_body = await request.body()
+        if len(raw_body) > settings.webhook_max_body_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="Payload Too Large",
+            )
+
+        # 3. Parse and validate Telegram Update payload
+        try:
+            update_data = json.loads(raw_body.decode("utf-8"))
+            update = Update.model_validate(update_data)
+        except Exception as e:
+            logger.warning("Invalid Telegram update JSON for manager bot: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid update payload",
+            )
+
+        # 4. Check if manager_bot and manager_dp are configured
+        manager_bot: Optional[Bot] = getattr(app.state, "manager_bot", None)
+        manager_dp: Optional[Dispatcher] = getattr(app.state, "manager_dp", None)
+        if not manager_bot or not manager_dp:
+            logger.error("Manager bot or dispatcher is not configured")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Manager bot not configured",
+            )
+
+        # 5. Deduplication check in Redis
+        deduplicator: UpdateDeduplicator = app.state.deduplicator
+        can_process = await deduplicator.should_process_manager(update.update_id)
+        if not can_process:
+            logger.info("Manager update %s is duplicate/processing, skipping", update.update_id)
+            return {"ok": True, "status": "duplicate"}
+
+        # 6. Feed update to dedicated Manager Dispatcher
+        try:
+            await manager_dp.feed_update(manager_bot, update)
+            await deduplicator.mark_manager_completed(update.update_id)
+            return {"ok": True}
+        except Exception as e:
+            logger.exception("Error processing manager update %s: %s", update.update_id, e)
+            await deduplicator.release_manager_lock(update.update_id)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Internal processing error",

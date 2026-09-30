@@ -419,15 +419,14 @@ async def test_registry_lru_eviction_closes_session(
     pg_session: AsyncSession, token_crypto: TokenCrypto
 ):
     """Scenario 16: LRU bounded cache evicts the oldest entry and closes its session."""
-    master = await _create_test_master(pg_session, owner_tg_id=1601)
     repo = BotInstanceRepository(pg_session)
-
     instances = []
     for i in range(3):
+        m = await _create_test_master(pg_session, owner_tg_id=1601 + i)
         token = f"1601000{i}:ABCdefGHIjklMNOpqrsTUVwxyz12345678{i}"
         enc = token_crypto.encrypt(token, associated_data=16010000 + i)
         inst = await repo.create_bot_instance(
-            master_id=master.id,
+            master_id=m.id,
             telegram_bot_id=16010000 + i,
             encrypted_token=enc,
         )
@@ -525,14 +524,15 @@ async def test_invalidation_event_a_evicts_only_bot_a(
     redis_pub = fakeredis.aioredis.FakeRedis(server=fake_server)
     redis_sub = fakeredis.aioredis.FakeRedis(server=fake_server)
 
-    master = await _create_test_master(pg_session, owner_tg_id=1901)
+    master_a = await _create_test_master(pg_session, owner_tg_id=1901)
+    master_b = await _create_test_master(pg_session, owner_tg_id=1902)
     repo = BotInstanceRepository(pg_session)
 
     enc_a = token_crypto.encrypt("19010001:TOKEN_A_AAAAAAAAAAAAAAAAAAAA", associated_data=19010001)
     enc_b = token_crypto.encrypt("19010002:TOKEN_B_BBBBBBBBBBBBBBBBBBBB", associated_data=19010002)
 
-    inst_a = await repo.create_bot_instance(master_id=master.id, telegram_bot_id=19010001, encrypted_token=enc_a)
-    inst_b = await repo.create_bot_instance(master_id=master.id, telegram_bot_id=19010002, encrypted_token=enc_b)
+    inst_a = await repo.create_bot_instance(master_id=master_a.id, telegram_bot_id=19010001, encrypted_token=enc_a)
+    inst_b = await repo.create_bot_instance(master_id=master_b.id, telegram_bot_id=19010002, encrypted_token=enc_b)
 
     # Registry acting as subscriber on replica B
     registry = BotRegistry(token_crypto=token_crypto, redis_client=redis_sub)

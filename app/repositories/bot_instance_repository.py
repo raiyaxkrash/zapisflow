@@ -8,7 +8,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models.master import BotInstance, BotInstanceStatus
+from app.database.models.master import BotInstance, BotInstanceStatus, Master
 
 
 class BotInstanceRepository:
@@ -112,6 +112,39 @@ class BotInstanceRepository:
         if instance and instance.last_error is not None:
             instance.last_error = None
             await self.session.flush()
+
+    async def get_current_for_master(self, master_id: int) -> Optional[BotInstance]:
+        """Fetch current non-disabled bot instance for the master."""
+        stmt = (
+            select(BotInstance)
+            .where(
+                BotInstance.master_id == master_id,
+                BotInstance.status.in_([
+                    BotInstanceStatus.ACTIVE,
+                    BotInstanceStatus.SETUP_REQUIRED,
+                    BotInstanceStatus.PROVISIONING,
+                    BotInstanceStatus.ERROR,
+                ]),
+            )
+            .order_by(BotInstance.id.desc())
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().first()
+
+    async def get_by_id_and_owner(
+        self, bot_instance_id: int, owner_user_id: int
+    ) -> Optional[BotInstance]:
+        """Fetch bot instance ensuring that the requesting user is the master owner."""
+        stmt = (
+            select(BotInstance)
+            .join(Master, BotInstance.master_id == Master.id)
+            .where(
+                BotInstance.id == bot_instance_id,
+                Master.owner_user_id == owner_user_id,
+            )
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().first()
 
     async def create_bot_instance(
         self,

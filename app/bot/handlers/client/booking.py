@@ -4,6 +4,7 @@ Client online booking flow handlers (service -> calendar -> slots -> phone -> po
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Optional
 import pytz
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -26,6 +27,7 @@ from app.bot.keyboards.client import (
 )
 from app.bot.states.client import ClientBookingSG
 from app.config.settings import settings
+from app.database.models.master import BotInstance, BotInstanceStatus
 from app.database.models.user import User
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.service_repository import ServiceRepository
@@ -46,13 +48,27 @@ router = Router(name="client_booking")
 
 @router.callback_query(MenuCallback.filter(F.action == "book"))
 async def cb_start_booking(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    master_id: Optional[int] = None,
+    bot_instance: Optional[BotInstance] = None,
+    is_admin: bool = False,
 ) -> None:
     """
     Start booking flow: prompt client to choose a service.
+    Gates clients when bot is in SETUP_REQUIRED status.
     """
+    if bot_instance and bot_instance.status == BotInstanceStatus.SETUP_REQUIRED and not is_admin:
+        await callback.answer(
+            "💅 Онлайн-запись к мастеру пока настраивается. Пожалуйста, загляните позже!",
+            show_alert=True,
+        )
+        return
+
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
+    if master_id is None:
+        master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     services = await service_repo.list_active(master_id=master_id)
 

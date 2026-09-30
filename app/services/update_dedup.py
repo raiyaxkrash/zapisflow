@@ -28,6 +28,43 @@ class UpdateDeduplicator:
     def _make_key(self, bot_instance_id: int, update_id: int) -> str:
         return f"telegram:update:{bot_instance_id}:{update_id}"
 
+    def _make_manager_key(self, update_id: int) -> str:
+        return f"manager:update:{update_id}"
+
+    async def should_process_manager(self, update_id: int) -> bool:
+        """Atomically acquires processing lock for manager bot update (manager:update:{update_id})."""
+        if not self.redis:
+            return True
+        key = self._make_manager_key(update_id)
+        try:
+            acquired = await self.redis.set(
+                key, "PROCESSING", nx=True, ex=self.ttl_processing
+            )
+            return bool(acquired)
+        except Exception as e:
+            logger.warning("Redis error during manager dedup for update %s: %s", update_id, e)
+            return True
+
+    async def mark_manager_completed(self, update_id: int) -> None:
+        """Marks manager update as completed."""
+        if not self.redis:
+            return
+        key = self._make_manager_key(update_id)
+        try:
+            await self.redis.set(key, "COMPLETED", ex=self.ttl_completed)
+        except Exception as e:
+            logger.warning("Redis error during manager dedup completion for update %s: %s", update_id, e)
+
+    async def release_manager_lock(self, update_id: int) -> None:
+        """Deletes lock on processing failure, allowing Telegram retry."""
+        if not self.redis:
+            return
+        key = self._make_manager_key(update_id)
+        try:
+            await self.redis.delete(key)
+        except Exception as e:
+            logger.warning("Redis error during manager lock release for update %s: %s", update_id, e)
+
     async def should_process(self, bot_instance_id: int, update_id: int) -> bool:
         """
         Atomically attempts to acquire the processing lock for an update.
