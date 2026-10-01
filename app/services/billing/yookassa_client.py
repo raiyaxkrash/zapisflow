@@ -4,7 +4,7 @@ The caller persists a local order before calling ``create_payment``.  The
 checkout reference is reused as YooKassa's idempotence key on retries.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -28,6 +28,7 @@ class YooKassaPayment:
     currency: str
     checkout_ref: str | None
     confirmation_url: str | None
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 def _parse_payment(data: Mapping[str, Any]) -> YooKassaPayment:
@@ -35,6 +36,11 @@ def _parse_payment(data: Mapping[str, Any]) -> YooKassaPayment:
         amount_data = data["amount"]
         confirmation = data.get("confirmation") or {}
         metadata = data.get("metadata") or {}
+        if not isinstance(metadata, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in metadata.items()
+        ):
+            raise TypeError("invalid payment metadata")
         payment_id = data["id"]
         status = data["status"]
         amount = Decimal(str(amount_data["value"]))
@@ -69,6 +75,7 @@ def _parse_payment(data: Mapping[str, Any]) -> YooKassaPayment:
         currency=currency,
         checkout_ref=checkout_ref,
         confirmation_url=confirmation_url,
+        metadata=metadata,
     )
 
 
@@ -146,6 +153,9 @@ class YooKassaClient:
         description: str,
         return_url: str,
         receipt: dict[str, Any] | None = None,
+        payment_id: int | None = None,
+        user_id: int | None = None,
+        plan_id: int | None = None,
     ) -> YooKassaPayment:
         parsed_return = urlsplit(return_url)
         if (
@@ -162,7 +172,12 @@ class YooKassaClient:
             "capture": True,
             "confirmation": {"type": "redirect", "return_url": return_url},
             "description": description[:128],
-            "metadata": {"checkout_ref": checkout_ref},
+            "metadata": {
+                "checkout_ref": checkout_ref,
+                **({"payment_id": str(payment_id)} if payment_id is not None else {}),
+                **({"user_id": str(user_id)} if user_id is not None else {}),
+                **({"plan_id": str(plan_id)} if plan_id is not None else {}),
+            },
         }
         if receipt is not None:
             body["receipt"] = receipt

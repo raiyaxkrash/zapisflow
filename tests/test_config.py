@@ -128,6 +128,7 @@ def test_yookassa_production_test_mode_requires_opt_in_owner_and_test_credential
         YOOKASSA_RECEIPT_VAT_CODE="1",
         YOOKASSA_RECEIPT_PAYMENT_SUBJECT="service",
         YOOKASSA_RECEIPT_PAYMENT_MODE="full_prepayment",
+        YOOKASSA_FISCAL_MODE="merchant_receipt",
         YOOKASSA_ALLOW_TEST_IN_PRODUCTION=True,
         YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS=[2147176678],
         YOOKASSA_TEST_SHOP_ID="test-shop",
@@ -183,6 +184,7 @@ def test_yookassa_receipt_requires_merchant_settings_and_preserves_price() -> No
         YOOKASSA_TEST_SHOP_ID="test-shop",
         YOOKASSA_TEST_SECRET_KEY="test-secret",
         BILLING_RETURN_URL="https://pay.zapisflow.su/billing/success",
+        YOOKASSA_FISCAL_MODE="merchant_receipt",
     )
     with pytest.raises(ValueError, match="YOOKASSA_RECEIPT_VAT_CODE"):
         missing.validate_payment_configuration()
@@ -197,6 +199,7 @@ def test_yookassa_receipt_requires_merchant_settings_and_preserves_price() -> No
         YOOKASSA_RECEIPT_VAT_CODE="1",
         YOOKASSA_RECEIPT_PAYMENT_SUBJECT="service",
         YOOKASSA_RECEIPT_PAYMENT_MODE="full_payment",
+        YOOKASSA_FISCAL_MODE="merchant_receipt",
     )
     configured.validate_payment_configuration()
     receipt = configured.build_yookassa_receipt(
@@ -214,9 +217,37 @@ def test_billing_host_is_separate_from_existing_website() -> None:
     caddy = (ROOT / "deploy/caddy/Caddyfile").read_text(encoding="utf-8")
 
     assert "BILLING_DOMAIN=pay.zapisflow.su" in example
-    assert "BILLING_RETURN_URL=https://pay.zapisflow.su/billing/success" in example
+    assert "BILLING_RETURN_URL=https://api.zapisflow.su/billing/yookassa/return" in example
     assert "${BILLING_DOMAIN:-pay.zapisflow.su}" in compose
     assert "{$BILLING_DOMAIN:pay.zapisflow.su}" in caddy
     assert "{$BILLING_DOMAIN:zapisflow.su}" not in caddy
     assert "request>headers>X-Telegram-Bot-Api-Secret-Token delete" in caddy
     assert "log_skip @telegram_webhooks" in caddy
+
+
+def test_self_employed_yookassa_works_without_fiscal_receipt_fields() -> None:
+    configured = Settings(
+        _env_file=None,
+        APP_ENV="production",
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="test",
+        YOOKASSA_ALLOW_TEST_IN_PRODUCTION=True,
+        YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS=[2147176678],
+        YOOKASSA_TEST_SHOP_ID="test-shop",
+        YOOKASSA_TEST_SECRET_KEY="test-secret",
+        BILLING_RETURN_URL="https://api.zapisflow.su/billing/yookassa/return",
+        YOOKASSA_FISCAL_MODE="self_employed",
+    )
+    configured.validate_payment_configuration()
+    assert configured.yookassa_fiscal_mode == "self_employed"
+
+
+def test_unknown_fiscal_mode_fails_closed() -> None:
+    configured = Settings(
+        _env_file=None, PAYMENT_PROVIDER="yookassa_web", YOOKASSA_MODE="test",
+        YOOKASSA_TEST_SHOP_ID="test-shop", YOOKASSA_TEST_SECRET_KEY="test-secret",
+        BILLING_RETURN_URL="https://api.zapisflow.su/billing/yookassa/return",
+        YOOKASSA_FISCAL_MODE="unsupported",
+    )
+    with pytest.raises(ValueError, match="YOOKASSA_FISCAL_MODE"):
+        configured.validate_payment_configuration()

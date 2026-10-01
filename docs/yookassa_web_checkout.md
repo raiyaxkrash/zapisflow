@@ -1,85 +1,62 @@
-# YooKassa SaaS checkout on the ZapisFlow website
+# YooKassa SaaS billing
 
-The dedicated billing host at `https://pay.zapisflow.su` serves the checkout
-page. The existing `https://zapisflow.su` site remains on its current hosting.
-The API host remains `https://api.zapisflow.su`; configure its YooKassa notification
-URL as `https://api.zapisflow.su/billing/yookassa/webhook`. This channel is for
-ZapisFlow SaaS subscriptions only. Customer payments for a master's services
-remain separate. Telegram invoices and Stars are separate payment channels;
-this implementation does not use Telegram Payments.
+The Manager Bot reads the active plan and owner from PostgreSQL. It commits one
+pending `SubscriptionPayment` with the plan's amount, currency and duration as
+a snapshot, then uses the existing YooKassa client to create a redirect payment.
+The bot sends the provider's `confirmation_url` as a URL button. It does not
+create a checkout session or send the customer through `pay.zapisflow.su`.
+The old checkout endpoints and migration 0017 remain for compatibility; in
+self-employed mode those links return 410 and cannot submit a fiscal receipt.
+The main `zapisflow.su` site and its DNS are unaffected.
 
-## Flow
+The POST to YooKassa uses the local `checkout_ref` as `Idempotence-Key` and
+includes local payment, user and plan IDs in metadata. A repeated click reuses
+the pending local payment; if YooKassa has already created it, the service GETs
+that payment and reuses its confirmation URL. Unknown outcomes older than 23
+hours require operator review because YooKassa's key expires after 24 hours.
+Concurrent callbacks may issue the same POST key, but cannot create another
+local payment for that project and plan. No Telegram or browser parameter
+sets the amount.
 
-1. The Manager Bot checks the project owner and reads the active plan from
-   PostgreSQL. In the Manager update transaction it creates one
-   `SubscriptionPayment` with an immutable amount/period snapshot and one
-   `CheckoutSession` with a 15-minute expiry. The URL is sent only after that
-   transaction commits.
-2. The checkout URL contains a 32-byte random bearer token. PostgreSQL stores
-   only its SHA-256 digest. The page displays the saved payment amount and
-   duration, asks for an email for the fiscal receipt, and sends no plan, user,
-   payment ID, or amount from the browser to the payment service.
-3. Submitting the form atomically marks the session used. The backend builds
-   receipt data from the email, payment snapshot and merchant-confirmed fiscal
-   settings, then creates a YooKassa payment with the payment's stable
-   idempotence key. A second form submission cannot create another order.
-4. The browser goes to YooKassa's HTTPS confirmation URL. Returning to
-   `/billing/success` is informational and never activates a subscription.
-   The webhook fetches the current payment from YooKassa using shop credentials,
-   verifies the reference, amount and currency, then calls the existing
-   idempotent `SubscriptionService`. The reconciliation job covers missed
-   webhook notifications. A single payment creates at most one period.
+`https://api.zapisflow.su/billing/yookassa/return` is informational. Only
+`POST /billing/yookassa/webhook` and the reconciliation job can process a
+successful payment after an authenticated GET to YooKassa verifies provider ID,
+reference, amount, currency and metadata. The existing subscription service
+and unique payment-to-period link prevent a replay from extending twice.
 
-The token is a bearer capability: anyone who obtains the URL before it is used
-can act on that order. The URL contains no predictable user or payment ID and
-expires quickly. Avoid forwarding it. The checkout URL is excluded from Caddy
-access logs; Uvicorn access logging is disabled for the webhook application.
-The browser receives `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
-Without a separate login, the website cannot identify the person holding a
-copied link. It cannot move the payment to another tenant through form fields.
+## Configuration
 
-## Environment and merchant setup
-
-Keep `PAYMENT_PROVIDER=disabled` until test credentials, fiscal values, DNS and
-TLS are verified. Never commit real shop secrets. Required when enabled:
+Keep credentials in the VPS `.env`, never in Git or logs:
 
 * `PAYMENT_PROVIDER=yookassa_web`
-* `YOOKASSA_MODE=test` for test credentials or `live` for production
-* `YOOKASSA_TEST_SHOP_ID`, `YOOKASSA_TEST_SECRET_KEY` for the test shop
-* `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY` for the live shop
+* `YOOKASSA_MODE=test` with `YOOKASSA_TEST_SHOP_ID` and `YOOKASSA_TEST_SECRET_KEY`
+* `YOOKASSA_ALLOW_TEST_IN_PRODUCTION=true` only for a controlled test
+* `YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS=[...]` for test owners
 * `PAYMENT_CURRENCY=RUB`
-* `BILLING_DOMAIN=pay.zapisflow.su` for Caddy
-* `BILLING_RETURN_URL=https://pay.zapisflow.su/billing/success`
-* `YOOKASSA_RECEIPT_VAT_CODE`
-* `YOOKASSA_RECEIPT_PAYMENT_SUBJECT`
-* `YOOKASSA_RECEIPT_PAYMENT_MODE`
-* `SUPPORT_TELEGRAM_USERNAME=zapisflow`
+* `BILLING_RETURN_URL=https://api.zapisflow.su/billing/yookassa/return`
+* `YOOKASSA_FISCAL_MODE=self_employed`
 
-The merchant must confirm the VAT code and fiscal item attributes against the
-shop's «Чеки от ЮKassa» setup. The site collects an actual customer email for
-the receipt. No tax code, email, or item attribute is invented in production.
-The backend fails startup with `PAYMENT_PROVIDER=yookassa_web` if the fiscal
-settings or selected shop credentials are missing. YooKassa receipt fields are
-described in the [official receipt documentation](https://yookassa.ru/developers/payment-acceptance/receipts/54fz/yoomoney/payments).
+The existing live mode selects a separate credential pair. The production test
+opt-in remains mandatory. `pay.zapisflow.su` stays configured in Caddy but is
+not required for the direct payment path.
 
-## Recovery and verification
+## Self-employed receipts
 
-The provider call happens after the local order commits. Repeated provider
-requests for the same payment use the same key within YooKassa's idempotence
-window; after 23 hours, an uncertain order is not submitted again. A used
-checkout token cannot be used again, even if the external API fails. In that
-case the customer requests a new link or contacts support, while webhook and
-reconciliation continue checking the original order. Operators should inspect
-uncertain orders before asking customers to pay again.
+The ZapisFlow owner uses НПД. In `self_employed` mode the payment request has
+no YooKassa `receipt` and no email requirement. **After receiving payment,
+register the income and issue the buyer's receipt in «Мой налог».** This is an
+operator task; the project does not automate «Мой налог». YooKassa's ordinary
+electronic payment confirmation is not this fiscal receipt. See the
+[YooKassa receipt documentation](https://yookassa.ru/developers/payment-acceptance/receipts/basics).
+The old `merchant_receipt` mode remains available only for a differently
+configured merchant and still requires explicit VAT and item settings.
 
-Before production activation: apply migration `0017`, validate Caddy and TLS
-for both domains, run a real test-shop payment with a receipt, verify webhook
-activation and duplicate notification behavior, then configure the live shop
-and enable `PAYMENT_PROVIDER=yookassa_web`. Do not treat a browser return as
-proof of payment.
+## Release blockers
 
-Create an `A` record for `pay.zapisflow.su` pointing to `185.221.23.193`.
-If an `AAAA` record is present, point it to a working IPv6 address on the same
-VPS or remove it. Leave the `zapisflow.su` DNS records and OpenResty hosting
-unchanged. After DNS propagation, Caddy will obtain a separate certificate for
-`pay.zapisflow.su`. Verify TLS and the checkout routes before enabling payment.
+Run a test-shop payment and verify the webhook, one period, and replay. Do not
+enable live payments until external access to `api.zapisflow.su` is reliable,
+the merchant configuration is verified, and the Telegram distribution policy
+is resolved. [Telegram's digital goods rules](https://core.telegram.org/bots/payments-stars)
+say that sales of digital services inside bots must use Stars, including when
+an external payment portal exists. This direct URL button is for controlled
+testing only and should not be described as compliant for live sales.

@@ -72,6 +72,64 @@ class YooKassaCheckoutService:
                 plan_code=plan_code,
             )
 
+    async def open_direct_checkout(
+        self, *, actor_user_id: int, master_id: int, plan_code: str
+    ) -> tuple[CheckoutOrder, CheckoutRedirect]:
+        """Reuse a pending local order; create a provider redirect after DB commit."""
+        if settings.payment_provider.lower() != "yookassa_web":
+            raise SubscriptionError("Оплата сейчас недоступна")
+        if settings.yookassa_fiscal_mode != "self_employed":
+            raise SubscriptionError("Прямая оплата недоступна для текущего режима чеков")
+        for _ in range(2):
+            async with self.session_maker.begin() as session:
+                master = await session.scalar(
+                    select(Master).where(Master.id == master_id).with_for_update()
+                )
+                if master is None or master.owner_user_id != actor_user_id:
+                    raise BillingIDORViolationError("Доступ к проекту запрещён")
+                owner = await session.get(User, actor_user_id)
+                if owner is None or not settings.can_use_yookassa_test_checkout(owner.telegram_id):
+                    raise SubscriptionError("Тестовая оплата для этого аккаунта недоступна")
+                if master.subscription_status == SubscriptionStatus.SUSPENDED:
+                    raise SubscriptionError("Подписка заблокирована; обратитесь в поддержку")
+                if not plan_code or len(plan_code) > 32:
+                    raise PlanNotFoundError("Тариф не найден")
+                plan = await session.scalar(select(SubscriptionPlan).where(
+                    SubscriptionPlan.code == plan_code,
+                    SubscriptionPlan.is_active.is_(True),
+                ))
+                if plan is None:
+                    raise PlanNotFoundError("Тариф не найден")
+                pending = await session.scalar(
+                    select(SubscriptionPayment).where(
+                        SubscriptionPayment.master_id == master_id,
+                        SubscriptionPayment.plan_id == plan.id,
+                        SubscriptionPayment.provider == PROVIDER_CODE,
+                        SubscriptionPayment.status == "PENDING",
+                    ).order_by(SubscriptionPayment.id.desc()).limit(1)
+                )
+                if pending is None:
+                    order = await self.create_order_in_session(
+                        session, actor_user_id=actor_user_id,
+                        master_id=master_id, plan_code=plan_code,
+                    )
+                else:
+                    if (
+                        pending.checkout_ref is None or pending.amount <= 0
+                        or pending.currency != "RUB" or pending.period_days <= 0
+                    ):
+                        raise SubscriptionError("Платёж требует проверки поддержкой")
+                    order = CheckoutOrder(
+                        pending.checkout_ref, pending.id, plan.id, plan.name,
+                        pending.amount, pending.currency, pending.period_days,
+                    )
+            redirect = await self.start_checkout(
+                checkout_ref=order.checkout_ref, actor_user_id=actor_user_id,
+            )
+            if redirect.status != "CANCELED":
+                return order, redirect
+        raise SubscriptionError("Не удалось создать новый платёж")
+
     async def create_order_in_session(
         self,
         session: AsyncSession,
@@ -176,10 +234,12 @@ class YooKassaCheckoutService:
             amount, currency = payment.amount, payment.currency
             created_at = payment.created_at
             provider_id = payment.provider_payment_id
+            local_payment_id = payment.id
+            local_plan_id = payment.plan_id
             plan = await session.get(SubscriptionPlan, payment.plan_id)
-            if plan is None:
+            if plan is None or not plan.is_active:
                 raise SubscriptionError("Тариф платежа не найден")
-            description = f"{plan.name}: подписка на {payment.period_days} дней"
+            description = f"{plan.name} — подписка на {payment.period_days} дней"
 
         if provider_id.startswith(UNCREATED_PREFIX):
             if created_at.tzinfo is None:
@@ -194,10 +254,16 @@ class YooKassaCheckoutService:
                 description=description,
                 return_url=settings.billing_return_url,
                 receipt=receipt,
+                payment_id=local_payment_id,
+                user_id=actor_user_id,
+                plan_id=local_plan_id,
             )
         else:
             remote = await self.client.get_payment(provider_id)
-        self._verify_remote(remote, checkout_ref, amount, currency)
+        self._verify_remote(
+            remote, checkout_ref, amount, currency,
+            payment_id=local_payment_id, user_id=actor_user_id, plan_id=local_plan_id,
+        )
         if remote.status in {"succeeded", "canceled"}:
             await self.reconcile(remote.id)
             return CheckoutRedirect(checkout_ref, None, remote.status.upper())
@@ -221,9 +287,11 @@ class YooKassaCheckoutService:
                 raise SubscriptionError("Тестовая оплата для этого аккаунта недоступна")
             if master.subscription_status == SubscriptionStatus.SUSPENDED:
                 raise SubscriptionError("Подписка заблокирована; обратитесь в поддержку")
-            # The order's amount, term, and plan were validated and committed
-            # before the provider request. A later catalog edit must not make
-            # this already-created order unusable.
+            plan = await session.get(SubscriptionPlan, payment.plan_id)
+            if plan is None or not plan.is_active:
+                raise SubscriptionError("Тариф платежа не найден")
+            # Amount and term use the committed snapshot. Catalog price edits
+            # cannot change an already-created provider payment.
             if payment.provider_payment_id.startswith(UNCREATED_PREFIX):
                 payment.provider_payment_id = remote.id
             elif payment.provider_payment_id != remote.id:
@@ -251,7 +319,13 @@ class YooKassaCheckoutService:
             )
             if payment is None or payment.provider != PROVIDER_CODE:
                 raise SubscriptionError("Локальный платёж не найден")
-            self._verify_remote(remote, checkout_ref, payment.amount, payment.currency)
+            master = await session.get(Master, payment.master_id)
+            if master is None:
+                raise SubscriptionError("Проект платежа не найден")
+            self._verify_remote(
+                remote, checkout_ref, payment.amount, payment.currency,
+                payment_id=payment.id, user_id=master.owner_user_id, plan_id=payment.plan_id,
+            )
             if payment.provider_payment_id.startswith(UNCREATED_PREFIX):
                 payment.provider_payment_id = remote.id
                 await session.flush()
@@ -259,6 +333,8 @@ class YooKassaCheckoutService:
                 raise SubscriptionError("Конфликт идентификатора платежа")
 
             if remote.status == "succeeded" and remote.paid:
+                # TODO: После получения оплаты зарегистрировать доход и
+                # сформировать чек в «Мой налог». ЮKassa не делает это за НПД.
                 return await SubscriptionService(session).process_successful_payment(
                     PROVIDER_CODE, remote.id
                 )
@@ -272,10 +348,26 @@ class YooKassaCheckoutService:
         checkout_ref: uuid.UUID,
         amount: Decimal,
         currency: str,
+        *,
+        payment_id: int,
+        user_id: int,
+        plan_id: int | None,
     ) -> None:
         if (
             remote.checkout_ref != str(checkout_ref)
             or remote.amount != amount
             or remote.currency != currency
+        ):
+            raise SubscriptionError("Параметры ЮKassa не совпадают с заказом")
+        # Older website payments only carried checkout_ref. New direct payments
+        # carry all three IDs and each supplied value must match DB truth.
+        expected = {
+            "payment_id": str(payment_id),
+            "user_id": str(user_id),
+            "plan_id": str(plan_id),
+        }
+        if any(
+            key in remote.metadata and remote.metadata[key] != value
+            for key, value in expected.items()
         ):
             raise SubscriptionError("Параметры ЮKassa не совпадают с заказом")

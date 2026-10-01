@@ -173,15 +173,17 @@ def subscription_card_keyboard(
 ) -> InlineKeyboardMarkup:
     """Action buttons for subscription management screen."""
     rows = []
-    # A callback performs the owner check and creates a short-lived checkout
-    # capability. No amount or checkout URL is accepted from callback_data.
+    # A callback performs the owner check. No amount or payment URL is accepted
+    # from callback_data; the backend reads the plan and creates the redirect.
     show_pay_action = (
         settings.payment_provider.lower() == "yookassa_web"
         or (settings.payment_provider.lower() == "manual" and not settings.is_production)
     ) and status != EffectiveSubscriptionStatus.SUSPENDED and can_pay
     for plan in (plans if show_pay_action else ()):
         price_fmt = f"{plan.price:,.2f}".replace(",", " ").removesuffix(".00") + " ₽"
-        if status == EffectiveSubscriptionStatus.EXPIRED:
+        if settings.payment_provider.lower() == "yookassa_web":
+            btn_text = f"💳 Оплатить {price_fmt}"
+        elif status == EffectiveSubscriptionStatus.EXPIRED:
             btn_text = f"💳 Оплатить {price_fmt} ({plan.name})"
         elif status == EffectiveSubscriptionStatus.PAID_ACTIVE:
             btn_text = f"💳 Продлить: {plan.name} — {price_fmt}"
@@ -211,9 +213,9 @@ def subscription_card_keyboard(
 
 
 def subscription_checkout_keyboard(master_id: int, url: str) -> InlineKeyboardMarkup:
-    """Link to the independently hosted one-use SaaS checkout page."""
+    """Provider-confirmed redirect returned by YooKassa for this order."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Открыть страницу оплаты", url=url)],
+        [InlineKeyboardButton(text="💳 Оплатить подписку", url=url)],
         [InlineKeyboardButton(text="🆘 Поддержка", url=settings.support_url)],
         [InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:sub:{master_id}")],
     ])

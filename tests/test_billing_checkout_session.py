@@ -37,6 +37,7 @@ def billing_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "yookassa_test_shop_id", "test-shop")
     monkeypatch.setattr(settings, "yookassa_test_secret_key", SecretStr("test-secret"))
     monkeypatch.setattr(settings, "billing_return_url", "https://pay.zapisflow.su/billing/success")
+    monkeypatch.setattr(settings, "yookassa_fiscal_mode", "merchant_receipt")
     monkeypatch.setattr(settings, "yookassa_receipt_vat_code", "1")
     monkeypatch.setattr(settings, "yookassa_receipt_payment_subject", "service")
     monkeypatch.setattr(settings, "yookassa_receipt_payment_mode", "full_payment")
@@ -242,15 +243,17 @@ async def test_plan_price_change_keeps_existing_checkout_payment_snapshot(
         assert (await session.get(SubscriptionPayment, order.payment_id)).amount == Decimal("499.00")
 
 
-async def test_manager_pay_callback_creates_link_after_business_commit(
+async def test_manager_pay_callback_uses_provider_confirmation_url(
     pg_engine: AsyncEngine, billing_config: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    monkeypatch.setattr(settings, "yookassa_fiscal_mode", "self_employed")
     owner_id, master_id, code = await seed_project(sessions)
     async with sessions() as session:
         owner = await session.get(User, owner_id)
         telegram_id = owner.telegram_id
     monkeypatch.setattr("app.manager_bot.handlers.async_session_factory", sessions)
+    fake = FakeYooKassaClient()
     callback = MagicMock()
     callback.data = f"mgr:sub:pay:{master_id}:{code}"
     callback.from_user = MagicMock(id=telegram_id, first_name="Owner", last_name=None, username=None)
@@ -258,21 +261,23 @@ async def test_manager_pay_callback_creates_link_after_business_commit(
     callback.message.edit_text = AsyncMock()
     callback.answer = AsyncMock()
 
-    async with sessions() as session:
-        await cb_subscription_pay(callback, session)
-        assert not callback.message.edit_text.called
-        assert len(session.info.get("post_commit", [])) == 1
-        await session.commit()
-        await session.info["post_commit"][0]()
+    with patch("app.manager_bot.handlers.YooKassaClient", return_value=fake):
+        async with sessions() as session:
+            await cb_subscription_pay(callback, session)
 
     markup = callback.message.edit_text.call_args.kwargs["reply_markup"]
     buttons = [button for row in markup.inline_keyboard for button in row]
-    urls = [button.url for button in buttons if button.url and "/billing/checkout/" in button.url]
-    assert len(urls) == 1 and urls[0].startswith("https://pay.zapisflow.su/billing/checkout/")
-    assert urls[0].split("/")[-1] != str(owner_id)
+    urls = [button.url for button in buttons if button.url and "yookassa.ru" in button.url]
+    assert urls == ["https://yookassa.ru/checkout/test"]
+    assert "/billing/checkout/" not in str(markup)
+    assert len(fake.create_calls) == 1
     async with sessions() as session:
         rows = (await session.scalars(select(CheckoutSession).where(CheckoutSession.master_id == master_id))).all()
-        assert len(rows) == 1 and rows[0].user_id == owner_id
+        assert rows == []
+        payments = (await session.scalars(select(SubscriptionPayment).where(
+            SubscriptionPayment.master_id == master_id
+        ))).all()
+        assert len(payments) == 1 and payments[0].amount == Decimal("499.00")
 
 
 async def test_checkout_page_escapes_plan_name_and_uses_configured_support(

@@ -33,9 +33,8 @@ from app.manager_bot.keyboards import (
 from app.services.bot_registry import BotRegistry
 from app.services.subscription_service import SubscriptionService
 from app.database.session import async_session_factory
-from app.services.billing.checkout_session import CheckoutSessionService
 from app.services.billing.yookassa_checkout import YooKassaCheckoutService
-from app.services.billing.yookassa_client import YooKassaClient
+from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError
 from app.manager_bot.states import ConnectBotStates, CreateMasterStates, RotateTokenStates
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.repositories.master_repository import MasterRepository
@@ -1024,37 +1023,36 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
             checkout_service = YooKassaCheckoutService(
                 async_session_factory, YooKassaClient(shop_id, secret_key)
             )
-            checkout_sessions = CheckoutSessionService(async_session_factory, checkout_service)
-            token, order = await checkout_sessions.issue(
-                session,
+            order, redirect = await checkout_service.open_direct_checkout(
                 actor_user_id=user.id,
                 master_id=master.id,
                 plan_code=plan_code,
             )
-            url = f"{settings.billing_site_origin}/billing/checkout/{token}"
-        except (SubscriptionError, ValueError):
+        except (SubscriptionError, YooKassaGatewayError, ValueError):
             await callback.answer(
                 f"Не удалось открыть оплату. Поддержка: {settings.support_tag}", show_alert=True
             )
             return
 
+        if redirect.confirmation_url is None:
+            await callback.answer(
+                "Этот платёж уже завершён. Обновите статус подписки.", show_alert=True
+            )
+            return
         amount = f"{order.amount:,.2f}".replace(",", " ").removesuffix(".00")
         text = (
             "💳 <b>Подписка ZapisFlow</b>\n\n"
             f"Тариф: <b>{escape(order.plan_name)}</b>\n"
             f"Стоимость: {amount} ₽ / {order.period_days} дней\n\n"
-            "Страница оплаты действует 15 минут. Для чека потребуется email.\n"
+            "Нажмите кнопку, чтобы открыть страницу оплаты ЮKassa. "
+            "Статус обновится после подтверждения платежа.\n"
             f"📞 Поддержка: {settings.support_tag}"
         )
-
-        async def show_committed_checkout() -> None:
-            await callback.message.edit_text(
-                text,
-                reply_markup=subscription_checkout_keyboard(master.id, url),
-            )
-            await callback.answer()
-
-        session.info.setdefault("post_commit", []).append(show_committed_checkout)
+        await callback.message.edit_text(
+            text,
+            reply_markup=subscription_checkout_keyboard(master.id, redirect.confirmation_url),
+        )
+        await callback.answer()
         return
 
     if settings.is_production:

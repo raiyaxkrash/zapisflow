@@ -33,7 +33,8 @@ async def test_create_yookassa_payment_uses_snapshot_and_stable_idempotency_key(
             amount=Decimal("499.00"),
             currency="RUB",
             description="ZapisFlow Basic, 30 days",
-            return_url="https://pay.example.test/return",
+            return_url="https://api.example.test/billing/yookassa/return",
+            payment_id=7, user_id=9, plan_id=3,
         )
 
     request = seen["request"]
@@ -44,9 +45,12 @@ async def test_create_yookassa_payment_uses_snapshot_and_stable_idempotency_key(
     body = __import__("json").loads(request.content)
     assert body["amount"] == {"value": "499.00", "currency": "RUB"}
     assert body["confirmation"] == {
-        "type": "redirect", "return_url": "https://pay.example.test/return"
+        "type": "redirect", "return_url": "https://api.example.test/billing/yookassa/return"
     }
-    assert body["metadata"] == {"checkout_ref": "opaque-ref"}
+    assert body["metadata"] == {
+        "checkout_ref": "opaque-ref", "payment_id": "7", "user_id": "9", "plan_id": "3",
+    }
+    assert "receipt" not in body
     assert result.id == "provider-123"
     assert result.confirmation_url == "https://yoomoney.ru/checkout/123"
 

@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     yookassa_test_shop_id: str = Field(default="", alias="YOOKASSA_TEST_SHOP_ID")
     yookassa_test_secret_key: SecretStr = Field(default=SecretStr(""), alias="YOOKASSA_TEST_SECRET_KEY")
     billing_return_url: str = Field(default="", alias="BILLING_RETURN_URL")
+    yookassa_fiscal_mode: str = Field(default="self_employed", alias="YOOKASSA_FISCAL_MODE")
     yookassa_receipt_vat_code: str = Field(default="", alias="YOOKASSA_RECEIPT_VAT_CODE")
     yookassa_receipt_payment_subject: str = Field(default="", alias="YOOKASSA_RECEIPT_PAYMENT_SUBJECT")
     yookassa_receipt_payment_mode: str = Field(default="", alias="YOOKASSA_RECEIPT_PAYMENT_MODE")
@@ -180,7 +181,7 @@ class Settings(BaseSettings):
             raise ValueError("YOOKASSA_RECEIPT_PAYMENT_MODE must be merchant-confirmed")
 
     def validate_payment_configuration(self) -> None:
-        """Fail closed when external web checkout is enabled without its dependencies."""
+        """Fail closed when YooKassa is enabled without its dependencies."""
         if self.payment_provider.lower() != "yookassa_web":
             return
         errors: list[str] = []
@@ -203,12 +204,15 @@ class Settings(BaseSettings):
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             errors.append("BILLING_RETURN_URL must be an HTTPS URL without credentials")
         else:
-            if parsed.path != "/billing/success" or parsed.query or parsed.fragment:
-                errors.append("BILLING_RETURN_URL must point to /billing/success without a query or fragment")
-        try:
-            self.validate_receipt_configuration()
-        except ValueError as exc:
-            errors.append(str(exc))
+            if parsed.path not in {"/billing/success", "/billing/yookassa/return"} or parsed.query or parsed.fragment:
+                errors.append("BILLING_RETURN_URL must point to a supported billing return path")
+        if self.yookassa_fiscal_mode not in {"self_employed", "merchant_receipt"}:
+            errors.append("YOOKASSA_FISCAL_MODE must be self_employed or merchant_receipt")
+        elif self.yookassa_fiscal_mode == "merchant_receipt":
+            try:
+                self.validate_receipt_configuration()
+            except ValueError as exc:
+                errors.append(str(exc))
         if errors:
             raise ValueError("Payment configuration invalid: " + "; ".join(errors))
 

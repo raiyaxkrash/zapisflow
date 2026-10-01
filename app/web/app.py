@@ -244,6 +244,11 @@ def create_app(
     async def billing_checkout_page(token: str) -> HTMLResponse:
         if settings.payment_provider.lower() != "yookassa_web":
             raise HTTPException(status_code=404, detail="Not found")
+        if settings.yookassa_fiscal_mode == "self_employed":
+            return HTMLResponse(
+                status_page("Ссылка устарела", "Запросите новую ссылку в боте."),
+                status_code=410, headers=BILLING_PAGE_HEADERS,
+            )
         sessions, _ = billing_services()
         try:
             offer = await sessions.inspect(token)
@@ -261,6 +266,11 @@ def create_app(
     async def billing_checkout_pay(token: str, request: Request) -> Response:
         if settings.payment_provider.lower() != "yookassa_web":
             raise HTTPException(status_code=404, detail="Not found")
+        if settings.yookassa_fiscal_mode == "self_employed":
+            return HTMLResponse(
+                status_page("Ссылка устарела", "Запросите новую ссылку в боте."),
+                status_code=410, headers=BILLING_PAGE_HEADERS,
+            )
         if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
             raise HTTPException(status_code=415, detail="Unsupported form encoding")
         raw = await read_limited_request_body(request, 4096)
@@ -313,6 +323,14 @@ def create_app(
 
     @app.get("/billing/success", tags=["billing"])
     async def billing_success() -> HTMLResponse:
+        return HTMLResponse(
+            status_page("Проверяем оплату", "Статус подписки обновится после подтверждения платежа ЮKassa."),
+            headers=BILLING_PAGE_HEADERS,
+        )
+
+    @app.get("/billing/yookassa/return", tags=["billing"])
+    async def billing_yookassa_return() -> HTMLResponse:
+        """A browser return is informational; only verified API state activates access."""
         return HTMLResponse(
             status_page("Проверяем оплату", "Статус подписки обновится после подтверждения платежа ЮKassa."),
             headers=BILLING_PAGE_HEADERS,
