@@ -200,6 +200,7 @@ class MasterSettings(Base):
     working_hours_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     contacts_intro_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     telegram_username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    vk_profile: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     about_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     hold_duration_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     cancel_policy_hours: Mapped[int] = mapped_column(Integer, default=24, nullable=False)

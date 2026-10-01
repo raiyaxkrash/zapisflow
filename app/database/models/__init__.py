@@ -49,6 +49,7 @@ from app.database.models.subscription import (
     SubscriptionPayment,
     PromoCode,
 )
+from app.database.models.review import Review
 
 __all__ = [
     "Base",
@@ -97,4 +98,5 @@ __all__ = [
     "SubscriptionPeriod",
     "SubscriptionPayment",
     "PromoCode",
+    "Review",
 ]

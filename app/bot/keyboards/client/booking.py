@@ -150,6 +150,23 @@ def get_appointment_detail_keyboard(appointment: Appointment) -> InlineKeyboardM
             )
         )
 
+    # Post-visit features for completed appointment
+    if appointment.status == AppointmentStatus.COMPLETED:
+        builder.row(
+            InlineKeyboardButton(
+                text="📅 Записаться снова",
+                callback_data=BookingActionCallback(
+                    action="repeat", appointment_id=appointment.id
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text="⭐ Оценить визит",
+                callback_data=BookingActionCallback(
+                    action="review", appointment_id=appointment.id
+                ).pack(),
+            ),
+        )
+
     builder.row(
         InlineKeyboardButton(
             text="📞 Контакты",
@@ -166,5 +183,44 @@ def get_appointment_detail_keyboard(appointment: Appointment) -> InlineKeyboardM
             text="🏠 В меню",
             callback_data=MenuCallback(action="main").pack(),
         ),
+    )
+    return builder.as_markup()
+
+
+def get_review_rating_keyboard(appointment_id: int) -> InlineKeyboardMarkup:
+    """Rating selection keyboard (1 to 5 stars)."""
+    builder = InlineKeyboardBuilder()
+    for star in [5, 4, 3, 2, 1]:
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{'⭐' * star} ({star})",
+                callback_data=f"rev:star:{appointment_id}:{star}",
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="◀️ Назад к записи",
+            callback_data=BookingActionCallback(
+                action="detail", appointment_id=appointment_id
+            ).pack(),
+        )
+    )
+    return builder.as_markup()
+
+
+def get_review_skip_keyboard(appointment_id: int, rating: int) -> InlineKeyboardMarkup:
+    """Keyboard allowing to skip optional comment."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="⏩ Без комментария",
+            callback_data=f"rev:skip:{appointment_id}:{rating}",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🏠 В главное меню",
+            callback_data=MenuCallback(action="main").pack(),
+        )
     )
     return builder.as_markup()

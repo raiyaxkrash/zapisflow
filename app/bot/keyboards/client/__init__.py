@@ -27,6 +27,8 @@ from app.bot.keyboards.client.booking import (
     get_cancel_upload_keyboard,
     get_my_appointments_keyboard,
     get_appointment_detail_keyboard,
+    get_review_rating_keyboard,
+    get_review_skip_keyboard,
 )
 from app.bot.keyboards.client.portfolio import (
     get_portfolio_categories_keyboard,
@@ -52,6 +54,8 @@ __all__ = [
     "get_cancel_upload_keyboard",
     "get_my_appointments_keyboard",
     "get_appointment_detail_keyboard",
+    "get_review_rating_keyboard",
+    "get_review_skip_keyboard",
     "get_portfolio_categories_keyboard",
     "get_portfolio_item_keyboard",
 ]

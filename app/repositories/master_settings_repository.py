@@ -77,6 +77,7 @@ class MasterSettingsRepository:
             "working_hours_text": settings.working_hours_text,
             "contacts_intro_text": settings.contacts_intro_text,
             "telegram_username": settings.telegram_username,
+            "vk_profile": settings.vk_profile,
             "about_text": settings.about_text,
             "hold_duration_minutes": settings.hold_duration_minutes,
             "cancel_policy_hours": settings.cancel_policy_hours,

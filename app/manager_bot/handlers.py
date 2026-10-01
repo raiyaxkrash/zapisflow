@@ -37,9 +37,18 @@ from app.manager_bot.keyboards import (
     cancel_keyboard,
     confirm_connect_keyboard,
     confirm_disable_bot_keyboard,
+    crm_client_card_keyboard,
+    crm_client_history_keyboard,
+    crm_client_list_keyboard,
+    crm_menu_keyboard,
+    finances_period_keyboard,
     main_menu_keyboard,
+    manager_contact_cancel_keyboard,
+    manager_contacts_keyboard,
     project_card_keyboard,
     project_list_keyboard,
+    reviews_keyboard,
+    stats_period_keyboard,
     subscription_card_keyboard,
     subscription_canceled_keyboard,
     subscription_checkout_keyboard,
@@ -49,13 +58,22 @@ from app.manager_bot.keyboards import (
     subscription_success_keyboard,
 )
 from app.services.bot_registry import BotRegistry
+from app.services.crm_service import MasterCrmService
+from app.services.master_contacts import CONTACT_FIELD_LABELS, MasterContactsService
 from app.services.platform_admin_service import PlatformAdminService
 from app.services.rate_limiter import check_rate_limit
 from app.services.subscription_service import SubscriptionService
 from app.database.session import async_session_factory
 from app.services.billing.yookassa_checkout import YooKassaCheckoutService
 from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError
-from app.manager_bot.states import ConnectBotStates, CreateMasterStates, RotateTokenStates
+from app.manager_bot.states import (
+    ConnectBotStates,
+    CreateMasterStates,
+    CrmNoteStates,
+    CrmSearchStates,
+    MasterContactStates,
+    RotateTokenStates,
+)
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.repositories.master_repository import MasterRepository
 from app.repositories.user_repository import UserRepository
@@ -1964,3 +1982,580 @@ async def cb_admin_plan_detail(callback: CallbackQuery, session: AsyncSession) -
     )
     await callback.message.edit_text(text, reply_markup=admin_plan_detail_keyboard(p.id, p.is_active))
     await callback.answer()
+
+
+# ===========================================================================
+# PHASE 3: CRM & MASTER BUSINESS FEATURE HANDLERS
+# ===========================================================================
+
+
+@manager_router.callback_query(F.data.startswith("mgr:crm:search:"))
+async def cb_crm_search_prompt(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt user for client search text."""
+    user = await _get_or_create_user(session, callback.from_user)
+    master_id = int(callback.data.split(":")[-1])
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    await state.set_state(CrmSearchStates.waiting_for_query)
+    await state.update_data(master_id=master_id)
+
+    text = (
+        "🔍 <b>Поиск клиента в CRM</b>\n\n"
+        "Отправьте в чат имя, номер телефона или Telegram @username клиента для поиска:"
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:crm:{master_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(CrmSearchStates.waiting_for_query)
+async def msg_crm_search_query(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Execute search query and return matching clients."""
+    user = await _get_or_create_user(session, message.from_user)
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        await message.answer("Проект не найден или нет доступа.")
+        return
+
+    query_text = (message.text or "").strip()
+    if not query_text:
+        await message.answer("Введите текст для поиска:")
+        return
+
+    await state.clear()
+    crm_svc = MasterCrmService(session)
+    clients, total = await crm_svc.search_clients(master_id, query_text, page=1, page_size=5)
+
+    if not clients:
+        text = f"🔍 По запросу «<b>{escape(query_text)}</b>» клиентов не найдено."
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔎 Искать снова", callback_data=f"mgr:crm:search:{master_id}")],
+                [InlineKeyboardButton(text="⬅️ Меню CRM", callback_data=f"mgr:crm:{master_id}")],
+            ]
+        )
+        await message.answer(text, reply_markup=kb)
+        return
+
+    text = (
+        f"🔍 Результаты поиска «<b>{escape(query_text)}</b>»:\n"
+        f"Найдено клиентов: <b>{total}</b>\n\n"
+        "Выберите клиента для просмотра профиля:"
+    )
+    kb = crm_client_list_keyboard(master_id, segment="all", page=1, total_count=total, clients=clients)
+    await message.answer(text, reply_markup=kb)
+
+
+@manager_router.callback_query(F.data.startswith("mgr:crm:seg:"))
+async def cb_crm_segment(callback: CallbackQuery, session: AsyncSession) -> None:
+    """View paginated clients for a segment."""
+    user = await _get_or_create_user(session, callback.from_user)
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    segment = parts[4]
+    page = int(parts[5]) if len(parts) > 5 else 1
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    crm_svc = MasterCrmService(session)
+    clients, total = await crm_svc.list_clients_by_segment(master_id, segment, page=page, page_size=5)
+
+    seg_names = {
+        "all": "Все клиенты",
+        "regular": "Постоянные клиенты (3+ визита)",
+        "new": "Новые клиенты (до 30 дн.)",
+        "inactive30": "Давно не были (30+ дн.)",
+        "inactive60": "Давно не были (60+ дн.)",
+    }
+    seg_title = seg_names.get(segment, "Клиенты")
+
+    if not clients:
+        text = (
+            f"👥 <b>{escape(seg_title)}</b>\n\n"
+            "В этом сегменте пока нет клиентов."
+        )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в CRM", callback_data=f"mgr:crm:{master_id}")]]
+        )
+        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.answer()
+        return
+
+    text = (
+        f"👥 <b>{escape(seg_title)}</b>\n"
+        f"Всего в сегменте: <b>{total}</b>\n\n"
+        "Выберите клиента для просмотра карточки и истории:"
+    )
+    kb = crm_client_list_keyboard(master_id, segment, page, total, clients, page_size=5)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:crm:"))
+async def cb_crm_main_menu(callback: CallbackQuery, session: AsyncSession) -> None:
+    """CRM main menu for master."""
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    master_id = int(parts[2])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    crm_svc = MasterCrmService(session)
+    _, total_clients = await crm_svc.list_clients_by_segment(master_id, "all", page=1, page_size=1)
+    _, regular_cnt = await crm_svc.list_clients_by_segment(master_id, "regular", page=1, page_size=1)
+    _, new_cnt = await crm_svc.list_clients_by_segment(master_id, "new", page=1, page_size=1)
+    _, inactive_cnt = await crm_svc.list_clients_by_segment(master_id, "inactive30", page=1, page_size=1)
+
+    text = (
+        f"👥 <b>CRM база клиентов: {escape(master.display_name)}</b>\n\n"
+        f"Всего клиентов в базе: <b>{total_clients}</b>\n"
+        f"⭐ Постоянных (3+ визита): <b>{regular_cnt}</b>\n"
+        f"🆕 Новых за последний месяц: <b>{new_cnt}</b>\n"
+        f"⏰ Не приходили более 30 дней: <b>{inactive_cnt}</b>\n\n"
+        "Выберите сегмент или воспользуйтесь поиском:"
+    )
+    await callback.message.edit_text(text, reply_markup=crm_menu_keyboard(master_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:client:hist:"))
+async def cb_client_history(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Paginated client appointments history."""
+    user = await _get_or_create_user(session, callback.from_user)
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    client_user_id = int(parts[4])
+    page = int(parts[5]) if len(parts) > 5 else 1
+    segment = parts[6] if len(parts) > 6 else "all"
+    client_page = int(parts[7]) if len(parts) > 7 else 1
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    crm_svc = MasterCrmService(session)
+    appointments, total = await crm_svc.get_client_history(master_id, client_user_id, page=page, page_size=5)
+
+    if not appointments:
+        text = "📋 <b>История записей</b>\n\nУ клиента пока нет записей в этом проекте."
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="⬅️ Назад к карточке",
+                    callback_data=f"mgr:client:{master_id}:{client_user_id}:{segment}:{client_page}",
+                )
+            ]]
+        )
+        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.answer()
+        return
+
+    tz = await crm_svc._get_timezone(master_id)
+    lines = [f"📋 <b>История записей клиента (всего: {total}):</b>\n"]
+    for a in appointments:
+        local_time = a.start_time.astimezone(tz)
+        dt_str = local_time.strftime("%d.%m.%Y в %H:%M")
+        price_str = f"{a.snapshot_service_price:.0f} ₽"
+        lines.append(
+            f"• <b>{dt_str}</b>\n"
+            f"  Услуга: {escape(a.snapshot_service_title)} ({price_str})\n"
+            f"  Статус: {a.status.display_name}\n"
+        )
+
+    text = "\n".join(lines)
+    kb = crm_client_history_keyboard(
+        master_id, client_user_id, page, total, segment=segment, client_page=client_page, page_size=5
+    )
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:client:note:"))
+async def cb_client_edit_note(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt master to edit client notes."""
+    user = await _get_or_create_user(session, callback.from_user)
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    client_user_id = int(parts[4])
+    segment = parts[5] if len(parts) > 5 else "all"
+    page = int(parts[6]) if len(parts) > 6 else 1
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    await state.set_state(CrmNoteStates.waiting_for_note)
+    await state.update_data(
+        master_id=master_id,
+        client_user_id=client_user_id,
+        segment=segment,
+        page=page,
+    )
+
+    text = (
+        "✏️ <b>Редактирование заметки о клиенте</b>\n\n"
+        "Отправьте текст заметки (особенности клиента, предпочтения по дизайну, аллергии и т.д.).\n"
+        "Чтобы удалить заметку, отправьте <code>/clear</code>."
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"mgr:client:{master_id}:{client_user_id}:{segment}:{page}",
+            )
+        ]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(CrmNoteStates.waiting_for_note)
+async def msg_client_save_note(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save client note and display updated client card."""
+    user = await _get_or_create_user(session, message.from_user)
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    client_user_id = data.get("client_user_id")
+    segment = data.get("segment", "all")
+    page = data.get("page", 1)
+
+    if not master_id or not client_user_id:
+        await state.clear()
+        return
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        await message.answer("Проект не найден или нет доступа.")
+        return
+
+    raw_note = (message.text or "").strip()
+    note_val = None if raw_note == "/clear" else raw_note
+
+    crm_svc = MasterCrmService(session)
+    try:
+        await crm_svc.update_client_notes(
+            master_id=master_id,
+            user_id=client_user_id,
+            actor_user_id=user.id,
+            notes=note_val,
+        )
+    except Exception as exc:
+        await message.answer(f"Ошибка сохранения: {exc}")
+        return
+
+    await state.clear()
+    card = await crm_svc.get_client_card(master_id, client_user_id)
+    text = _render_client_card_text(card)
+    kb = crm_client_card_keyboard(master_id, client_user_id, segment, page)
+    await message.answer("✅ Заметка обновлена!\n\n" + text, reply_markup=kb)
+
+
+@manager_router.callback_query(F.data.startswith("mgr:client:"))
+async def cb_client_card(callback: CallbackQuery, session: AsyncSession) -> None:
+    """View client profile in CRM."""
+    user = await _get_or_create_user(session, callback.from_user)
+    parts = callback.data.split(":")
+    master_id = int(parts[2])
+    client_user_id = int(parts[3])
+    segment = parts[4] if len(parts) > 4 else "all"
+    page = int(parts[5]) if len(parts) > 5 else 1
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    crm_svc = MasterCrmService(session)
+    try:
+        card = await crm_svc.get_client_card(master_id, client_user_id)
+    except LookupError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+
+    text = _render_client_card_text(card)
+    kb = crm_client_card_keyboard(master_id, client_user_id, segment, page)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+def _render_client_card_text(card: dict) -> str:
+    """Format structured client profile card."""
+    first_v = card["first_booking_at"].strftime("%d.%m.%Y") if card.get("first_booking_at") else "Нет данных"
+    last_v = card["last_booking_at"].strftime("%d.%m.%Y") if card.get("last_booking_at") else "Нет данных"
+    uname = f"@{escape(card['username'])}" if card.get("username") else "не указан"
+    phone = escape(card["phone"]) if card.get("phone") else "не указан"
+    marketing_icon = "🟢 Согласен" if card.get("is_marketing_allowed") else "🔴 Не согласен"
+    blocked_icon = " (🚫 Заблокировал бота)" if card.get("is_bot_blocked") else ""
+
+    return (
+        f"👤 <b>Карточка клиента: {escape(card['full_name'])}</b>\n\n"
+        f"📱 Телефон: <code>{phone}</code>\n"
+        f"✈️ Telegram: {uname}\n"
+        f"📅 Первый визит: <b>{first_v}</b>\n"
+        f"🕒 Последний визит: <b>{last_v}</b>\n\n"
+        f"📊 <b>Статистика визитов:</b>\n"
+        f"• Всего записей: <b>{card['total_bookings']}</b>\n"
+        f"• Выполнено: <b>{card['completed']}</b>\n"
+        f"• Отменено: <b>{card['cancelled']}</b>\n"
+        f"• Не пришел (No-Show): <b>{card['no_show']}</b>\n"
+        f"💰 <b>LTV (общая сумма оплат): {card['total_spent']:.0f} ₽</b>\n\n"
+        f"⭐️ <b>Любимая услуга:</b> {escape(card['favorite_service'])}\n"
+        f"📢 Рассылки: {marketing_icon}{blocked_icon}\n\n"
+        f"📝 <b>Заметка мастера:</b>\n"
+        f"<i>{escape(card['notes']) if card.get('notes') else 'Нет заметок'}</i>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# STATISTICS & FINANCES
+# ---------------------------------------------------------------------------
+
+
+@manager_router.callback_query(F.data.startswith("mgr:stats:"))
+async def cb_master_statistics(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Operational statistics dashboard for master."""
+    user = await _get_or_create_user(session, callback.from_user)
+    parts = callback.data.split(":")
+    master_id = int(parts[2])
+    period = parts[3] if len(parts) > 3 else "month"
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    crm_svc = MasterCrmService(session)
+    stats = await crm_svc.get_master_statistics(master_id, period=period)
+
+    text = (
+        f"📊 <b>Статистика проекта: {escape(master.display_name)}</b>\n"
+        f"Период: <b>{escape(stats['period_title'])}</b>\n\n"
+        f"📅 Всего записей: <b>{stats['total_bookings']}</b>\n"
+        f"✅ Выполнено визитов: <b>{stats['completed']}</b> ({stats['completion_rate']}%)\n"
+        f"⏳ Подтверждено предстоящих: <b>{stats['confirmed']}</b>\n"
+        f"❌ Отменено: <b>{stats['cancelled']}</b>\n"
+        f"🚫 Не явились (No-Show): <b>{stats['no_show']}</b> ({stats['no_show_rate']}%)\n\n"
+        f"👥 Уникальных клиентов: <b>{stats['unique_clients']}</b>\n"
+        f"🆕 Новых клиентов: <b>{stats['new_clients']}</b>\n"
+        f"🔄 Повторных клиентов: <b>{stats['returning_clients']}</b>\n\n"
+        f"📈 Загрузка расписания: <b>{stats['occupancy_rate']}%</b>"
+    )
+    await callback.message.edit_text(text, reply_markup=stats_period_keyboard(master_id, current_period=period))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:finances:"))
+async def cb_master_finances(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Master financial dashboard from bookings (strictly isolated from platform subscription billing)."""
+    user = await _get_or_create_user(session, callback.from_user)
+    parts = callback.data.split(":")
+    master_id = int(parts[2])
+    period = parts[3] if len(parts) > 3 else "month"
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    crm_svc = MasterCrmService(session)
+    fin = await crm_svc.get_master_finances(master_id, period=period)
+
+    lines = [
+        f"💰 <b>Финансы мастера: {escape(master.display_name)}</b>",
+        f"Период: <b>{escape(fin['period_title'])}</b>\n",
+        f"💵 Выручка от записей: <b>{fin['revenue']:.0f} ₽</b>",
+        f"💳 Удержанные предоплаты: <b>{fin['retained_deposits']:.0f} ₽</b>",
+        f"📈 <b>Итого доход: {fin['total_income']:.0f} ₽</b>\n",
+        f"🏷 Выполнено записей: <b>{fin['completed_count']}</b>",
+        f"🧾 Средний чек: <b>{fin['avg_ticket']:.0f} ₽</b>\n",
+    ]
+
+    if fin["top_services"]:
+        lines.append("🏆 <b>Топ услуг по выручке:</b>")
+        for idx, s in enumerate(fin["top_services"], start=1):
+            lines.append(f"{idx}. {escape(s['title'])} — {s['count']} виз. ({s['revenue']:.0f} ₽)")
+    else:
+        lines.append("<i>За выбранный период выполненных услуг нет.</i>")
+
+    lines.append(
+        "\nℹ️ <i>Примечание: здесь отображается ваша реальная выручка от клиентов за услуги. "
+        "Она не связана со стоимостью подписки на платформу ZapisFlow.</i>"
+    )
+
+    text = "\n".join(lines)
+    await callback.message.edit_text(text, reply_markup=finances_period_keyboard(master_id, current_period=period))
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# REVIEWS & RATINGS
+# ---------------------------------------------------------------------------
+
+
+@manager_router.callback_query(F.data.startswith("mgr:reviews:"))
+async def cb_master_reviews(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Master reviews dashboard with average rating and star distribution."""
+    user = await _get_or_create_user(session, callback.from_user)
+    master_id = int(callback.data.split(":")[-1])
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    crm_svc = MasterCrmService(session)
+    summary = await crm_svc.get_reviews_summary(master_id, limit=5)
+
+    lines = [
+        f"⭐ <b>Отзывы и рейтинг: {escape(master.display_name)}</b>\n",
+        f"Рейтинг: <b>⭐ {summary['avg_rating']:.2f} / 5.0</b> (всего отзывов: <b>{summary['total_count']}</b>)\n",
+        f"⭐⭐⭐⭐⭐ 5 звёзд: <b>{summary['stars_5']}</b>",
+        f"⭐⭐⭐⭐ 4 звезды: <b>{summary['stars_4']}</b>",
+        f"⭐⭐⭐ 3 звезды: <b>{summary['stars_3']}</b>",
+        f"⭐⭐ 2 звезды: <b>{summary['stars_2']}</b>",
+        f"⭐ 1 звезда: <b>{summary['stars_1']}</b>\n",
+    ]
+
+    if summary["recent_reviews"]:
+        lines.append("💬 <b>Последние отзывы:</b>")
+        for r in summary["recent_reviews"]:
+            stars = "⭐" * r["rating"]
+            date_str = r["created_at"].strftime("%d.%m.%Y")
+            comment = f"\n   «{escape(r['comment'])}»" if r.get("comment") else ""
+            lines.append(f"• {stars} от <b>{escape(r['client_name'])}</b> ({date_str}){comment}")
+    else:
+        lines.append("<i>Отзывов пока нет. Клиенты смогут оценить визит после завершения записи.</i>")
+
+    text = "\n".join(lines)
+    await callback.message.edit_text(text, reply_markup=reviews_keyboard(master_id))
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# MASTER CONTACTS MANAGEMENT IN MANAGER BOT
+# ---------------------------------------------------------------------------
+
+
+@manager_router.callback_query(F.data.startswith("mgr:contact:edit:"))
+async def cb_mgr_contact_edit(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt master to edit contact field."""
+    user = await _get_or_create_user(session, callback.from_user)
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    field = parts[4]
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    label = CONTACT_FIELD_LABELS.get(field, field)
+    await state.set_state(MasterContactStates.waiting_for_value)
+    await state.update_data(master_id=master_id, field=field)
+
+    text = (
+        f"✏️ <b>Изменение поля: {label}</b>\n\n"
+        "Отправьте новое значение сообщением в чат.\n"
+        "Чтобы очистить это поле, отправьте <code>/clear</code>."
+    )
+    await callback.message.edit_text(text, reply_markup=manager_contact_cancel_keyboard(master_id))
+    await callback.answer()
+
+
+@manager_router.message(MasterContactStates.waiting_for_value)
+async def msg_mgr_contact_save(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save contact field edit."""
+    user = await _get_or_create_user(session, message.from_user)
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    field = data.get("field")
+
+    if not master_id or not field:
+        await state.clear()
+        return
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        await message.answer("Проект не найден или нет доступа.")
+        return
+
+    contacts_svc = MasterContactsService(session)
+    try:
+        await contacts_svc.update_field(master_id, user.id, field, message.text)
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}\nПопробуйте ещё раз или отправьте <code>/clear</code>:")
+        return
+
+    await state.clear()
+    settings_obj = await contacts_svc.get(master_id)
+    text = _render_contacts_summary_text(master.display_name, settings_obj)
+    await message.answer("✅ Контакты успешно обновлены!\n\n" + text, reply_markup=manager_contacts_keyboard(master_id))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:contacts:"))
+async def cb_mgr_contacts(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Show contact details in Manager Bot."""
+    await state.clear()
+    user = await _get_or_create_user(session, callback.from_user)
+    master_id = int(callback.data.split(":")[-1])
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Проект не найден или нет доступа.", show_alert=True)
+        return
+
+    contacts_svc = MasterContactsService(session)
+    settings_obj = await contacts_svc.get(master_id)
+    text = _render_contacts_summary_text(master.display_name, settings_obj)
+    await callback.message.edit_text(text, reply_markup=manager_contacts_keyboard(master_id))
+    await callback.answer()
+
+
+def _render_contacts_summary_text(project_name: str, settings_obj: Optional[MasterSettings]) -> str:
+    """Render structured contacts view."""
+    get_val = lambda f: (getattr(settings_obj, f, None) or "").strip() if settings_obj else ""
+
+    lines = [f"📞 <b>Контакты студии: {escape(project_name)}</b>\n"]
+    for field, label in CONTACT_FIELD_LABELS.items():
+        val = get_val(field)
+        val_str = escape(val) if val else "<i>не заполнено</i>"
+        lines.append(f"• <b>{label}:</b> {val_str}")
+
+    lines.append("\nНажмите на кнопку ниже, чтобы изменить нужное поле:")
+    return "\n".join(lines)

@@ -139,6 +139,19 @@ def project_card_keyboard(
             )
         ])
 
+    # Business & CRM features
+    rows.append([
+        InlineKeyboardButton(text="👥 Клиенты CRM", callback_data=f"mgr:crm:{master.id}"),
+        InlineKeyboardButton(text="📊 Статистика", callback_data=f"mgr:stats:{master.id}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="💰 Финансы", callback_data=f"mgr:finances:{master.id}"),
+        InlineKeyboardButton(text="⭐ Отзывы", callback_data=f"mgr:reviews:{master.id}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="📞 Контакты", callback_data=f"mgr:contacts:{master.id}"),
+    ])
+
     # Subscription management
     rows.append([
         InlineKeyboardButton(
@@ -624,3 +637,241 @@ def admin_metrics_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: CRM & Master Business Features Keyboards
+# ---------------------------------------------------------------------------
+
+
+def crm_menu_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Main CRM dashboard menu with client segmentation."""
+    buttons = [
+        [InlineKeyboardButton(text="🔎 Найти клиента", callback_data=f"mgr:crm:search:{master_id}")],
+        [InlineKeyboardButton(text="👥 Все клиенты", callback_data=f"mgr:crm:seg:{master_id}:all:1")],
+        [InlineKeyboardButton(text="⭐ Постоянные (3+ визита)", callback_data=f"mgr:crm:seg:{master_id}:regular:1")],
+        [InlineKeyboardButton(text="🆕 Новые клиенты (до 30 дн.)", callback_data=f"mgr:crm:seg:{master_id}:new:1")],
+        [InlineKeyboardButton(text="⏰ Давно не были (30+ дней)", callback_data=f"mgr:crm:seg:{master_id}:inactive30:1")],
+        [InlineKeyboardButton(text="⏰ Давно не были (60+ дней)", callback_data=f"mgr:crm:seg:{master_id}:inactive60:1")],
+        [InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def crm_client_list_keyboard(
+    master_id: int,
+    segment: str,
+    page: int,
+    total_count: int,
+    clients: Sequence[dict],
+    page_size: int = 5,
+) -> InlineKeyboardMarkup:
+    """Paginated list of clients for a segment or search query."""
+    buttons = []
+    for c in clients:
+        name = c.get("full_name") or "Клиент"
+        phone = f" ({c['phone']})" if c.get("phone") else ""
+        visits = f" • {c.get('completed', 0)} виз."
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"👤 {name}{phone}{visits}",
+                callback_data=f"mgr:client:{master_id}:{c['user_id']}:{segment}:{page}",
+            )
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"mgr:crm:seg:{master_id}:{segment}:{page - 1}",
+            )
+        )
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    nav_row.append(
+        InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data="mgr:noop",
+        )
+    )
+    if page < total_pages:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="Вперёд ▶️",
+                callback_data=f"mgr:crm:seg:{master_id}:{segment}:{page + 1}",
+            )
+        )
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([
+        InlineKeyboardButton(text="🔍 Другой поиск / сегмент", callback_data=f"mgr:crm:{master_id}"),
+        InlineKeyboardButton(text="⬅️ К проекту", callback_data=f"mgr:master:{master_id}"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def crm_client_card_keyboard(
+    master_id: int, user_id: int, segment: str = "all", page: int = 1
+) -> InlineKeyboardMarkup:
+    """Action buttons for client profile in CRM."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 История записей",
+                    callback_data=f"mgr:client:hist:{master_id}:{user_id}:1:{segment}:{page}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Изменить заметку",
+                    callback_data=f"mgr:client:note:{master_id}:{user_id}:{segment}:{page}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ К списку клиентов",
+                    callback_data=f"mgr:crm:seg:{master_id}:{segment}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text="🏠 В меню CRM",
+                    callback_data=f"mgr:crm:{master_id}",
+                ),
+            ],
+        ]
+    )
+
+
+def crm_client_history_keyboard(
+    master_id: int, user_id: int, page: int, total_count: int, segment: str = "all", client_page: int = 1, page_size: int = 5
+) -> InlineKeyboardMarkup:
+    """Pagination for client's appointments history."""
+    buttons = []
+    nav_row = []
+    if page > 1:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"mgr:client:hist:{master_id}:{user_id}:{page - 1}:{segment}:{client_page}",
+            )
+        )
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    nav_row.append(
+        InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data="mgr:noop",
+        )
+    )
+    if page < total_pages:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="Вперёд ▶️",
+                callback_data=f"mgr:client:hist:{master_id}:{user_id}:{page + 1}:{segment}:{client_page}",
+            )
+        )
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад к карточке клиента",
+            callback_data=f"mgr:client:{master_id}:{user_id}:{segment}:{client_page}",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def stats_period_keyboard(master_id: int, current_period: str = "month") -> InlineKeyboardMarkup:
+    """Period selector for master business statistics."""
+    p = current_period.lower()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{'🔘' if p == 'today' else '⚪️'} Сегодня",
+                    callback_data=f"mgr:stats:{master_id}:today",
+                ),
+                InlineKeyboardButton(
+                    text=f"{'🔘' if p == 'week' else '⚪️'} Неделя",
+                    callback_data=f"mgr:stats:{master_id}:week",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{'🔘' if p == 'month' else '⚪️'} Месяц",
+                    callback_data=f"mgr:stats:{master_id}:month",
+                ),
+                InlineKeyboardButton(
+                    text=f"{'🔘' if p == 'all' else '⚪️'} За всё время",
+                    callback_data=f"mgr:stats:{master_id}:all",
+                ),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")],
+        ]
+    )
+
+
+def finances_period_keyboard(master_id: int, current_period: str = "month") -> InlineKeyboardMarkup:
+    """Period selector for master revenue and booking finances."""
+    p = current_period.lower()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{'🔘' if p == 'today' else '⚪️'} Сегодня",
+                    callback_data=f"mgr:finances:{master_id}:today",
+                ),
+                InlineKeyboardButton(
+                    text=f"{'🔘' if p == 'week' else '⚪️'} Неделя",
+                    callback_data=f"mgr:finances:{master_id}:week",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{'🔘' if p == 'month' else '⚪️'} Месяц",
+                    callback_data=f"mgr:finances:{master_id}:month",
+                ),
+                InlineKeyboardButton(
+                    text=f"{'🔘' if p == 'all' else '⚪️'} За всё время",
+                    callback_data=f"mgr:finances:{master_id}:all",
+                ),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")],
+        ]
+    )
+
+
+def reviews_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Actions on reviews screen."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить отзывы", callback_data=f"mgr:reviews:{master_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")],
+        ]
+    )
+
+
+def manager_contacts_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Manager Bot contacts configuration keyboard."""
+    from app.services.master_contacts import CONTACT_FIELD_LABELS
+
+    buttons = []
+    for field, label in CONTACT_FIELD_LABELS.items():
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{label} — изменить",
+                callback_data=f"mgr:contact:edit:{master_id}:{field}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def manager_contact_cancel_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Cancel contact editing."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:contacts:{master_id}")]
+        ]
+    )
