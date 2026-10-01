@@ -436,7 +436,11 @@ def create_app(
 
         # 6. Feed update to dedicated Manager Dispatcher
         try:
-            await manager_dp.feed_update(manager_bot, update)
+            await manager_dp.feed_update(
+                manager_bot,
+                update,
+                registry=getattr(app.state, "registry", None),
+            )
             await deduplicator.mark_manager_completed(update.update_id)
             return {"ok": True}
         except Exception as e:

@@ -19,12 +19,14 @@ from app.database.models.user import User
 from app.manager_bot.keyboards import (
     cancel_keyboard,
     confirm_connect_keyboard,
+    confirm_disable_bot_keyboard,
     main_menu_keyboard,
     project_card_keyboard,
     project_list_keyboard,
     subscription_card_keyboard,
     subscription_payment_keyboard,
 )
+from app.services.bot_registry import BotRegistry
 from app.services.subscription_service import SubscriptionService
 from app.manager_bot.states import ConnectBotStates, CreateMasterStates, RotateTokenStates
 from app.repositories.bot_instance_repository import BotInstanceRepository
@@ -170,14 +172,13 @@ async def msg_new_master_name(message: Message, state: FSMContext, session: Asyn
         return
 
     user = await _get_or_create_user(session, message.from_user)
-    trial_ends = datetime.now(timezone.utc) + timedelta(days=settings.trial_duration_days)
 
     master = Master(
         owner_user_id=user.id,
         display_name=name,
         status=MasterStatus.SETUP_REQUIRED,
-        subscription_status=SubscriptionStatus.TRIAL,
-        trial_ends_at=trial_ends,
+        subscription_status=SubscriptionStatus.EXPIRED,
+        trial_ends_at=None,
         timezone="Europe/Moscow",
     )
     session.add(master)
@@ -188,6 +189,14 @@ async def msg_new_master_name(message: Message, state: FSMContext, session: Asyn
     session.add(master_settings)
     await session.flush()
 
+    # Atomically evaluate trial eligibility per user account
+    sub_service = SubscriptionService(session)
+    trial_granted = await sub_service.claim_user_trial_or_reject(
+        user_id=user.id,
+        master=master,
+        trial_days=settings.trial_duration_days,
+    )
+
     audit = AuditService(session)
     await audit.log_event(
         action=AuditEvent.MASTER_CREATED,
@@ -195,14 +204,26 @@ async def msg_new_master_name(message: Message, state: FSMContext, session: Asyn
         master_id=master.id,
         entity_type="Master",
         entity_id=master.id,
-        payload_after={"display_name": name, "trial_ends_at": trial_ends.isoformat()},
+        payload_after={
+            "display_name": name,
+            "subscription_status": master.subscription_status.value,
+            "trial_ends_at": master.trial_ends_at.isoformat() if master.trial_ends_at else None,
+        },
     )
     await session.commit()
     await state.clear()
 
+    if trial_granted and master.trial_ends_at:
+        trial_text = f"Пробный период действует до: <b>{master.trial_ends_at.strftime('%d.%m.%Y')}</b>.\n\n"
+    else:
+        trial_text = (
+            "⚠️ <i>Пробный период для вашего аккаунта уже был использован ранее.</i>\n"
+            "Для запуска приёма клиентов оформите подписку в разделе «Подписка».\n\n"
+        )
+
     text = (
         f"✅ <b>Проект «{name}» успешно создан!</b>\n\n"
-        f"Пробный период действует до: <b>{trial_ends.strftime('%d.%m.%Y')}</b>.\n\n"
+        f"{trial_text}"
         "Следующий шаг — подключите Telegram-бота для приёма записей клиентов."
     )
     bot_repo = BotInstanceRepository(session)
@@ -619,7 +640,7 @@ async def cb_retry_provisioning(callback: CallbackQuery, session: AsyncSession) 
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:disable:"))
 async def cb_disable_bot(callback: CallbackQuery, session: AsyncSession) -> None:
-    """Disable customer bot."""
+    """Show confirmation dialog before disconnecting/disabling a bot."""
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
 
@@ -635,20 +656,66 @@ async def cb_disable_bot(callback: CallbackQuery, session: AsyncSession) -> None
         await callback.answer("Бот не найден.", show_alert=True)
         return
 
-    service = BotProvisioningService(session=session)
+    bot_name = f"@{bot.telegram_username}" if bot.telegram_username else (bot.telegram_first_name or f"ID {bot.telegram_bot_id}")
+    text = (
+        f"⚠️ <b>Вы действительно хотите отключить бота {bot_name}?</b>\n\n"
+        "• Вебхук в Telegram будет удалён.\n"
+        "• Бот перестанет принимать сообщения и записи клиентов.\n"
+        "• Все данные проекта (клиенты, записи, история, подписка) <b>сохраняются в полной безопасности</b>.\n"
+        "• Вы сможете включить бота обратно в любое время."
+    )
+    await callback.message.edit_text(text, reply_markup=confirm_disable_bot_keyboard(master_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:bot:confirm_disable:"))
+async def cb_confirm_disable_bot(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    registry: Optional[BotRegistry] = None,
+) -> None:
+    """Commit bot disabling after explicit user confirmation."""
+    master_id = int(callback.data.split(":")[3])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    bot_repo = BotInstanceRepository(session)
+    bot = await bot_repo.get_current_for_master(master_id)
+    if not bot:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+
+    service = BotProvisioningService(session=session, registry=registry)
     try:
         await service.disable_bot(bot.id, user.id)
+        updated_master = await master_repo.get_by_id(master_id)
+        updated_bot = await bot_repo.get_current_for_master(master_id)
+        text = (
+            "⏸ <b>Бот успешно отключён!</b>\n\n"
+            "Вебхук Telegram отозван, кэш очищен. Все данные вашего проекта сохранены.\n"
+            "Вы можете включить бота обратно в любое удобное время."
+        )
         await callback.message.edit_text(
-            "⏸ <b>Бот успешно отключён.</b> Приём новых записей и вебхуки приостановлены.",
-            reply_markup=main_menu_keyboard(),
+            text,
+            reply_markup=project_card_keyboard(updated_master or master, updated_bot),
         )
     except Exception as exc:
-        await callback.answer(f"Ошибка: {exc}", show_alert=True)
+        logger.error("Failed to disable bot %s for master %s: %s", bot.id, master_id, exc)
+        await callback.answer(f"Ошибка при отключении: {exc}", show_alert=True)
     await callback.answer()
 
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:enable:"))
-async def cb_enable_bot(callback: CallbackQuery, session: AsyncSession) -> None:
+async def cb_enable_bot(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    registry: Optional[BotRegistry] = None,
+) -> None:
     """Re-enable a disabled bot."""
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
@@ -665,17 +732,21 @@ async def cb_enable_bot(callback: CallbackQuery, session: AsyncSession) -> None:
         await callback.answer("Бот не найден.", show_alert=True)
         return
 
-    service = BotProvisioningService(session=session)
+    service = BotProvisioningService(session=session, registry=registry)
     try:
         await service.enable_bot(bot.id, user.id)
+        updated_master = await master_repo.get_by_id(master_id)
+        updated_bot = await bot_repo.get_current_for_master(master_id)
+        readiness_service = MasterReadinessService(session)
+        is_ready, _ = await readiness_service.check(master_id)
         await callback.message.edit_text(
             "▶️ <b>Бот успешно включён!</b> Вебхук восстановлен.",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=project_card_keyboard(updated_master or master, updated_bot, is_ready),
         )
     except Exception as exc:
         await callback.message.edit_text(
-            f"❌ <b>Не удалось включить бота:</b> {str(exc)[:200]}",
-            reply_markup=main_menu_keyboard(),
+            f"❌ <b>Не удалось включить бота:</b>\n{str(exc)[:200]}",
+            reply_markup=project_card_keyboard(master, bot),
         )
     await callback.answer()
 

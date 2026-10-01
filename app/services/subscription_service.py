@@ -21,6 +21,8 @@ from app.database.models.subscription import (
     SubscriptionPeriod,
     SubscriptionPlan,
 )
+from app.database.models.user import User
+from app.services.audit_service import AuditEvent
 from app.services.billing.interface import BillingProvider, PaymentIntent
 from app.services.billing.manual_provider import ManualBillingProvider
 from app.services.exceptions import (
@@ -517,3 +519,92 @@ class SubscriptionService:
             logger.info("Refreshed %d expired subscriptions to EXPIRED", count)
 
         return count
+
+    async def claim_user_trial_or_reject(
+        self,
+        user_id: int,
+        master: Master,
+        trial_days: int = 14,
+        now_utc: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Atomically evaluate and claim a 14-day trial for a user's master project.
+        Uses SELECT ... FOR UPDATE on the users table to prevent concurrent race conditions.
+
+        If user.trial_claimed_at IS NOT NULL:
+            Master is assigned SubscriptionStatus.EXPIRED (no second trial allowed).
+            Logs TRIAL_REJECTED_ALREADY_USED audit event.
+            Returns False.
+
+        If user.trial_claimed_at IS NULL:
+            user.trial_claimed_at = now_utc
+            user.trial_ends_at = now_utc + trial_days
+            master.subscription_status = SubscriptionStatus.TRIAL
+            master.trial_ends_at = user.trial_ends_at
+            Logs TRIAL_CLAIMED audit event.
+            Returns True.
+        """
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+        # 1. Lock user row for update to eliminate race conditions
+        stmt = select(User).where(User.id == user_id).with_for_update()
+        res = await self.session.execute(stmt)
+        user = res.scalar_one_or_none()
+        if not user:
+            raise SubscriptionError(f"User #{user_id} not found")
+
+        # 2. Check if trial was already claimed
+        if user.trial_claimed_at is not None:
+            master.subscription_status = SubscriptionStatus.EXPIRED
+            master.trial_ends_at = None
+            await self.session.flush()
+
+            audit = AuditLog(
+                master_id=master.id,
+                action=AuditEvent.TRIAL_REJECTED_ALREADY_USED,
+                actor_user_id=user_id,
+                entity_type="Master",
+                entity_id=master.id,
+                payload_after={
+                    "user_id": user_id,
+                    "trial_claimed_at": user.trial_claimed_at.isoformat(),
+                    "reason": "Trial already claimed on user account",
+                    "status": SubscriptionStatus.EXPIRED.value,
+                },
+            )
+            self.session.add(audit)
+            await self.session.flush()
+            logger.info("Trial rejected for User #%s (already claimed at %s)", user_id, user.trial_claimed_at)
+            return False
+
+        # 3. Grant trial once
+        trial_ends = now_utc + timedelta(days=trial_days)
+        user.trial_claimed_at = now_utc
+        user.trial_ends_at = trial_ends
+
+        master.subscription_status = SubscriptionStatus.TRIAL
+        master.trial_ends_at = trial_ends
+        await self.session.flush()
+
+        audit = AuditLog(
+            master_id=master.id,
+            action=AuditEvent.TRIAL_CLAIMED,
+            actor_user_id=user_id,
+            entity_type="Master",
+            entity_id=master.id,
+            payload_after={
+                "user_id": user_id,
+                "trial_claimed_at": now_utc.isoformat(),
+                "trial_ends_at": trial_ends.isoformat(),
+                "trial_days": trial_days,
+                "status": SubscriptionStatus.TRIAL.value,
+            },
+        )
+        self.session.add(audit)
+        await self.session.flush()
+        logger.info("Trial claimed for User #%s (ends at %s)", user_id, trial_ends)
+        return True
+

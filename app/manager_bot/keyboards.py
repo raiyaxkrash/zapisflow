@@ -203,3 +203,24 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+
+def confirm_disable_bot_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Confirmation buttons before disconnecting/disabling a bot."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔴 Да, отключить бота",
+                    callback_data=f"mgr:bot:confirm_disable:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Отмена",
+                    callback_data=f"mgr:master:{master_id}",
+                )
+            ],
+        ]
+    )
+
+

@@ -338,6 +338,19 @@ class BotRegistry:
                     e,
                 )
 
+    async def invalidate_bot(
+        self,
+        bot_instance_id: int,
+        token_version: Optional[int] = None,
+        reason: str = "manual",
+    ) -> None:
+        """Alias for publish_invalidation to ensure local eviction, session closing, and Redis Pub/Sub broadcast."""
+        await self.publish_invalidation(
+            bot_instance_id=bot_instance_id,
+            token_version=token_version,
+            reason=reason,
+        )
+
     async def start_invalidation_listener(self) -> None:
         """Start background task listening to Redis Pub/Sub invalidation events."""
         if self._redis_client is None:

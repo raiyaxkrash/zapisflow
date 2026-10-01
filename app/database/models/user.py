@@ -43,6 +43,14 @@ class User(Base):
     admin_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # SaaS trial lifecycle tracking per user account
+    trial_claimed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    trial_ends_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+
     # Relationships
     admin_profile: Mapped[Optional["Admin"]] = relationship(
         "Admin", back_populates="user", uselist=False, cascade="all, delete-orphan"
