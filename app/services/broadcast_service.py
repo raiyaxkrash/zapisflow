@@ -341,7 +341,19 @@ class BroadcastService:
                         mc.is_bot_blocked = True
                 await self.session.commit()
 
-        # Final recount and completion check
+        # Serialize final recounts across replicas. Without this row lock, one
+        # worker can count 99 SENT recipients, another can commit the 100th,
+        # and the first worker can overwrite the newer success_count with 99.
+        locked = await self.session.execute(
+            select(Broadcast)
+            .where(Broadcast.id == broadcast_id, Broadcast.master_id == master_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        refreshed = locked.scalar_one()
+
+        # Count after acquiring the lock so the last finishing worker always
+        # records the complete committed recipient state.
         res_sent = await self.session.execute(
             select(func.count(BroadcastRecipient.id)).where(
                 BroadcastRecipient.broadcast_id == broadcast_id,
@@ -369,14 +381,12 @@ class BroadcastService:
         )
         pending_count = res_pending.scalar() or 0
 
-        refreshed = await self.session.get(Broadcast, broadcast_id)
-        if refreshed:
-            refreshed.success_count = success_count
-            refreshed.fail_count = fail_count
-            if pending_count == 0:
-                refreshed.status = BroadcastStatus.COMPLETED
-                refreshed.finished_at = datetime.now(timezone.utc)
-            broadcast = refreshed
+        refreshed.success_count = success_count
+        refreshed.fail_count = fail_count
+        if pending_count == 0:
+            refreshed.status = BroadcastStatus.COMPLETED
+            refreshed.finished_at = datetime.now(timezone.utc)
+        broadcast = refreshed
         await self.session.commit()
 
         logger.info(
