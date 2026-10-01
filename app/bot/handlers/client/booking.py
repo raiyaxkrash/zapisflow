@@ -6,6 +6,7 @@ from html import escape
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
+import logging
 import pytz
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -53,6 +54,7 @@ from app.utils.formatters import (
 )
 
 router = Router(name="client_booking")
+logger = logging.getLogger("app.bot.handlers.client.booking")
 
 
 @router.callback_query(MenuCallback.filter(F.action == "book"))
@@ -70,6 +72,11 @@ async def cb_start_booking(
     If single active specialist -> skip staff selection and go directly to services list.
     """
     if bot_instance and bot_instance.status == BotInstanceStatus.SETUP_REQUIRED and not is_admin:
+        logger.info(
+            "Client booking start blocked during bot setup: bot_instance_id=%s master_id=%s",
+            bot_instance.id,
+            bot_instance.master_id,
+        )
         await callback.answer(
             "💅 Онлайн-запись к мастеру пока настраивается. Пожалуйста, загляните позже!",
             show_alert=True,
@@ -77,11 +84,31 @@ async def cb_start_booking(
         return
 
     if master_id is None:
-        return None  # Missing trusted tenant context.
+        # Fail closed, but never leave Telegram's callback spinner waiting forever.
+        logger.error(
+            "Client booking start rejected: trusted tenant context missing; bot_instance_id=%s",
+            bot_instance.id if bot_instance else None,
+        )
+        await callback.answer(
+            "Не удалось определить проект. Пожалуйста, откройте бота заново.",
+            show_alert=True,
+        )
+        return
+
+    logger.info(
+        "Client booking start received: bot_instance_id=%s master_id=%s",
+        bot_instance.id if bot_instance else None,
+        master_id,
+    )
 
     if not is_admin:
         policy = SubscriptionAccessPolicy(session)
         if not await policy.can_accept_new_booking(master_id):
+            logger.info(
+                "Client booking start blocked by subscription: bot_instance_id=%s master_id=%s",
+                bot_instance.id if bot_instance else None,
+                master_id,
+            )
             settings_repo = MasterSettingsRepository(session)
             master_settings = await settings_repo.get_by_master_id(master_id)
             contacts_list = []
@@ -101,6 +128,7 @@ async def cb_start_booking(
     active_staff = await staff_repo.list_active(master_id=master_id)
 
     if not active_staff:
+        logger.info("Client booking start has no active staff: master_id=%s", master_id)
         text = "К сожалению, в данный момент запись временно недоступна. Пожалуйста, свяжитесь с нами напрямую 🌸"
         if callback.message:
             await callback.message.edit_text(text=text)
@@ -109,6 +137,11 @@ async def cb_start_booking(
 
     # If studio has more than 1 specialist: show specialist choice step
     if len(active_staff) > 1:
+        logger.info(
+            "Client booking start routed to staff selection: master_id=%s staff_count=%s",
+            master_id,
+            len(active_staff),
+        )
         text = "<b>📅 Онлайн-запись</b>\n\nВыберите специалиста:"
         await state.set_state(ClientBookingSG.choosing_staff)
         if callback.message:
@@ -129,6 +162,7 @@ async def cb_start_booking(
     services = [s for s in all_services if s.id in staff_svc_ids] or all_services
 
     if not services:
+        logger.info("Client booking start has no active services: master_id=%s", master_id)
         text = "К сожалению, в данный момент онлайн-запись временно недоступна. Пожалуйста, свяжитесь с мастером напрямую 🌸"
         if callback.message:
             await callback.message.edit_text(text=text)
@@ -136,6 +170,11 @@ async def cb_start_booking(
         return
 
     text = "<b>📅 Онлайн-запись</b>\n\nВыберите услугу, на которую хотите записаться:"
+    logger.info(
+        "Client booking start routed to service selection: master_id=%s service_count=%s",
+        master_id,
+        len(services),
+    )
     await state.set_state(ClientBookingSG.choosing_service)
 
     if callback.message:
