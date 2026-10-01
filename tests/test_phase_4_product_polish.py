@@ -374,6 +374,9 @@ async def test_today_dashboard_aggregation(
     pg_session: AsyncSession, master_with_owner
 ):
     master, owner = master_with_owner
+    # Keep this date-bucket test independent of the host timezone and local
+    # midnight; its relative UTC fixtures are intentionally on the same day.
+    master.timezone = "UTC"
     now_utc = datetime.now(timezone.utc)
 
     srv = await ServiceRepository(pg_session).create_service(

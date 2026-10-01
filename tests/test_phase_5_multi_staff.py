@@ -41,7 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.handlers.client.booking import cb_staff_selected, cb_start_booking
-from app.bot.keyboards.client.callbacks import StaffChoiceCallback
+from app.bot.keyboards.client.callbacks import ServiceCallback, StaffChoiceCallback
 from app.bot.states.client import ClientBookingSG
 from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.master import (
@@ -748,6 +748,14 @@ async def test_14_single_staff_skips_selection_keyboard(pg_session: AsyncSession
     )
     # With 1 staff, state transitions directly to choosing service, bypassing choosing_staff
     state.set_state.assert_called_with(ClientBookingSG.choosing_service)
+    callback.message.edit_text.assert_awaited_once()
+    edit_kwargs = callback.message.edit_text.await_args.kwargs
+    assert "Выберите услугу" in edit_kwargs["text"]
+    selected_service = ServiceCallback.unpack(
+        edit_kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+    )
+    assert selected_service.action == "select"
+    callback.answer.assert_awaited_once()
 
 
 @requires_postgres
