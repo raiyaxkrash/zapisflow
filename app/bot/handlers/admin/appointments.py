@@ -33,7 +33,6 @@ from app.services.booking_service import BookingService
 from app.services.exceptions import BookingNotFoundError, InvalidBookingStatusError, SlotAlreadyBookedError
 from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.slot_engine import SlotEngine
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
 
 router = Router(name="admin_appointments")
@@ -112,13 +111,12 @@ async def cb_appointments_menu(callback: CallbackQuery, state: FSMContext) -> No
 async def cb_appointments_list(
     callback: CallbackQuery,
     callback_data: AdminAppointmentCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Show filtered list of appointments.
     """
     filter_type = callback_data.filter_type or "today"
-    master_id = await LegacyTenantResolver.get_master_id(session)
     app_repo = AppointmentRepository(session)
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
@@ -210,12 +208,11 @@ async def cb_appointments_list(
 async def cb_appointment_detail(
     callback: CallbackQuery,
     callback_data: AdminAppointmentCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Show full appointment details card with management actions.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     app_repo = AppointmentRepository(session)
     appointment = await app_repo.get_by_id_with_relations(callback_data.appointment_id, master_id=master_id)
 
@@ -240,12 +237,11 @@ async def cb_appointment_detail(
 async def cb_appointment_complete(
     callback: CallbackQuery,
     callback_data: AdminAppointmentCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Mark appointment as completed.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
     try:
         appointment = await booking_service.complete_booking(
@@ -273,12 +269,11 @@ async def cb_appointment_complete(
 async def cb_appointment_no_show(
     callback: CallbackQuery,
     callback_data: AdminAppointmentCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Mark appointment as NO-SHOW.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
     try:
         appointment = await booking_service.mark_no_show(
@@ -309,12 +304,11 @@ async def cb_appointment_cancel(
     callback: CallbackQuery,
     callback_data: AdminAppointmentCallback,
     bot: Bot,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Cancel appointment by admin and notify client.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
     try:
         appointment = await booking_service.cancel_booking_by_admin(
@@ -366,12 +360,11 @@ async def cb_appointment_reschedule_start(
     callback: CallbackQuery,
     callback_data: AdminAppointmentCallback,
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Start rescheduling appointment: pick target date.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     app_repo = AppointmentRepository(session)
     appointment = await app_repo.get_by_id(callback_data.appointment_id, master_id=master_id)
     if not appointment:
@@ -408,11 +401,10 @@ async def cb_appointment_reschedule_start(
     AdminCalendarCallback.filter(F.action == "month"),
 )
 async def cb_reschedule_month_nav(
-    callback: CallbackQuery, session: AsyncSession
+    callback: CallbackQuery, session: AsyncSession, master_id: int
 ) -> None:
     """Page the admin calendar while keeping the reschedule wizard active."""
     selected = AdminCalendarCallback.unpack(callback.data)
-    master_id = await LegacyTenantResolver.get_master_id(session)
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     today = datetime.now(pytz.timezone(tz_str)).date()
@@ -427,7 +419,7 @@ async def cb_reschedule_month_nav(
     AdminCalendarCallback.filter(F.action == "day"),
 )
 async def cb_reschedule_pick_date(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Date chosen for reschedule: compute available slots and show time grid.
@@ -438,7 +430,6 @@ async def cb_reschedule_pick_date(
     data = await state.get_data()
     service_id = data["service_id"]
     appointment_id = data["appointment_id"]
-    master_id = await LegacyTenantResolver.get_master_id(session)
     appointment = await AppointmentRepository(session).get_by_id(appointment_id, master_id=master_id)
     if appointment is None:
         await callback.answer("Запись не найдена", show_alert=True)
@@ -511,7 +502,7 @@ async def cb_reschedule_confirm_slot(
     callback: CallbackQuery,
     state: FSMContext,
     bot: Bot,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
     db_user: User,
 ) -> None:
     """
@@ -522,7 +513,6 @@ async def cb_reschedule_confirm_slot(
 
     data = await state.get_data()
     appointment_id = data["appointment_id"]
-    master_id = await LegacyTenantResolver.get_master_id(session)
     auth_service = MasterAuthorizationService(session)
     if not await auth_service.is_admin(master_id, db_user.id):
         await callback.answer("Доступ запрещен", show_alert=True)
@@ -615,7 +605,7 @@ async def cb_appointment_add_note(
 
 @router.message(AdminAppointmentNoteSG.entering_note, F.text)
 async def msg_appointment_save_note(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Save internal master note and show updated appointment card.
@@ -625,7 +615,6 @@ async def msg_appointment_save_note(
     filter_type = data.get("filter_type", "today")
     await state.clear()
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     app_repo = AppointmentRepository(session)
     appointment = await app_repo.get_by_id_with_relations(appointment_id, master_id=master_id)
     if appointment:

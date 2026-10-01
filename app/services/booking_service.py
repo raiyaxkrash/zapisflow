@@ -4,12 +4,14 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Tuple
 import pytz
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
 from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.audit import AuditLog
+from app.database.models.master import Master
 from app.database.models.payment import Payment, PaymentStatus
 from app.database.models.service import DepositType
 from app.repositories.appointment_repository import AppointmentRepository
@@ -72,10 +74,20 @@ class BookingService:
         admin_notes: Optional[str] = None,
     ) -> Tuple[Appointment, Payment]:
         """Atomically reserve a slot, create immutable snapshot and pending deposit payment for a master."""
-        # 0. Subscription gating: prevent new customer booking holds on EXPIRED or SUSPENDED masters
-        if not is_manual:
-            if not await self.access_policy.can_create_hold(master_id):
+        # Serialize booking creation with suspend/renewal/expiration updates.
+        # A previously read ACTIVE state must not outlive an admin suspension.
+        if isinstance(self.session, AsyncSession):
+            locked = await self.session.scalar(
+                select(Master)
+                .where(Master.id == master_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if locked is None:
                 raise SubscriptionExpiredError(NEUTRAL_CLIENT_EXPIRED_MESSAGE)
+        # Every new appointment, including admin/manual creation, requires an active entitlement.
+        if not await self.access_policy.can_create_hold(master_id):
+            raise SubscriptionExpiredError(NEUTRAL_CLIENT_EXPIRED_MESSAGE)
 
         # 1. Validate user exists
         user = await self.user_repo.get_by_id(user_id)
@@ -127,6 +139,11 @@ class BookingService:
 
         # Initial status
         initial_status = AppointmentStatus.CONFIRMED if is_manual else AppointmentStatus.WAITING_PAYMENT
+
+        # Trial/paid_until can elapse while slot queries run. Administrative
+        # status changes remain serialized by the Master row lock above.
+        if not await self.access_policy.can_create_hold(master_id):
+            raise SubscriptionExpiredError(NEUTRAL_CLIENT_EXPIRED_MESSAGE)
 
         # 7. Create appointment with immutable snapshot
         appointment = Appointment(

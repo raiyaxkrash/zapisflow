@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.bot_instance import create_dispatcher
 from app.config.settings import settings
-from app.core.security import SensitiveDataFilter
+from app.core.security import install_sensitive_logging
 from app.database.models.master import BotInstanceStatus
 from app.database.session import async_session_factory, close_db, engine, init_db
 from app.manager_bot.dispatcher import create_manager_dispatcher
@@ -37,7 +37,11 @@ from app.services.exceptions import (
     BotRegistryError,
     BotUnavailableError,
 )
-from app.services.update_dedup import UpdateDeduplicator
+from app.services.update_dedup import (
+    DedupState,
+    DedupUnavailableError,
+    UpdateDeduplicator,
+)
 
 logger = logging.getLogger("app.web.app")
 
@@ -71,6 +75,7 @@ async def read_limited_request_body(request: Request, max_bytes: int) -> bytes:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manages application lifecycle: DB initialization, Redis, BotRegistry and Dispatcher."""
+    install_sensitive_logging()
     logger.info("Starting Multi-Bot Webhook Ingestion Engine...")
 
     # Strict production configuration check (fail fast on invalid config)
@@ -100,12 +105,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize BotRegistry if not explicitly injected
     if not hasattr(app.state, "registry") or app.state.registry is None:
         registry = BotRegistry(
-            session_factory=app.state.session_factory,
             redis_client=app.state.redis_client,
-            cache_max_size=settings.bot_registry_cache_max_size,
-            cache_ttl_seconds=settings.bot_registry_cache_ttl_seconds,
+            max_size=settings.bot_registry_cache_max_size,
+            ttl_seconds=settings.bot_registry_cache_ttl_seconds,
         )
         app.state.registry = registry
+    await app.state.registry.start_invalidation_listener()
 
     # Initialize UpdateDeduplicator if not explicitly injected
     if not hasattr(app.state, "deduplicator") or app.state.deduplicator is None:
@@ -156,13 +161,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as e:
             logger.warning("Error closing manager bot session: %s", e)
 
-    if hasattr(app.state, "registry") and app.state.registry is None:
-        pass
-    elif hasattr(app.state, "registry") and app.state.registry:
-        await app.state.registry.close_all()
+    if hasattr(app.state, "registry") and app.state.registry:
+        await app.state.registry.close()
 
     if hasattr(app.state, "redis_client") and app.state.redis_client:
-        await app.state.redis_client.close()
+        await app.state.redis_client.aclose()
 
     await close_db()
 
@@ -236,7 +239,8 @@ def create_app(
                 await asyncio.wait_for(rc.ping(), timeout=2.0)
                 redis_status = "ok"
             else:
-                redis_status = "disabled_or_fallback"
+                redis_status = "error"
+                is_ready = False
         except Exception as e:
             logger.error("Health ready Redis check failed: %s", e)
             redis_status = "error"
@@ -297,7 +301,7 @@ def create_app(
             )
 
         # 5. Check if BotInstance is in an inactive/forbidden status
-        if bot_instance.status in (
+        if not bot_instance.is_current or bot_instance.status in (
             BotInstanceStatus.DISABLED,
             BotInstanceStatus.ERROR,
             BotInstanceStatus.PROVISIONING,
@@ -309,7 +313,11 @@ def create_app(
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Bot instance is {bot_instance.status.value}",
+                detail=(
+                    f"Bot instance is {bot_instance.status.value}"
+                    if bot_instance.status != BotInstanceStatus.ACTIVE
+                    else "Bot instance unavailable"
+                ),
             )
 
         # 6. Parse and validate Telegram Update payload
@@ -329,44 +337,48 @@ def create_app(
 
         # 7. Deduplication check in Redis
         deduplicator: UpdateDeduplicator = app.state.deduplicator
-        can_process = await deduplicator.should_process(bot_instance.id, update.update_id)
-        if not can_process:
-            logger.info(
-                "Update %s for bot #%s is duplicate/processing, skipping",
-                update.update_id,
-                bot_instance.id,
-            )
-            return {"ok": True, "status": "duplicate"}
-
-        # 8. Retrieve aiogram.Bot from BotRegistry
-        registry: BotRegistry = app.state.registry
         try:
-            bot = await registry.get_bot(bot_instance.id)
+            acquired = await deduplicator.acquire(bot_instance.id, update.update_id)
+        except DedupUnavailableError:
+            raise HTTPException(status_code=503, detail="Update deduplication unavailable")
+        if acquired.state == DedupState.COMPLETED:
+            return {"ok": True, "status": "duplicate"}
+        if acquired.state == DedupState.PROCESSING:
+            # Telegram must retry if the first replica crashes mid-handler.
+            raise HTTPException(status_code=503, detail="Update is still processing")
+        claim = acquired.claim
+        assert claim is not None
+
+        try:
+            # 8. Retrieve aiogram.Bot from BotRegistry
+            registry: BotRegistry = app.state.registry
+            async with session_maker() as session:
+                bot = await registry.get_by_instance_id(
+                    bot_instance.id,
+                    session=session,
+                    expected_token_version=bot_instance.token_version,
+                )
+            # 9. Feed update with a lease that renews for long-running handlers.
+            dp: Dispatcher = app.state.dp
+            async with deduplicator.maintain(claim):
+                await dp.feed_update(
+                    bot,
+                    update,
+                    bot_instance=bot_instance,
+                    master_id=bot_instance.master_id,
+                    webhook_update_scope=f"tenant:{bot_instance.id}",
+                )
+            await deduplicator.complete(claim)
+            return {"ok": True}
         except (BotDisabledError, BotUnavailableError, BotProvisioningError) as e:
-            await deduplicator.release_lock(bot_instance.id, update.update_id)
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
         except BotNotFoundError:
-            await deduplicator.release_lock(bot_instance.id, update.update_id)
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bot not found")
         except BotRegistryError as e:
-            await deduplicator.release_lock(bot_instance.id, update.update_id)
             logger.error("Registry error for bot #%s: %s", bot_instance.id, e)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Bot registry error",
-            )
-
-        # 9. Feed update to shared Dispatcher with strict tenant context
-        dp: Dispatcher = app.state.dp
-        try:
-            await dp.feed_update(
-                bot,
-                update,
-                bot_instance=bot_instance,
-                master_id=bot_instance.master_id,
-            )
-            await deduplicator.mark_completed(bot_instance.id, update.update_id)
-            return {"ok": True}
+            raise HTTPException(status_code=500, detail="Bot registry error")
+        except DedupUnavailableError:
+            raise HTTPException(status_code=503, detail="Update deduplication unavailable")
         except Exception as e:
             logger.exception(
                 "Error processing update %s for bot #%s: %s",
@@ -374,11 +386,15 @@ def create_app(
                 bot_instance.id,
                 e,
             )
-            await deduplicator.release_lock(bot_instance.id, update.update_id)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Internal processing error",
             )
+        finally:
+            try:
+                await deduplicator.release(claim)
+            except DedupUnavailableError:
+                logger.warning("Could not release deduplication claim for update %s", update.update_id)
 
     @app.post("/telegram/manager-webhook", tags=["manager-webhook"])
     async def telegram_manager_webhook(
@@ -429,26 +445,40 @@ def create_app(
 
         # 5. Deduplication check in Redis
         deduplicator: UpdateDeduplicator = app.state.deduplicator
-        can_process = await deduplicator.should_process_manager(update.update_id)
-        if not can_process:
-            logger.info("Manager update %s is duplicate/processing, skipping", update.update_id)
+        try:
+            acquired = await deduplicator.acquire_manager(update.update_id)
+        except DedupUnavailableError:
+            raise HTTPException(status_code=503, detail="Update deduplication unavailable")
+        if acquired.state == DedupState.COMPLETED:
             return {"ok": True, "status": "duplicate"}
+        if acquired.state == DedupState.PROCESSING:
+            raise HTTPException(status_code=503, detail="Update is still processing")
+        claim = acquired.claim
+        assert claim is not None
 
         # 6. Feed update to dedicated Manager Dispatcher
         try:
-            await manager_dp.feed_update(
-                manager_bot,
-                update,
-                registry=getattr(app.state, "registry", None),
-            )
-            await deduplicator.mark_manager_completed(update.update_id)
+            async with deduplicator.maintain(claim):
+                await manager_dp.feed_update(
+                    manager_bot,
+                    update,
+                    registry=getattr(app.state, "registry", None),
+                    webhook_update_scope="manager",
+                )
+            await deduplicator.complete(claim)
             return {"ok": True}
+        except DedupUnavailableError:
+            raise HTTPException(status_code=503, detail="Update deduplication unavailable")
         except Exception as e:
             logger.exception("Error processing manager update %s: %s", update.update_id, e)
-            await deduplicator.release_manager_lock(update.update_id)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Internal processing error",
             )
+        finally:
+            try:
+                await deduplicator.release(claim)
+            except DedupUnavailableError:
+                logger.warning("Could not release manager deduplication claim for update %s", update.update_id)
 
     return app

@@ -82,6 +82,7 @@ class SubscriptionPeriod(Base):
     __table_args__ = (
         Index("idx_sub_periods_master_starts", "master_id", "starts_at"),
         Index("idx_sub_periods_master_ends", "master_id", "ends_at"),
+        UniqueConstraint("subscription_payment_id", name="uq_subscription_period_payment"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -98,6 +99,9 @@ class SubscriptionPeriod(Base):
     amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="RUB", nullable=False)
     external_payment_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    subscription_payment_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("subscription_payments.id", ondelete="RESTRICT"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

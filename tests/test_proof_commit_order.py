@@ -10,6 +10,8 @@ import pytest
 from app.bot.handlers.client import payment as payment_handler
 from app.database.models.payment import MediaType
 
+TRUSTED_MASTER_ID = 42
+
 
 def _context(monkeypatch, *, media_type=MediaType.PHOTO):
     events = []
@@ -30,11 +32,6 @@ def _context(monkeypatch, *, media_type=MediaType.PHOTO):
         payment_handler,
         "PaymentService",
         lambda session: SimpleNamespace(submit_payment_proof=submit),
-    )
-    monkeypatch.setattr(
-        payment_handler,
-        "LegacyTenantResolver",
-        SimpleNamespace(get_master_id=AsyncMock(return_value=1)),
     )
     monkeypatch.setattr(
         payment_handler,
@@ -100,7 +97,7 @@ async def test_receipt_commits_before_client_and_admin_notifications(
         monkeypatch, media_type=media_type
     )
 
-    await payment_handler.msg_receive_proof(message, state, user, bot, session)
+    await payment_handler.msg_receive_proof(message, state, user, bot, session, master_id=TRUSTED_MASTER_ID)
 
     assert events == ["submit", "commit", "clear_state", "client_answer", send_event]
     assert session.commit.await_count == 1
@@ -113,7 +110,7 @@ async def test_failed_commit_sends_no_success_or_admin_notification(monkeypatch)
     session.commit.side_effect = RuntimeError("database commit failed")
 
     with pytest.raises(RuntimeError, match="database commit failed"):
-        await payment_handler.msg_receive_proof(message, state, user, bot, session)
+        await payment_handler.msg_receive_proof(message, state, user, bot, session, master_id=TRUSTED_MASTER_ID)
 
     assert events == ["submit"]
     state.clear.assert_not_awaited()
@@ -133,7 +130,7 @@ async def test_telegram_failure_after_commit_does_not_prevent_admin_notification
 
     message.answer.side_effect = failed_client_answer
 
-    await payment_handler.msg_receive_proof(message, state, user, bot, session)
+    await payment_handler.msg_receive_proof(message, state, user, bot, session, master_id=TRUSTED_MASTER_ID)
 
     assert events == ["submit", "commit", "clear_state", "client_answer", "admin_photo"]
     assert session.commit.await_count == 1
@@ -151,7 +148,7 @@ async def test_failed_admin_delivery_is_logged_without_rolling_back(monkeypatch,
     bot.send_photo.side_effect = failed_admin_send
     message.caption = "<b>не доверять</b>"
 
-    await payment_handler.msg_receive_proof(message, state, user, bot, session)
+    await payment_handler.msg_receive_proof(message, state, user, bot, session, master_id=TRUSTED_MASTER_ID)
 
     assert events == ["submit", "commit", "clear_state", "client_answer", "admin_photo"]
     assert "Could not notify admin" in caplog.text

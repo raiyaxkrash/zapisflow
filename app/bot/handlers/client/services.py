@@ -14,7 +14,6 @@ from app.bot.keyboards.client import (
     get_services_list_keyboard,
 )
 from app.repositories.service_repository import ServiceRepository
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_duration, format_rub
 
 router = Router(name="client_services")
@@ -23,12 +22,11 @@ router = Router(name="client_services")
 @router.callback_query(MenuCallback.filter(F.action == "services"))
 @router.callback_query(ServiceCallback.filter(F.action == "list"))
 async def cb_services_list(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Display catalog of all active services with prices.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     services = await service_repo.list_active(master_id=master_id)
 
@@ -52,12 +50,11 @@ async def cb_services_list(
 async def cb_service_view(
     callback: CallbackQuery,
     callback_data: ServiceCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Display detailed card for a single selected service.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     service = await service_repo.get_by_id(callback_data.service_id, master_id=master_id)
 

@@ -21,7 +21,6 @@ from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.services.booking_service import BookingService
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import render_appointment_card
 
 router = Router(name="client_my_appointments")
@@ -32,13 +31,12 @@ async def cb_my_bookings(
     callback: CallbackQuery,
     state: FSMContext,
     db_user: User,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     List user's active upcoming bookings for current master.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     appointment_repo = AppointmentRepository(session)
     appointments = await appointment_repo.get_user_upcoming(user_id=db_user.id, master_id=master_id)
 
@@ -67,12 +65,11 @@ async def cb_booking_detail(
     callback: CallbackQuery,
     callback_data: BookingActionCallback,
     db_user: User,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Show full appointment card.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     appointment_repo = AppointmentRepository(session)
     appointment = await appointment_repo.get_by_id_with_relations(
         appointment_id=callback_data.appointment_id, master_id=master_id
@@ -117,12 +114,11 @@ async def cb_client_cancel(
     callback: CallbackQuery,
     callback_data: BookingActionCallback,
     db_user: User,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Client initiates cancellation: marks status CANCELLED_BY_CLIENT and retains deposit.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
 
     try:

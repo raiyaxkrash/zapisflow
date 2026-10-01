@@ -14,18 +14,16 @@ from app.bot.keyboards.admin import AdminMenuCallback, get_admin_dashboard_keybo
 from app.bot.states.admin import AdminSettingsSG
 from app.config.settings import settings
 from app.repositories.master_settings_repository import MasterSettingsRepository
-from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="admin_settings_mgmt")
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())
 
 
-async def format_settings_text(session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
+async def format_settings_text(session: AsyncSession, master_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """
     Load settings and build text and keyboard.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     repo = MasterSettingsRepository(session)
 
     card = await repo.get_value(master_id, "bank_card_number", settings.bank_card_number)
@@ -94,13 +92,13 @@ async def format_settings_text(session: AsyncSession) -> tuple[str, InlineKeyboa
 
 @router.callback_query(AdminMenuCallback.filter(F.action == "settings"))
 async def cb_admin_settings_view(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Show current settings and edit options.
     """
     await state.clear()
-    text, keyboard = await format_settings_text(session)
+    text, keyboard = await format_settings_text(session, master_id)
     if callback.message:
         await callback.message.edit_text(text=text, reply_markup=keyboard)
     await callback.answer()
@@ -146,7 +144,7 @@ async def cb_admin_settings_edit_prompt(
 
 @router.message(AdminSettingsSG.editing_value, F.text)
 async def msg_admin_settings_save_value(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Validate and save updated setting value.
@@ -170,13 +168,12 @@ async def msg_admin_settings_save_value(
             await message.answer("⚠️ Введите целое число.")
             return
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     repo = MasterSettingsRepository(session)
     await repo.update_settings(master_id, **{setting_key: val})
     await session.commit()
     await state.clear()
 
-    text, keyboard = await format_settings_text(session)
+    text, keyboard = await format_settings_text(session, master_id)
     await message.answer(
         text=f"✅ <b>Настройка успешно сохранена!</b>\n\n{text}", reply_markup=keyboard
     )

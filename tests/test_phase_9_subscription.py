@@ -748,6 +748,133 @@ async def test_14_payment_callback_idempotency_no_double_extension(pg_engine: As
 
 @pytest.mark.asyncio
 @requires_postgres
+async def test_same_payment_concurrent_confirmation_creates_one_period(pg_engine: AsyncEngine):
+    """Two real PostgreSQL sessions cannot apply a single payment twice."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        owner = await _create_user(session, "OwnerSamePaymentRace")
+        master = await _create_master(
+            session, owner.id, "Same Payment Race", SubscriptionStatus.EXPIRED,
+            trial_ends_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        payment, _ = await SubscriptionService(session).create_subscription_payment(
+            master.id, owner.id, plan_code="BASIC"
+        )
+        master_id, payment_id = master.id, payment.id
+        provider, provider_payment_id = payment.provider, payment.provider_payment_id
+        await session.commit()
+
+    async def confirm() -> bool:
+        async with session_maker() as session:
+            result = await SubscriptionService(session).process_successful_payment(
+                provider, provider_payment_id
+            )
+            await session.commit()
+            return result
+
+    assert await asyncio.gather(confirm(), confirm()) == [True, True]
+    async with session_maker() as session:
+        master = await session.get(Master, master_id)
+        payment = await session.get(SubscriptionPayment, payment_id)
+        periods = (await session.execute(
+            select(SubscriptionPeriod).where(SubscriptionPeriod.subscription_payment_id == payment_id)
+        )).scalars().all()
+        assert payment.status == "SUCCEEDED"
+        assert len(periods) == 1
+        assert periods[0].ends_at == master.paid_until
+        remaining_days = (master.paid_until - datetime.now(timezone.utc)).total_seconds() / 86400
+        assert 29.9 <= remaining_days <= 30.1
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_payment_does_not_clear_administrative_suspension(pg_engine: AsyncEngine):
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        owner = await _create_user(session, "OwnerSuspendedPayment")
+        master = await _create_master(
+            session, owner.id, "Suspended Payment", SubscriptionStatus.SUSPENDED
+        )
+        payment, _ = await SubscriptionService(session).create_subscription_payment(
+            master.id, owner.id, plan_code="BASIC"
+        )
+        await session.commit()
+        assert await SubscriptionService(session).process_successful_payment(
+            payment.provider, payment.provider_payment_id
+        )
+        await session.commit()
+        await session.refresh(master)
+        assert master.subscription_status == SubscriptionStatus.SUSPENDED
+        assert master.paid_until is not None
+        assert (await SubscriptionService(session).get_effective_status(master.id)).status == (
+            EffectiveSubscriptionStatus.SUSPENDED
+        )
+        assert (await session.scalar(select(func.count()).select_from(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_payment_id == payment.id
+        ))) == 1
+
+
+@pytest.mark.asyncio
+@requires_postgres
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [("amount", Decimal("1.00")), ("period_days", 365)],
+)
+async def test_payment_terms_must_match_plan_before_extension(
+    pg_engine: AsyncEngine, field: str, invalid_value: object,
+):
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        owner = await _create_user(session, "OwnerInvalidPaymentTerms")
+        master = await _create_master(
+            session, owner.id, "Invalid Payment Terms", SubscriptionStatus.EXPIRED,
+            trial_ends_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        payment, _ = await SubscriptionService(session).create_subscription_payment(
+            master.id, owner.id, plan_code="BASIC"
+        )
+        setattr(payment, field, invalid_value)
+        await session.commit()
+
+        with pytest.raises(SubscriptionError, match="не соответствуют тарифу"):
+            await SubscriptionService(session).process_successful_payment(
+                payment.provider, payment.provider_payment_id
+            )
+        await session.refresh(master)
+        await session.refresh(payment)
+        assert master.subscription_status == SubscriptionStatus.EXPIRED
+        assert master.paid_until is None
+        assert payment.status == "PENDING"
+        assert (await session.scalar(select(func.count()).select_from(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_payment_id == payment.id
+        ))) == 0
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_manual_booking_cannot_bypass_expired_entitlement(pg_engine: AsyncEngine):
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        owner = await _create_user(session, "OwnerManualExpired")
+        client = await _create_user(session, "ClientManualExpired")
+        master = await _create_master(
+            session, owner.id, "Manual Expired", SubscriptionStatus.EXPIRED,
+            trial_ends_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        service = await _create_service(session, master.id)
+        await session.commit()
+        with pytest.raises(SubscriptionExpiredError):
+            await BookingService(session).create_hold_booking(
+                master_id=master.id, user_id=client.id, service_id=service.id,
+                start_time=datetime.now(timezone.utc) + timedelta(days=2), is_manual=True,
+            )
+        assert (await session.scalar(select(func.count()).select_from(Appointment).where(
+            Appointment.master_id == master.id
+        ))) == 0
+
+
+@pytest.mark.asyncio
+@requires_postgres
 async def test_15_concurrent_successful_payments_both_accounted(pg_engine: AsyncEngine):
     """Concurrent payments for the same master are sequentially processed with FOR UPDATE lock."""
     session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)

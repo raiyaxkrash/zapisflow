@@ -27,7 +27,6 @@ from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
 from app.services.exceptions import SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="admin_manual_booking")
@@ -40,7 +39,7 @@ async def cb_manual_booking_start(
     callback: CallbackQuery,
     callback_data: AdminCalendarCallback,
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Step 1: Admin clicks "Записать клиента" for a specific date in calendar.
@@ -51,7 +50,6 @@ async def cb_manual_booking_start(
     await state.set_state(AdminManualBookingSG.choosing_service)
     await state.update_data(target_date_iso=target_date.isoformat())
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     services = await service_repo.list_active(master_id=master_id)
 
@@ -98,7 +96,7 @@ async def cb_manual_booking_start(
 async def cb_manual_booking_choose_service(
     callback: CallbackQuery,
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Step 2: Service chosen. Calculate slots for target date and present time grid.
@@ -107,7 +105,6 @@ async def cb_manual_booking_choose_service(
     data = await state.get_data()
     target_date = date.fromisoformat(data["target_date_iso"])
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     service = await service_repo.get_by_id(service_id, master_id=master_id)
     if not service:
@@ -301,7 +298,7 @@ async def msg_manual_booking_client_phone(
     F.data == "adm_mb:skip_notes",
 )
 async def cb_manual_booking_skip_notes(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Skip note and finalize appointment creation.
@@ -311,12 +308,13 @@ async def cb_manual_booking_skip_notes(
         notes=None,
         state=state,
         session=session,
+        master_id=master_id,
     )
 
 
 @router.message(AdminManualBookingSG.admin_notes, F.text)
 async def msg_manual_booking_save_notes(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Notes received: finalize appointment creation.
@@ -327,6 +325,7 @@ async def msg_manual_booking_save_notes(
         notes=notes,
         state=state,
         session=session,
+        master_id=master_id,
     )
 
 
@@ -334,7 +333,7 @@ async def finalize_manual_booking(
     event: Message | CallbackQuery,
     notes: Optional[str],
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Create User profile if needed and record CONFIRMED manual appointment.
@@ -352,7 +351,7 @@ async def finalize_manual_booking(
     # 1. Resolve user
     user = None
     if client_phone:
-        user = await user_repo.get_by_phone_exact(client_phone)
+        user = await user_repo.get_by_phone_exact(client_phone, master_id=master_id)
 
     if not user:
         # Synthetic negative telegram_id for offline/walk-in clients
@@ -367,7 +366,6 @@ async def finalize_manual_booking(
         await session.refresh(user)
 
     # 2. Create manual confirmed appointment
-    master_id = await LegacyTenantResolver.get_master_id(session)
     try:
         appointment, _ = await booking_service.create_hold_booking(
             master_id=master_id,

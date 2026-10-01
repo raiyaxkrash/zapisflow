@@ -20,7 +20,6 @@ from app.bot.keyboards.admin import (
 from app.bot.states.admin import AdminServiceSG
 from app.database.models.service import DepositType, Service
 from app.repositories.service_repository import ServiceRepository
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_rub
 
 router = Router(name="admin_services_mgmt")
@@ -58,13 +57,12 @@ def format_service_card(service: Service) -> str:
 @router.callback_query(AdminMenuCallback.filter(F.action == "services"))
 @router.callback_query(AdminServiceCallback.filter(F.action == "list"))
 async def cb_admin_services_list(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     List all master services.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     services = await service_repo.list_all_for_admin(master_id=master_id)
 
@@ -87,13 +85,12 @@ async def cb_admin_service_detail(
     callback: CallbackQuery,
     callback_data: AdminServiceCallback,
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Show individual service management card.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     service = await service_repo.get_by_id(callback_data.service_id, master_id=master_id)
 
@@ -113,12 +110,11 @@ async def cb_admin_service_detail(
 async def cb_admin_service_toggle(
     callback: CallbackQuery,
     callback_data: AdminServiceCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Toggle service active status.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     new_status = await service_repo.toggle_active(callback_data.service_id, master_id=master_id)
 
@@ -141,12 +137,11 @@ async def cb_admin_service_toggle(
 async def cb_admin_service_archive(
     callback: CallbackQuery,
     callback_data: AdminServiceCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Soft-delete / archive service.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     await service_repo.archive(callback_data.service_id, master_id=master_id)
 
@@ -163,12 +158,11 @@ async def cb_admin_service_archive(
 async def cb_admin_service_unarchive(
     callback: CallbackQuery,
     callback_data: AdminServiceCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Restore service from archive.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     await service_repo.unarchive(callback_data.service_id, master_id=master_id)
 
@@ -228,7 +222,7 @@ async def cb_admin_service_edit_prompt(
 
 @router.message(AdminServiceSG.edit_field_value, F.text)
 async def msg_admin_service_save_field(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Validate and save updated field value.
@@ -238,7 +232,6 @@ async def msg_admin_service_save_field(
     field = data["field"]
     raw_val = message.text.strip()
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     service = await service_repo.get_by_id(service_id, master_id=master_id)
     if not service:
@@ -405,7 +398,7 @@ async def msg_add_service_duration(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminServiceSG.deposit_value, F.text)
 async def msg_add_service_finalize(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Finalize service creation and save to database.
@@ -425,7 +418,6 @@ async def msg_add_service_finalize(
     if deposit_val > price:
         deposit_val = price
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     new_service = Service(
         master_id=master_id,
         title=data["title"],

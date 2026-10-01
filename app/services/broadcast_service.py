@@ -15,6 +15,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiolimiter import AsyncLimiter
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.broadcast import (
@@ -107,6 +108,7 @@ class BroadcastService:
             select(BroadcastRecipient)
             .where(
                 BroadcastRecipient.broadcast_id == broadcast_id,
+                BroadcastRecipient.duplicate_of_id.is_(None),
                 BroadcastRecipient.status == RecipientStatus.PROCESSING,
                 BroadcastRecipient.claimed_at < cutoff,
             )
@@ -141,10 +143,12 @@ class BroadcastService:
         if not await SubscriptionAccessPolicy(self.session).can_send_marketing_broadcast(master_id):
             raise SubscriptionExpiredError("Маркетинговые рассылки недоступны при истекшей подписке.")
 
+        # Serialize DRAFT -> SENDING so two replicas cannot create two sets of
+        # recipient rows for the same campaign.
         query = select(Broadcast).where(
             Broadcast.id == broadcast_id,
             Broadcast.master_id == master_id,
-        )
+        ).with_for_update()
         res = await self.session.execute(query)
         broadcast = res.scalars().first()
         if not broadcast:
@@ -159,12 +163,15 @@ class BroadcastService:
             broadcast.status = BroadcastStatus.SENDING
             broadcast.started_at = datetime.now(timezone.utc)
             for u in recipients:
-                rcpt = BroadcastRecipient(
-                    broadcast_id=broadcast_id,
-                    user_id=u.id,
-                    status=RecipientStatus.PENDING,
+                await self.session.execute(
+                    pg_insert(BroadcastRecipient)
+                    .values(
+                        broadcast_id=broadcast_id,
+                        user_id=u.id,
+                        status=RecipientStatus.PENDING,
+                    )
+                    .on_conflict_do_nothing()
                 )
-                self.session.add(rcpt)
             await self.session.commit()
 
         # Resolve tenant bot
@@ -200,14 +207,17 @@ class BroadcastService:
         await self.reclaim_stale_recipients(broadcast_id=broadcast_id)
 
         while True:
-            # Atomic claim batch of recipients with FOR UPDATE SKIP LOCKED
+            # Claim one recipient at a time. A batch claimed before a slow
+            # Telegram call can otherwise become stale while still queued in
+            # this worker's memory and be reclaimed by another replica.
             claim_stmt = (
                 select(BroadcastRecipient)
                 .where(
                     BroadcastRecipient.broadcast_id == broadcast_id,
+                    BroadcastRecipient.duplicate_of_id.is_(None),
                     BroadcastRecipient.status == RecipientStatus.PENDING,
                 )
-                .limit(batch_size)
+                .limit(1)
                 .with_for_update(skip_locked=True)
             )
             claim_res = await self.session.execute(claim_stmt)
@@ -216,25 +226,34 @@ class BroadcastService:
                 break
 
             now_utc = datetime.now(timezone.utc)
-            batch_items = []
-            for r in claimed:
-                r.status = RecipientStatus.PROCESSING
-                r.claimed_at = now_utc
-                r.claimed_by = actual_worker_id
-                r.attempt_count += 1
-                batch_items.append((r.id, r.user_id))
+            r = claimed[0]
+            r.status = RecipientStatus.PROCESSING
+            r.claimed_at = now_utc
+            r.claimed_by = actual_worker_id
+            r.attempt_count += 1
+            rcpt_id, user_id = r.id, r.user_id
 
             await self.session.commit()
 
-            # Process claimed batch outside the claim transaction
-            for rcpt_id, user_id in batch_items:
+            # Lock the single recipient through the external send and final
+            # status write. Reclaimers use SKIP LOCKED and cannot take an
+            # in-flight delivery even when the lease age exceeds its timeout.
+            result = await self.session.execute(
+                select(BroadcastRecipient)
+                .where(BroadcastRecipient.id == rcpt_id)
+                .with_for_update()
+            )
+            r = result.scalar_one_or_none()
+            if r is None or r.status != RecipientStatus.PROCESSING or r.claimed_by != actual_worker_id:
+                await self.session.rollback()
+                continue
+
+            try:
                 user = await self.session.get(User, user_id)
                 if not user or not user.telegram_id or user.telegram_id <= 0:
-                    r = await self.session.get(BroadcastRecipient, rcpt_id)
-                    if r:
-                        r.status = RecipientStatus.FAILED
-                        r.error_message = "Invalid user or telegram_id"
-                        await self.session.commit()
+                    r.status = RecipientStatus.FAILED
+                    r.error_message = "Invalid user or telegram_id"
+                    await self.session.commit()
                     continue
 
                 async with limiter:
@@ -271,11 +290,9 @@ class BroadcastService:
                             error_msg = str(exc)
                             break
 
-                    r = await self.session.get(BroadcastRecipient, rcpt_id)
-                    if r:
-                        r.status = RecipientStatus.SENT if delivered else RecipientStatus.FAILED
-                        r.error_message = error_msg
-                        r.sent_at = datetime.now(timezone.utc) if delivered else None
+                    r.status = RecipientStatus.SENT if delivered else RecipientStatus.FAILED
+                    r.error_message = error_msg
+                    r.sent_at = datetime.now(timezone.utc) if delivered else None
 
                     if not delivered and error_msg == "Bot blocked by user":
                         mc_res = await self.session.execute(
@@ -288,11 +305,15 @@ class BroadcastService:
                         if mc:
                             mc.is_bot_blocked = True
                     await self.session.commit()
+            except BaseException:
+                await self.session.rollback()
+                raise
 
         # Final recount and completion check
         res_sent = await self.session.execute(
             select(func.count(BroadcastRecipient.id)).where(
                 BroadcastRecipient.broadcast_id == broadcast_id,
+                BroadcastRecipient.duplicate_of_id.is_(None),
                 BroadcastRecipient.status == RecipientStatus.SENT,
             )
         )
@@ -301,6 +322,7 @@ class BroadcastService:
         res_fail = await self.session.execute(
             select(func.count(BroadcastRecipient.id)).where(
                 BroadcastRecipient.broadcast_id == broadcast_id,
+                BroadcastRecipient.duplicate_of_id.is_(None),
                 BroadcastRecipient.status == RecipientStatus.FAILED,
             )
         )
@@ -309,6 +331,7 @@ class BroadcastService:
         res_pending = await self.session.execute(
             select(func.count(BroadcastRecipient.id)).where(
                 BroadcastRecipient.broadcast_id == broadcast_id,
+                BroadcastRecipient.duplicate_of_id.is_(None),
                 BroadcastRecipient.status.in_([RecipientStatus.PENDING, RecipientStatus.PROCESSING]),
             )
         )

@@ -23,7 +23,6 @@ from app.repositories.user_repository import UserRepository
 from app.services.payment_service import PaymentService
 from app.services.exceptions import InvalidBookingStatusError
 from app.services.master_authorization_service import MasterAuthorizationService
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="admin_payments")
@@ -33,12 +32,11 @@ logger = logging.getLogger(__name__)
 
 @router.callback_query(AdminMenuCallback.filter(F.action == "payments"))
 async def cb_payments_inbox(
-    callback: CallbackQuery, session: AsyncSession
+    callback: CallbackQuery, session: AsyncSession, master_id: int
 ) -> None:
     """
     List of payments waiting for review (inbox).
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     payment_service = PaymentService(session)
     pending_payments = await payment_service.list_pending_inbox(master_id=master_id)
 
@@ -77,13 +75,12 @@ async def cb_payments_inbox(
 
 @router.callback_query(F.data.startswith("adm_pay:view:"))
 async def cb_view_payment_detail(
-    callback: CallbackQuery, bot: Bot, session: AsyncSession
+    callback: CallbackQuery, bot: Bot, session: AsyncSession, master_id: int
 ) -> None:
     """
     Display details of an individual pending payment receipt from inbox.
     """
     payment_id = int(callback.data.split(":")[2])
-    master_id = await LegacyTenantResolver.get_master_id(session)
     payment_repo = PaymentRepository(session)
     payment = await payment_repo.get_by_id_with_proofs(payment_id, master_id=master_id)
 
@@ -190,13 +187,12 @@ async def cb_view_payment_detail(
 
 @router.callback_query(F.data.startswith("adm_pay:approve:"))
 async def cb_approve_payment(
-    callback: CallbackQuery, db_user: User, bot: Bot, session: AsyncSession
+    callback: CallbackQuery, db_user: User, bot: Bot, session: AsyncSession, master_id: int
 ) -> None:
     """
     1-click approve payment: confirm payment, confirm appointment, notify client.
     """
     payment_id = int(callback.data.split(":")[2])
-    master_id = await LegacyTenantResolver.get_master_id(session)
     auth_service = MasterAuthorizationService(session)
     if not await auth_service.is_admin(master_id, db_user.id):
         await callback.answer("Доступ запрещен", show_alert=True)
@@ -270,13 +266,12 @@ async def cb_approve_payment(
 
 @router.callback_query(F.data.startswith("adm_pay:reject:"))
 async def cb_reject_payment_presets(
-    callback: CallbackQuery, session: AsyncSession,
+    callback: CallbackQuery, session: AsyncSession, master_id: int,
 ) -> None:
     """
     Prompt admin with quick presets for rejection reason.
     """
     payment_id = int(callback.data.split(":")[2])
-    master_id = await LegacyTenantResolver.get_master_id(session)
     payment = await PaymentRepository(session).get_by_id_with_proofs(payment_id, master_id=master_id)
     if payment is None:
         await callback.answer("Платёж не найден", show_alert=True)
@@ -334,7 +329,7 @@ async def cb_reject_payment_presets(
 
 @router.callback_query(F.data.startswith("adm_pay:do_reject:"))
 async def cb_do_reject_payment(
-    callback: CallbackQuery, db_user: User, bot: Bot, session: AsyncSession
+    callback: CallbackQuery, db_user: User, bot: Bot, session: AsyncSession, master_id: int
 ) -> None:
     """
     Execute rejection: mark payment rejected, extend appointment hold by 15 min, notify client.
@@ -350,7 +345,6 @@ async def cb_do_reject_payment(
     }
     reason_text = reasons.get(preset_key, "Платёж не прошёл проверку")
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     auth_service = MasterAuthorizationService(session)
     if not await auth_service.is_admin(master_id, db_user.id):
         await callback.answer("Доступ запрещен", show_alert=True)
@@ -414,12 +408,11 @@ async def cb_do_reject_payment(
 @router.callback_query(F.data.startswith("adm_pay:retain_cancelled:"))
 @router.callback_query(F.data.startswith("adm_pay:reject_cancelled:"))
 async def cb_resolve_cancelled_payment(
-    callback: CallbackQuery, db_user: User, bot: Bot, session: AsyncSession
+    callback: CallbackQuery, db_user: User, bot: Bot, session: AsyncSession, master_id: int
 ) -> None:
     """Resolve a submitted proof after client cancellation without inventing income."""
     payment_id = int(callback.data.rsplit(":", 1)[1])
     received = callback.data.startswith("adm_pay:retain_cancelled:")
-    master_id = await LegacyTenantResolver.get_master_id(session)
     auth_service = MasterAuthorizationService(session)
     if not await auth_service.is_admin(master_id, db_user.id):
         await callback.answer("Доступ запрещен", show_alert=True)

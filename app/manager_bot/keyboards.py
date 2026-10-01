@@ -210,7 +210,11 @@ def subscription_payment_keyboard(
 ) -> InlineKeyboardMarkup:
     """Confirmation buttons for subscription payment."""
     rows = []
-    if payment_url:
+    if settings.is_production:
+        if payment_url:
+            rows.append([InlineKeyboardButton(text="💳 Оплатить онлайн", url=payment_url)])
+        rows.append([InlineKeyboardButton(text="🆘 Написать в поддержку", url=settings.support_url)])
+    elif payment_url:
         rows.append([InlineKeyboardButton(text="💳 Оплатить онлайн", url=payment_url)])
     if not settings.is_production:
         rows.append([

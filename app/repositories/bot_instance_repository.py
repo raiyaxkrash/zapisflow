@@ -43,6 +43,7 @@ class BotInstanceRepository:
         query = select(BotInstance).where(
             BotInstance.master_id == master_id,
             BotInstance.status == BotInstanceStatus.ACTIVE,
+            BotInstance.is_current.is_(True),
         )
         result = await self.session.execute(query)
         return result.scalars().first()

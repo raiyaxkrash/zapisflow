@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -88,6 +89,13 @@ class BroadcastRecipient(Base):
     __tablename__ = "broadcast_recipients"
     __table_args__ = (
         Index("ix_broadcast_recipients_claim", "broadcast_id", "status"),
+        Index(
+            "uq_broadcast_recipients_active_campaign_user",
+            "broadcast_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("duplicate_of_id IS NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -97,6 +105,7 @@ class BroadcastRecipient(Base):
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    duplicate_of_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[RecipientStatus] = mapped_column(
         SQLEnum(RecipientStatus, name="recipient_status_enum", native_enum=True),
         default=RecipientStatus.PENDING,

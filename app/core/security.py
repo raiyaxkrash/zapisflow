@@ -35,16 +35,40 @@ class SensitiveDataFilter(logging.Filter):
     """Logging filter that redacts Telegram bot tokens and secrets from all log records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        sanitize_log_record(record)
+        return True
+
+
+def sanitize_log_record(record: logging.LogRecord) -> logging.LogRecord:
+    """Redact the rendered message and traceback before any handler formats them."""
+    try:
+        record.msg = redact_token(record.getMessage())
+        record.args = ()
+    except Exception:
         if isinstance(record.msg, str):
             record.msg = redact_token(record.msg)
 
-        if record.args:
-            if isinstance(record.args, dict):
-                record.args = {k: redact_token(v) if isinstance(v, str) else v for k, v in record.args.items()}
-            elif isinstance(record.args, (list, tuple)):
-                record.args = tuple(redact_token(v) if isinstance(v, str) else v for v in record.args)
+    if record.exc_info:
+        # Formatter normally builds exc_text after filters have run. Precompute the
+        # sanitized traceback so every handler uses the safe cached value.
+        record.exc_text = redact_token(logging.Formatter().formatException(record.exc_info))
+        record.exc_info = None
+    elif record.exc_text:
+        record.exc_text = redact_token(record.exc_text)
 
-        if record.exc_text:
-            record.exc_text = redact_token(record.exc_text)
+    if record.stack_info:
+        record.stack_info = redact_token(record.stack_info)
+    return record
 
-        return True
+
+def install_sensitive_logging() -> None:
+    """Cover all handlers, including those installed later by Uvicorn."""
+    current_factory = logging.getLogRecordFactory()
+    if getattr(current_factory, "_zapisflow_sensitive_factory", False):
+        return
+
+    def safe_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        return sanitize_log_record(current_factory(*args, **kwargs))
+
+    safe_factory._zapisflow_sensitive_factory = True  # type: ignore[attr-defined]
+    logging.setLogRecordFactory(safe_factory)

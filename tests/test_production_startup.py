@@ -65,12 +65,12 @@ async def test_main_rejects_placeholder_token_before_database_use(
 
 def test_compose_runs_migrations_as_a_separate_completed_service() -> None:
     migration = _compose_service("migrate")
-    bot = _compose_service("bot")
+    backend = _compose_service("backend")
 
     assert re.search(r"\balembic\s+upgrade\s+head\b", _service_command(migration))
     assert re.search(
         r"(?m)^      migrate:\s*\n        condition: service_completed_successfully\s*$",
-        bot,
+        backend,
     )
-    assert "alembic upgrade" not in _service_command(bot)
-    assert re.search(r"\bpython\s+-m\s+app\.main\b", _service_command(bot))
+    assert "alembic upgrade" not in _service_command(backend)
+    assert re.search(r"\bpython\s+-m\s+app\.main\b", _service_command(backend))

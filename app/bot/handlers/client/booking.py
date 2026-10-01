@@ -36,7 +36,6 @@ from app.services.booking_service import BookingService
 from app.services.exceptions import SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
 from app.services.subscription_access_policy import SubscriptionAccessPolicy
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import (
     format_date_ru,
     format_datetime_ru,
@@ -68,7 +67,7 @@ async def cb_start_booking(
         return
 
     if master_id is None:
-        master_id = await LegacyTenantResolver.get_master_id(session)
+        return None  # Missing trusted tenant context.
 
     if not is_admin:
         policy = SubscriptionAccessPolicy(session)
@@ -106,13 +105,12 @@ async def cb_service_selected(
     callback: CallbackQuery,
     callback_data: ServiceCallback,
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Service selected: calculate available calendar days and show inline calendar.
     """
     service_id = callback_data.service_id
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     service = await service_repo.get_by_id(service_id, master_id=master_id)
 
@@ -162,7 +160,7 @@ async def cb_calendar_navigation(
     callback: CallbackQuery,
     callback_data: CalendarNavCallback,
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Handle calendar month paging and day selection.
@@ -178,7 +176,6 @@ async def cb_calendar_navigation(
         await callback.answer("Сессия устарела. Пожалуйста, начните заново.", show_alert=True)
         return
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     slot_engine = SlotEngine(session)
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
@@ -266,7 +263,7 @@ async def cb_slot_selected(
     callback_data: TimeSlotCallback,
     state: FSMContext,
     db_user: User,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Slot chosen: check if user phone is known. If not, request phone; otherwise show policy agreement.
@@ -277,7 +274,6 @@ async def cb_slot_selected(
 
     data = await state.get_data()
     service_id = data.get("service_id") or callback_data.service_id
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     service = await service_repo.get_by_id(service_id, master_id=master_id)
 
@@ -354,7 +350,7 @@ async def msg_receive_phone(
     message: Message,
     state: FSMContext,
     db_user: User,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Handle contact sharing or manual phone number input.
@@ -397,7 +393,6 @@ async def msg_receive_phone(
         await state.clear()
         return
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     service_repo = ServiceRepository(session)
     service = await service_repo.get_by_id(service_id, master_id=master_id)
     slot_dt = datetime.fromtimestamp(slot_ts, pytz.UTC)
@@ -455,7 +450,7 @@ async def cb_agree_policy(
     callback: CallbackQuery,
     state: FSMContext,
     db_user: User,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Client agreed to policy: create hold booking, create pending payment and show requisites.
@@ -471,7 +466,6 @@ async def cb_agree_policy(
 
     slot_dt = datetime.fromtimestamp(slot_ts, pytz.UTC)
     booking_service = BookingService(session)
-    master_id = await LegacyTenantResolver.get_master_id(session)
 
     try:
         appointment, payment = await booking_service.create_hold_booking(

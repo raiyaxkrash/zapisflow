@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.filters import IsAdminFilter
 from app.bot.keyboards.admin import AdminMenuCallback
 from app.services.analytics_service import AnalyticsService
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_rub
 
 router = Router(name="admin_analytics")
@@ -55,7 +54,7 @@ def get_analytics_keyboard(active_period: str) -> InlineKeyboardMarkup:
 @router.callback_query(AdminMenuCallback.filter(F.action == "analytics"))
 @router.callback_query(F.data.startswith("adm_an:period:"))
 async def cb_admin_analytics_view(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Render executive dashboard for the selected time period.
@@ -65,7 +64,6 @@ async def cb_admin_analytics_view(
     if callback.data and callback.data.startswith("adm_an:period:"):
         period = callback.data.split(":")[2]
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     analytics_svc = AnalyticsService(session)
 
     if period == "today":

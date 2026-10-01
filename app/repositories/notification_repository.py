@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Optional, Sequence
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -161,54 +161,143 @@ class NotificationRepository(BaseRepository[Notification]):
         await self.session.flush()
         return len(stale)
 
-    async def mark_sent(self, notification_id: int) -> None:
-        """Mark notification as successfully delivered."""
+    async def renew_claim(self, notification_id: int, worker_id: str, claim_attempt: int) -> bool:
+        """Keep an in-flight delivery leased only while this claim still owns it."""
+        result = await self.session.execute(
+            update(Notification)
+            .where(
+                Notification.id == notification_id,
+                Notification.status == NotificationStatus.PROCESSING,
+                Notification.claimed_by == worker_id,
+                Notification.attempt_count == claim_attempt,
+                Notification.next_attempt_at.is_(None),
+            )
+            .values(claimed_at=datetime.now(timezone.utc))
+        )
+        return result.rowcount == 1
+
+    async def renew_claims(self, worker_id: str, attempts: dict[int, int]) -> int:
+        """Heartbeat unlocked claims; an in-flight send already holds its row lock."""
+        if not attempts:
+            return 0
+        unlocked = await self.session.execute(
+            select(Notification.id)
+            .where(
+                tuple_(Notification.id, Notification.attempt_count).in_(list(attempts.items())),
+                Notification.status == NotificationStatus.PROCESSING,
+                Notification.claimed_by == worker_id,
+                Notification.next_attempt_at.is_(None),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        ids = list(unlocked.scalars().all())
+        if not ids:
+            return 0
+        result = await self.session.execute(
+            update(Notification)
+            .where(Notification.id.in_(ids))
+            .values(claimed_at=datetime.now(timezone.utc))
+        )
+        return result.rowcount
+
+    async def lock_owned_claim(self, notification_id: int, worker_id: str, claim_attempt: int) -> bool:
+        """Lock an owned delivery through the external send and final status write.
+
+        SKIP LOCKED keeps another replica from waiting on this in-flight send.
+        The caller must keep this transaction open until send outcome is stored.
+        """
+        result = await self.session.execute(
+            select(Notification.id)
+            .where(
+                Notification.id == notification_id,
+                Notification.status == NotificationStatus.PROCESSING,
+                Notification.claimed_by == worker_id,
+                Notification.attempt_count == claim_attempt,
+                Notification.next_attempt_at.is_(None),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def mark_sent(self, notification_id: int, worker_id: str, claim_attempt: int) -> bool:
+        """Mark delivered only if the original worker still owns the claim."""
         stmt = (
             update(Notification)
-            .where(Notification.id == notification_id)
+            .where(
+                Notification.id == notification_id,
+                Notification.status == NotificationStatus.PROCESSING,
+                Notification.claimed_by == worker_id,
+                Notification.attempt_count == claim_attempt,
+                Notification.next_attempt_at.is_(None),
+            )
             .values(
                 status=NotificationStatus.SENT,
                 sent_at=datetime.now(timezone.utc),
+                claimed_by=None,
+                claimed_at=None,
                 next_attempt_at=None,
                 last_error=None,
             )
         )
-        await self.session.execute(stmt)
+        result = await self.session.execute(stmt)
+        return result.rowcount == 1
 
     async def mark_failed(
         self,
         notification_id: int,
         error: str,
+        worker_id: str,
+        claim_attempt: int,
         retry_delay_seconds: Optional[int] = None,
         max_attempts: int = 3,
-    ) -> None:
+    ) -> bool:
         """Mark notification delivery failure, scheduling retry if within limits."""
-        notif = await self.session.get(Notification, notification_id)
-        if not notif:
-            return
+        retry = retry_delay_seconds is not None and claim_attempt < max_attempts
+        result = await self.session.execute(
+            update(Notification)
+            .where(
+                Notification.id == notification_id,
+                Notification.status == NotificationStatus.PROCESSING,
+                Notification.claimed_by == worker_id,
+                Notification.attempt_count == claim_attempt,
+                Notification.next_attempt_at.is_(None),
+            )
+            .values(
+                last_error=error[:1000] if error else None,
+                status=NotificationStatus.PROCESSING if retry else NotificationStatus.FAILED,
+                next_attempt_at=(
+                    datetime.now(timezone.utc) + timedelta(seconds=retry_delay_seconds)
+                    if retry else None
+                ),
+                claimed_by=None,
+                claimed_at=None,
+            )
+        )
+        return result.rowcount == 1
 
-        notif.last_error = error[:1000] if error else None
-        if retry_delay_seconds is not None and notif.attempt_count < max_attempts:
-            notif.status = NotificationStatus.PROCESSING
-            notif.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=retry_delay_seconds)
-        else:
-            notif.status = NotificationStatus.FAILED
-            notif.next_attempt_at = None
-
-        await self.session.flush()
-
-    async def mark_cancelled(self, notification_id: int, reason: Optional[str] = None) -> None:
+    async def mark_cancelled(
+        self, notification_id: int, worker_id: str, claim_attempt: int, reason: Optional[str] = None
+    ) -> bool:
         """Mark notification as cancelled (e.g. appointment cancelled/rescheduled)."""
         stmt = (
             update(Notification)
-            .where(Notification.id == notification_id)
+            .where(
+                Notification.id == notification_id,
+                Notification.status == NotificationStatus.PROCESSING,
+                Notification.claimed_by == worker_id,
+                Notification.attempt_count == claim_attempt,
+                Notification.next_attempt_at.is_(None),
+            )
             .values(
                 status=NotificationStatus.CANCELLED,
                 last_error=reason[:1000] if reason else None,
+                claimed_by=None,
+                claimed_at=None,
                 next_attempt_at=None,
             )
         )
-        await self.session.execute(stmt)
+        result = await self.session.execute(stmt)
+        return result.rowcount == 1
 
     async def cancel_pending_for_appointment(
         self, appointment_id: int, reason: str = "Appointment status changed"

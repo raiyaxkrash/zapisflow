@@ -384,6 +384,62 @@ async def test_registry_token_version_change_creates_new_bot(
 
 @requires_postgres
 @pytest.mark.asyncio
+async def test_registry_replica_revalidates_after_missed_pubsub(
+    pg_session: AsyncSession, token_crypto: TokenCrypto
+):
+    """PostgreSQL version and TTL fence a replica that missed invalidation."""
+    master = await _create_test_master(pg_session, owner_tg_id=1402)
+    token_v1 = "14020001:TOKEN_VERSION_ONE_1111111111111111"
+    token_v2 = "14020001:TOKEN_VERSION_TWO_2222222222222222"
+    repo = BotInstanceRepository(pg_session)
+    instance = await repo.create_bot_instance(
+        master_id=master.id,
+        telegram_bot_id=14020001,
+        encrypted_token=token_crypto.encrypt(token_v1, associated_data=14020001),
+        token_version=1,
+    )
+    replica_a = BotRegistry(token_crypto=token_crypto, ttl_seconds=300)
+    replica_b = BotRegistry(token_crypto=token_crypto, ttl_seconds=300)
+    try:
+        await replica_a.get_by_instance_id(instance.id, session=pg_session)
+        old_bot = await replica_b.get_by_instance_id(instance.id, session=pg_session)
+        await repo.update_encrypted_token(
+            instance.id,
+            encrypted_token=token_crypto.encrypt(token_v2, associated_data=14020001),
+            new_token_version=2,
+        )
+        await replica_a.publish_invalidation(instance.id, token_version=2)
+        assert replica_b._cache[instance.id].bot is old_bot
+
+        # Even without Pub/Sub, a webhook's DB version bypasses an unexpired cache.
+        new_bot = await replica_b.get_by_instance_id(
+            instance.id, session=pg_session, expected_token_version=2
+        )
+        assert new_bot is not old_bot
+        assert new_bot.token == token_v2
+
+        # Scheduler lookups (which lack an expected version) revalidate at TTL.
+        await repo.update_encrypted_token(
+            instance.id,
+            encrypted_token=token_crypto.encrypt(token_v1, associated_data=14020001),
+            new_token_version=3,
+        )
+        replica_b._cache[instance.id].expires_at = 0
+        after_ttl = await replica_b.get_by_instance_id(instance.id, session=pg_session)
+        assert after_ttl is not new_bot
+        assert after_ttl.token == token_v1
+
+        await repo.deprecate_current_for_master(master.id)
+        replica_b._cache[instance.id].expires_at = 0
+        with pytest.raises(BotUnavailableError):
+            await replica_b.get_by_instance_id(instance.id, session=pg_session)
+    finally:
+        await replica_a.close()
+        await replica_b.close()
+
+
+@requires_postgres
+@pytest.mark.asyncio
 async def test_registry_invalidate_bot_closes_old_resource(
     pg_session: AsyncSession, token_crypto: TokenCrypto
 ):
@@ -720,8 +776,8 @@ def test_logger_redacts_tokens_and_telegram_api_urls():
         exc_info=None,
     )
     filt.filter(record)
-    assert raw_token not in record.args[0]
-    assert "[REDACTED_BOT_TOKEN]" in record.args[0]
+    assert raw_token not in record.getMessage()
+    assert "[REDACTED_BOT_TOKEN]" in record.getMessage()
 
 
 def test_mask_token_preview():

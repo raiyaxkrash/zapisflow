@@ -59,12 +59,16 @@ class TenantContextMiddleware(BaseMiddleware):
             master_id = bot_instance.master_id
             data["master_id"] = master_id
 
-        # 2. If not provided, try to resolve via bot.id from DB
-        if master_id is None and session is not None:
+        # A numeric master_id alone is not proof of tenancy in webhook mode.
+        # Resolve the BotInstance server-side before any handler receives it.
+        if bot_instance is None and session is not None:
             if bot is not None and hasattr(bot, "id") and bot.id:
                 bot_repo = BotInstanceRepository(session)
                 instance = await bot_repo.get_by_telegram_bot_id(bot.id)
                 if instance is not None:
+                    if master_id is not None and master_id != instance.master_id:
+                        logger.error("Tenant context mismatch for resolved bot_instance #%s", instance.id)
+                        return None
                     if instance.status in (BotInstanceStatus.DISABLED, BotInstanceStatus.ERROR):
                         logger.warning(
                             "Rejecting update for bot_instance #%s with inactive status %s",
@@ -78,7 +82,7 @@ class TenantContextMiddleware(BaseMiddleware):
                     data["master_id"] = master_id
 
             # 3. If still unresolved, fallback to legacy tenant ONLY in polling mode
-            if master_id is None:
+            if bot_instance is None:
                 if settings.app_mode == "polling":
                     master_id = await LegacyTenantResolver.get_master_id(session)
                     data["master_id"] = master_id
@@ -90,12 +94,15 @@ class TenantContextMiddleware(BaseMiddleware):
                     )
                     return None  # Fail closed in webhook mode!
 
-        if master_id is None:
-            logger.error("Fail-closed: update rejected because master_id is None")
+        if master_id is None or (settings.app_mode == "webhook" and bot_instance is None):
+            logger.error("Fail-closed: update rejected without trusted tenant context")
+            return None
+        if settings.app_mode == "webhook" and session is None:
+            logger.error("Fail-closed: webhook update rejected without database session")
             return None
 
-        # 4. Resolve Master entity if session available and not already in data
-        if session is not None and data.get("master") is None:
+        # Always resolve the Master from the verified id; never trust a supplied object.
+        if session is not None:
             master_repo = MasterRepository(session)
             master = await master_repo.get_by_id(master_id)
             if not master:

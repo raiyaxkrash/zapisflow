@@ -53,6 +53,7 @@ def test_production_config_validation_passes_valid() -> None:
         MANAGER_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ",
         MANAGER_WEBHOOK_SECRET="secure_random_manager_webhook_secret_32chars_long",
         BOT_TOKEN_ENCRYPTION_KEY=valid_key,
+        REDIS_PASSWORD="test_redis_password",
         DATABASE_URL="postgresql+asyncpg://beauty_user:secure_pwd@db.internal:5432/beauty_bot_prod",
     )
     assert prod_settings.is_production is True
@@ -165,6 +166,22 @@ async def test_manual_billing_blocked_in_production(pg_session) -> None:
             )
 
 
+@pytest.mark.asyncio
+async def test_production_does_not_create_manual_payment_intent(pg_session) -> None:
+    user = User(telegram_id=99902, first_name="No fake checkout")
+    pg_session.add(user)
+    await pg_session.flush()
+    master = Master(owner_user_id=user.id, display_name="No fake checkout")
+    pg_session.add(master)
+    await pg_session.flush()
+
+    with patch.object(settings, "app_env", "production"):
+        with pytest.raises(SubscriptionError, match="Автоматическая оплата временно недоступна"):
+            await SubscriptionService(pg_session).create_subscription_payment(
+                master_id=master.id, actor_user_id=user.id,
+            )
+
+
 def test_subscription_keyboard_hides_manual_confirmation_in_production() -> None:
     """Keyboard hides manual test confirmation button in production mode."""
     with patch.object(settings, "app_env", "production"):
@@ -181,6 +198,33 @@ def test_subscription_keyboard_hides_manual_confirmation_in_production() -> None
         kb_dev = subscription_payment_keyboard(master_id=1, payment_id=42)
         all_dev_callbacks = [btn.callback_data for row in kb_dev.inline_keyboard for btn in row if btn.callback_data]
         assert any("mgr:sub:confirm:1:42" in cb for cb in all_dev_callbacks)
+
+
+@pytest.mark.asyncio
+async def test_production_payment_screen_creates_no_fake_checkout() -> None:
+    callback = AsyncMock()
+    callback.data = "mgr:sub:pay:7:basic_monthly"
+    callback.from_user = MagicMock()
+    owner = User(id=11, telegram_id=12345678)
+    master = Master(id=7, owner_user_id=owner.id, display_name="Salon")
+    session = AsyncMock()
+    session.get.return_value = master
+
+    with patch.object(settings, "app_env", "production"), \
+         patch("app.manager_bot.handlers._get_or_create_user", return_value=owner), \
+         patch("app.manager_bot.handlers.SubscriptionService") as service_type:
+        await cb_subscription_pay(callback, session)
+        service_type.assert_not_called()
+    session.commit.assert_not_awaited()
+    callback.message.edit_text.assert_awaited_once()
+    text = callback.message.edit_text.call_args.args[0]
+    assert "Автоматическая оплата временно недоступна" in text
+    assert settings.support_tag in text
+    keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+    assert not any(
+        button.url and "mock-checkout" in button.url
+        for row in keyboard.inline_keyboard for button in row
+    )
 
 
 @pytest.mark.asyncio

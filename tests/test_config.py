@@ -1,6 +1,9 @@
 """The committed environment example must parse with the real settings class."""
 
 from pathlib import Path
+import importlib
+
+import pytest
 
 from app.config.settings import Settings
 from sqlalchemy.engine import make_url
@@ -29,3 +32,34 @@ def test_database_url_and_pool_settings() -> None:
     assert configured.db_max_overflow == 25
     assert configured.db_pool_timeout == 45
     assert "mypass" not in configured.safe_database_url
+
+
+def test_asyncpg_is_in_canonical_dependencies() -> None:
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "asyncpg==" in requirements
+    assert "asyncpg>=" in pyproject
+    assert importlib.import_module("asyncpg")
+
+
+def test_redis_password_is_used_and_required_in_production() -> None:
+    configured = Settings(_env_file=None, REDIS_PASSWORD="safe_password-1")
+    assert configured.redis_url == "redis://:safe_password-1@localhost:6379/0"
+
+    production = Settings(
+        _env_file=None,
+        APP_ENV="production",
+        APP_MODE="webhook",
+        REDIS_PASSWORD="",
+    )
+    with pytest.raises(ValueError, match="REDIS_PASSWORD is required"):
+        production.validate_production_configuration()
+
+    invalid = Settings(
+        _env_file=None,
+        APP_ENV="production",
+        APP_MODE="webhook",
+        REDIS_PASSWORD="bad password",
+    )
+    with pytest.raises(ValueError, match="REDIS_PASSWORD must use only URL-safe"):
+        invalid.validate_production_configuration()

@@ -31,16 +31,13 @@
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
-        # Explicitly forward Telegram secret token header
-        header_up X-Telegram-Bot-Api-Secret-Token {http.x-telegram-bot-api-secret-token}
-
         # Connection and response timeouts
         transport http {
             dial_timeout 5s
             response_header_timeout 30s
             read_timeout 30s
             write_timeout 30s
-            max_idle_conns 100
+            keepalive_idle_conns 100
         }
     }
 }

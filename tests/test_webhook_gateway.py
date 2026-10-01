@@ -262,7 +262,7 @@ async def test_webhook_secret_token_constant_time_verification(
 
     mock_bot = MagicMock(spec=Bot)
     mock_registry = AsyncMock(spec=BotRegistry)
-    mock_registry.get_bot = AsyncMock(return_value=mock_bot)
+    mock_registry.get_by_instance_id = AsyncMock(return_value=mock_bot)
 
     mock_session_factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
     dedup = UpdateDeduplicator(fake_redis)
@@ -469,7 +469,15 @@ async def test_webhook_inactive_bot_states_rejected(
         status=BotInstanceStatus.PROVISIONING,
         is_current=False,
     )
-    pg_session.add_all([bot_disabled, bot_error, bot_prov])
+    bot_replaced = BotInstance(
+        public_id=uuid.uuid4(),
+        master_id=master.id,
+        telegram_bot_id=444555664,
+        webhook_secret="sec_replaced",
+        status=BotInstanceStatus.ACTIVE,
+        is_current=False,
+    )
+    pg_session.add_all([bot_disabled, bot_error, bot_prov, bot_replaced])
     await pg_session.commit()
 
     mock_session_factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
@@ -502,6 +510,13 @@ async def test_webhook_inactive_bot_states_rejected(
         )
         assert res_prov.status_code == 403
         assert "PROVISIONING" in res_prov.json()["detail"]
+
+        res_replaced = await client.post(
+            f"/telegram/webhook/{bot_replaced.public_id}",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "sec_replaced"},
+            json=update_data,
+        )
+        assert res_replaced.status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +563,7 @@ async def test_webhook_deduplication_lifecycle(
 
     mock_bot = MagicMock(spec=Bot)
     mock_registry = AsyncMock(spec=BotRegistry)
-    mock_registry.get_bot = AsyncMock(return_value=mock_bot)
+    mock_registry.get_by_instance_id = AsyncMock(return_value=mock_bot)
 
     mock_session_factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
     dedup = UpdateDeduplicator(fake_redis)
@@ -689,11 +704,11 @@ async def test_webhook_tenant_isolation_two_masters(
     mock_dp.feed_update = AsyncMock(side_effect=mock_feed)
 
     mock_registry = AsyncMock(spec=BotRegistry)
-    def get_mock_bot(instance_id: int):
+    def get_mock_bot(instance_id: int, **_kwargs):
         b = MagicMock(spec=Bot)
         b.id = 666111222 if instance_id == bot_a.id else 666333444
         return b
-    mock_registry.get_bot = AsyncMock(side_effect=get_mock_bot)
+    mock_registry.get_by_instance_id = AsyncMock(side_effect=get_mock_bot)
 
     mock_session_factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
     dedup = UpdateDeduplicator(fake_redis)

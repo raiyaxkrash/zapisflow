@@ -4,6 +4,7 @@ Claims due notifications using PostgreSQL FOR UPDATE SKIP LOCKED, commits before
 routes via dynamic tenant BotRegistry, and handles transient retries and permanent bot blocks.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Optional
@@ -32,6 +33,30 @@ from app.services.exceptions import BotDisabledError, BotUnavailableError
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
 
 logger = logging.getLogger("app.scheduler.reminder_worker")
+
+
+async def _maintain_claims(
+    session_maker: async_sessionmaker,
+    worker_id: str,
+    attempts: dict[int, int],
+    stop: asyncio.Event,
+    timeout_seconds: int,
+) -> None:
+    """Renew owned leases while a batch is processed, including slow Telegram calls."""
+    interval = max(0.1, timeout_seconds / 3)
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+        try:
+            async with session_maker() as session:
+                repo = NotificationRepository(session)
+                await repo.renew_claims(worker_id, attempts)
+                await session.commit()
+        except Exception as exc:
+            logger.error("Failed to renew reminder claims for worker %s: %s", worker_id, exc)
 
 
 async def send_visit_reminders(
@@ -82,6 +107,7 @@ async def send_visit_reminders(
 
     # 3. Claim due notifications in a short atomic transaction
     claimed_ids: list[int] = []
+    claimed_attempts: dict[int, int] = {}
     try:
         async with session_maker() as session:
             notif_repo = NotificationRepository(session)
@@ -91,6 +117,7 @@ async def send_visit_reminders(
                 max_attempts=actual_max_attempts,
             )
             claimed_ids = [n.id for n in claimed]
+            claimed_attempts = {n.id: n.attempt_count for n in claimed}
             await session.commit()
     except Exception as exc:
         logger.error("Error claiming due notifications: %s", exc, exc_info=True)
@@ -100,171 +127,87 @@ async def send_visit_reminders(
         return 0
 
     # 4. Dispatch each claimed notification individually outside the claim transaction
-    for notification_id in claimed_ids:
-        try:
-            # Fetch notification details in a clean read session
-            async with session_maker() as session:
-                stmt = (
-                    select(Notification)
-                    .where(Notification.id == notification_id)
-                    .options(
-                        selectinload(Notification.appointment).selectinload(Appointment.user),
-                    )
-                )
-                res = await session.execute(stmt)
-                notif = res.scalars().first()
-
-            if not notif:
-                continue
-
-            # 1. Verify that notification is STILL in PROCESSING and claimed by this worker
-            if notif.status != NotificationStatus.PROCESSING or notif.claimed_by != actual_worker_id:
-                logger.info(
-                    "Notification #%s claim superseded (status=%s, claimed_by=%s), aborting send",
-                    notification_id,
-                    notif.status,
-                    notif.claimed_by,
-                )
-                continue
-
-            app = notif.appointment
-            if not app:
+    lease_stop = asyncio.Event()
+    lease_task = asyncio.create_task(
+        _maintain_claims(
+            session_maker, actual_worker_id, claimed_attempts, lease_stop,
+            settings.job_processing_timeout_seconds,
+        )
+    )
+    try:
+        for notification_id in claimed_ids:
+            try:
+                # Fetch notification details in a clean read session
                 async with session_maker() as session:
-                    await NotificationRepository(session).mark_cancelled(
-                        notification_id, "No appointment linked"
+                    stmt = (
+                        select(Notification)
+                        .where(Notification.id == notification_id)
+                        .options(
+                            selectinload(Notification.appointment).selectinload(Appointment.user),
+                        )
                     )
-                    await session.commit()
-                continue
+                    res = await session.execute(stmt)
+                    notif = res.scalars().first()
 
-            # 2. Re-verify appointment status: must still be CONFIRMED!
-            if app.status != AppointmentStatus.CONFIRMED:
-                async with session_maker() as session:
-                    await NotificationRepository(session).mark_cancelled(
-                        notification_id, f"Appointment status is {app.status}"
-                    )
-                    await session.commit()
-                continue
-
-            # 3. Re-verify appointment is still in the future
-            now_utc = datetime.now(timezone.utc)
-            app_start = app.start_time if app.start_time.tzinfo else app.start_time.replace(tzinfo=timezone.utc)
-            if app_start <= now_utc:
-                logger.info("Appointment #%s has already started or passed, cancelling reminder #%s", app.id, notification_id)
-                async with session_maker() as session:
-                    await NotificationRepository(session).mark_cancelled(
-                        notification_id, "Appointment start_time has already passed"
-                    )
-                    await session.commit()
-                continue
-
-            user = app.user
-            if not user or not user.telegram_id or user.telegram_id <= 0:
-                async with session_maker() as session:
-                    await NotificationRepository(session).mark_failed(
-                        notification_id, "Invalid user or telegram_id", retry_delay_seconds=None
-                    )
-                    await session.commit()
-                continue
-
-            # Check if user has blocked the bot in master_clients
-            async with session_maker() as session:
-                mc_res = await session.execute(
-                    select(MasterClient).where(
-                        MasterClient.master_id == app.master_id,
-                        MasterClient.user_id == user.id,
-                    )
-                )
-                mc = mc_res.scalars().first()
-                if mc and mc.is_bot_blocked:
-                    await NotificationRepository(session).mark_failed(
-                        notification_id,
-                        "MasterClient is marked bot_blocked",
-                        retry_delay_seconds=None,
-                    )
-                    await session.commit()
+                if not notif:
                     continue
 
-            # Resolve bot instance with specific policy handling
-            target_bot: Optional[Bot] = None
-            bot_lookup_error: Optional[str] = None
-            bot_retry_delay: Optional[int] = 60
-
-            if registry:
-                try:
-                    target_bot = await registry.get_by_master_id(app.master_id)
-                except BotDisabledError:
-                    bot_lookup_error = "BotInstance is DISABLED (no delivery)"
-                    bot_retry_delay = 3600  # Avoid hot-looping, long backoff
-                except BotUnavailableError as exc:
-                    bot_lookup_error = f"BotInstance unavailable (ERROR): {exc}"
-                    bot_retry_delay = 300  # 5 min backoff
-                except Exception as exc:
-                    bot_lookup_error = f"BotRegistry error: {exc}"
-                    bot_retry_delay = 60
-
-            if not target_bot:
-                target_bot = bot
-
-            if not target_bot:
-                async with session_maker() as session:
-                    await NotificationRepository(session).mark_failed(
+                # 1. Verify that notification is STILL in PROCESSING and claimed by this worker
+                if notif.status != NotificationStatus.PROCESSING or notif.claimed_by != actual_worker_id:
+                    logger.info(
+                        "Notification #%s claim superseded (status=%s, claimed_by=%s), aborting send",
                         notification_id,
-                        bot_lookup_error or f"No active bot found for master #{app.master_id}",
-                        retry_delay_seconds=bot_retry_delay,
-                        max_attempts=actual_max_attempts,
+                        notif.status,
+                        notif.claimed_by,
                     )
-                    await session.commit()
-                continue
+                    continue
 
-            # Prepare localized message content
-            async with session_maker() as session:
-                master = await session.get(Master, app.master_id)
-                m_settings_repo = MasterSettingsRepository(session)
-                m_settings = await m_settings_repo.get_by_master_id(app.master_id)
+                claim_attempt = claimed_attempts[notification_id]
+                if notif.attempt_count != claim_attempt:
+                    logger.info("Notification #%s claim generation changed, aborting", notification_id)
+                    continue
 
-            tz_str = (
-                (master.timezone if master and master.timezone else None)
-                or settings.timezone
-            )
-            studio_address = (
-                m_settings.studio_address
-                if m_settings and m_settings.studio_address
-                else "Адрес студии мастера"
-            )
+                app = notif.appointment
+                if not app:
+                    async with session_maker() as session:
+                        await NotificationRepository(session).mark_cancelled(
+                            notification_id, actual_worker_id, claim_attempt, "No appointment linked"
+                        )
+                        await session.commit()
+                    continue
 
-            if notif.type == NotificationType.REMINDER_24H:
-                dt_str = format_datetime_ru(app.start_time, tz_name=tz_str)
-                rem_amount = app.snapshot_service_price - app.snapshot_deposit_amount
-                rem_str = format_rub(rem_amount)
-                msg_text = (
-                    f"🌸 <b>Напоминание о записи на завтра!</b>\n\n"
-                    f"Напоминаем, что вы записаны на <b>{app.snapshot_service_title}</b>:\n"
-                    f"🗓 <b>Дата и время:</b> {dt_str}\n"
-                    f"📍 <b>Адрес:</b> {studio_address}\n"
-                    f"💰 <b>К доплате на месте:</b> {rem_str}\n\n"
-                    "Если ваши планы изменились, пожалуйста, предупредите мастера заранее ❤️"
-                )
-            elif notif.type == NotificationType.REMINDER_3H:
-                time_str = format_time_ru(app.start_time, tz_name=tz_str)
-                msg_text = (
-                    f"⏰ <b>Скоро ваша запись!</b>\n\n"
-                    f"Через несколько часов мы ждём вас на <b>{app.snapshot_service_title}</b>:\n"
-                    f"🗓 <b>Время визита:</b> {time_str}\n"
-                    f"📍 <b>Адрес:</b> {studio_address}\n\n"
-                    "Пожалуйста, приходите без опозданий. До скорой встречи! 🌸"
-                )
-            else:
-                msg_text = f"Напоминание о записи #{app.id} ({app.snapshot_service_title})"
+                # 2. Re-verify appointment status: must still be CONFIRMED!
+                if app.status != AppointmentStatus.CONFIRMED:
+                    async with session_maker() as session:
+                        await NotificationRepository(session).mark_cancelled(
+                            notification_id, actual_worker_id, claim_attempt, f"Appointment status is {app.status}"
+                        )
+                        await session.commit()
+                    continue
 
-            # Perform external network delivery
-            delivered = False
-            try:
-                await target_bot.send_message(chat_id=user.telegram_id, text=msg_text)
-                delivered = True
-            except TelegramForbiddenError:
-                logger.warning(
-                    "Bot blocked by user %s on reminder #%s", user.telegram_id, notification_id
-                )
+                # 3. Re-verify appointment is still in the future
+                now_utc = datetime.now(timezone.utc)
+                app_start = app.start_time if app.start_time.tzinfo else app.start_time.replace(tzinfo=timezone.utc)
+                if app_start <= now_utc:
+                    logger.info("Appointment #%s has already started or passed, cancelling reminder #%s", app.id, notification_id)
+                    async with session_maker() as session:
+                        await NotificationRepository(session).mark_cancelled(
+                            notification_id, actual_worker_id, claim_attempt, "Appointment start_time has already passed"
+                        )
+                        await session.commit()
+                    continue
+
+                user = app.user
+                if not user or not user.telegram_id or user.telegram_id <= 0:
+                    async with session_maker() as session:
+                        await NotificationRepository(session).mark_failed(
+                            notification_id, "Invalid user or telegram_id",
+                            actual_worker_id, claim_attempt, retry_delay_seconds=None
+                        )
+                        await session.commit()
+                    continue
+
+                # Check if user has blocked the bot in master_clients
                 async with session_maker() as session:
                     mc_res = await session.execute(
                         select(MasterClient).where(
@@ -273,59 +216,163 @@ async def send_visit_reminders(
                         )
                     )
                     mc = mc_res.scalars().first()
-                    if mc:
-                        mc.is_bot_blocked = True
-                    await NotificationRepository(session).mark_failed(
-                        notification_id,
-                        "Bot blocked by user (TelegramForbiddenError)",
-                        retry_delay_seconds=None,
-                        max_attempts=actual_max_attempts,
-                    )
-                    await session.commit()
-            except TelegramRetryAfter as exc:
-                logger.warning(
-                    "Telegram rate limited reminder #%s, retry after %s s",
-                    notification_id,
-                    exc.retry_after,
-                )
+                    if mc and mc.is_bot_blocked:
+                        await NotificationRepository(session).mark_failed(
+                            notification_id,
+                            "MasterClient is marked bot_blocked",
+                            actual_worker_id, claim_attempt,
+                            retry_delay_seconds=None,
+                        )
+                        await session.commit()
+                        continue
+
+                # Resolve bot instance with specific policy handling
+                target_bot: Optional[Bot] = None
+                bot_lookup_error: Optional[str] = None
+                bot_retry_delay: Optional[int] = 60
+
+                if registry:
+                    try:
+                        target_bot = await registry.get_by_master_id(app.master_id)
+                    except BotDisabledError:
+                        bot_lookup_error = "BotInstance is DISABLED (no delivery)"
+                        bot_retry_delay = 3600  # Avoid hot-looping, long backoff
+                    except BotUnavailableError as exc:
+                        bot_lookup_error = f"BotInstance unavailable (ERROR): {exc}"
+                        bot_retry_delay = 300  # 5 min backoff
+                    except Exception as exc:
+                        bot_lookup_error = f"BotRegistry error: {exc}"
+                        bot_retry_delay = 60
+
+                if not target_bot:
+                    target_bot = bot
+
+                if not target_bot:
+                    async with session_maker() as session:
+                        await NotificationRepository(session).mark_failed(
+                            notification_id,
+                            bot_lookup_error or f"No active bot found for master #{app.master_id}",
+                            actual_worker_id, claim_attempt,
+                            retry_delay_seconds=bot_retry_delay,
+                            max_attempts=actual_max_attempts,
+                        )
+                        await session.commit()
+                    continue
+
+                # Prepare localized message content
                 async with session_maker() as session:
-                    await NotificationRepository(session).mark_failed(
-                        notification_id,
-                        f"Rate limited: retry after {exc.retry_after}s",
-                        retry_delay_seconds=int(exc.retry_after) + 1,
-                        max_attempts=actual_max_attempts,
+                    master = await session.get(Master, app.master_id)
+                    m_settings_repo = MasterSettingsRepository(session)
+                    m_settings = await m_settings_repo.get_by_master_id(app.master_id)
+
+                tz_str = (
+                    (master.timezone if master and master.timezone else None)
+                    or settings.timezone
+                )
+                studio_address = (
+                    m_settings.studio_address
+                    if m_settings and m_settings.studio_address
+                    else "Адрес студии мастера"
+                )
+
+                if notif.type == NotificationType.REMINDER_24H:
+                    dt_str = format_datetime_ru(app.start_time, tz_name=tz_str)
+                    rem_amount = app.snapshot_service_price - app.snapshot_deposit_amount
+                    rem_str = format_rub(rem_amount)
+                    msg_text = (
+                        f"🌸 <b>Напоминание о записи на завтра!</b>\n\n"
+                        f"Напоминаем, что вы записаны на <b>{app.snapshot_service_title}</b>:\n"
+                        f"🗓 <b>Дата и время:</b> {dt_str}\n"
+                        f"📍 <b>Адрес:</b> {studio_address}\n"
+                        f"💰 <b>К доплате на месте:</b> {rem_str}\n\n"
+                        "Если ваши планы изменились, пожалуйста, предупредите мастера заранее ❤️"
                     )
-                    await session.commit()
+                elif notif.type == NotificationType.REMINDER_3H:
+                    time_str = format_time_ru(app.start_time, tz_name=tz_str)
+                    msg_text = (
+                        f"⏰ <b>Скоро ваша запись!</b>\n\n"
+                        f"Через несколько часов мы ждём вас на <b>{app.snapshot_service_title}</b>:\n"
+                        f"🗓 <b>Время визита:</b> {time_str}\n"
+                        f"📍 <b>Адрес:</b> {studio_address}\n\n"
+                        "Пожалуйста, приходите без опозданий. До скорой встречи! 🌸"
+                    )
+                else:
+                    msg_text = f"Напоминание о записи #{app.id} ({app.snapshot_service_title})"
+
+                # Hold the PostgreSQL row lock until the Telegram call and its
+                # outcome commit. A failed heartbeat cannot make an in-flight
+                # send reclaimable by another replica.
+                delivered = False
+                marked_sent = False
+                async with session_maker() as session:
+                    async with session.begin():
+                        repo = NotificationRepository(session)
+                        if not await repo.lock_owned_claim(notification_id, actual_worker_id, claim_attempt):
+                            logger.info("Reminder #%s claim was superseded before send", notification_id)
+                            continue
+                        try:
+                            await target_bot.send_message(chat_id=user.telegram_id, text=msg_text)
+                            delivered = True
+                            marked_sent = await repo.mark_sent(
+                                notification_id, actual_worker_id, claim_attempt
+                            )
+                        except TelegramForbiddenError:
+                            logger.warning(
+                                "Bot blocked by user %s on reminder #%s", user.telegram_id, notification_id
+                            )
+                            mc_res = await session.execute(
+                                select(MasterClient).where(
+                                    MasterClient.master_id == app.master_id,
+                                    MasterClient.user_id == user.id,
+                                )
+                            )
+                            mc = mc_res.scalars().first()
+                            if mc:
+                                mc.is_bot_blocked = True
+                            await repo.mark_failed(
+                                notification_id, "Bot blocked by user (TelegramForbiddenError)",
+                                actual_worker_id, claim_attempt,
+                                retry_delay_seconds=None, max_attempts=actual_max_attempts,
+                            )
+                        except TelegramRetryAfter as exc:
+                            logger.warning(
+                                "Telegram rate limited reminder #%s, retry after %s s",
+                                notification_id, exc.retry_after,
+                            )
+                            await repo.mark_failed(
+                                notification_id, f"Rate limited: retry after {exc.retry_after}s",
+                                actual_worker_id, claim_attempt,
+                                retry_delay_seconds=int(exc.retry_after) + 1,
+                                max_attempts=actual_max_attempts,
+                            )
+                        except Exception as exc:
+                            delay = 30 * (2 ** notif.attempt_count)
+                            logger.warning(
+                                "Error delivering reminder #%s (attempt %s): %s",
+                                notification_id, notif.attempt_count, exc,
+                            )
+                            await repo.mark_failed(
+                                notification_id, str(exc), actual_worker_id, claim_attempt,
+                                retry_delay_seconds=delay, max_attempts=actual_max_attempts,
+                            )
+
+                if delivered:
+                    if not marked_sent:
+                        logger.warning("Reminder #%s was sent but claim was superseded before commit", notification_id)
+                        continue
+                    sent_count += 1
+                    logger.info(
+                        "Sent reminder #%s for appointment #%s to telegram_id=%s",
+                        notification_id,
+                        app.id,
+                        user.telegram_id,
+                    )
+
             except Exception as exc:
-                delay = 30 * (2 ** notif.attempt_count)
-                logger.warning(
-                    "Error delivering reminder #%s (attempt %s): %s",
-                    notification_id,
-                    notif.attempt_count,
-                    exc,
-                )
-                async with session_maker() as session:
-                    await NotificationRepository(session).mark_failed(
-                        notification_id,
-                        str(exc),
-                        retry_delay_seconds=delay,
-                        max_attempts=actual_max_attempts,
-                    )
-                    await session.commit()
+                logger.error("Unhandled error processing reminder #%s: %s", notification_id, exc, exc_info=True)
 
-            if delivered:
-                async with session_maker() as session:
-                    await NotificationRepository(session).mark_sent(notification_id)
-                    await session.commit()
-                sent_count += 1
-                logger.info(
-                    "Sent reminder #%s for appointment #%s to telegram_id=%s",
-                    notification_id,
-                    app.id,
-                    user.telegram_id,
-                )
-
-        except Exception as exc:
-            logger.error("Unhandled error processing reminder #%s: %s", notification_id, exc, exc_info=True)
+    finally:
+        lease_stop.set()
+        await lease_task
 
     return sent_count

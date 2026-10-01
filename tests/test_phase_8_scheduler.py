@@ -638,6 +638,165 @@ async def test_08_reminder_worker_concurrent_claims_skip_locked(pg_engine: Async
 
 @requires_postgres
 @pytest.mark.asyncio
+async def test_reminder_slow_batch_keeps_lease_across_replicas(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow first send must not let another replica reclaim later batch rows."""
+    monkeypatch.setattr(settings, "job_processing_timeout_seconds", 1)
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_Lease")
+        master = await _create_master(session, owner.id, "Master_Lease")
+        svc = await _create_service(session, master.id, "Service_Lease")
+        ids = []
+        for index in range(2):
+            client = await _create_user(session, first_name=f"Client_Lease_{index}")
+            appointment = await _create_appointment(
+                session, master.id, client.id, svc,
+                now_utc + timedelta(hours=20, minutes=index * 90), AppointmentStatus.CONFIRMED,
+            )
+            notification = Notification(
+                appointment_id=appointment.id,
+                type=NotificationType.REMINDER_24H,
+                scheduled_at=now_utc - timedelta(minutes=5),
+                status=NotificationStatus.PENDING,
+            )
+            session.add(notification)
+            await session.flush()
+            ids.append(notification.id)
+        await session.commit()
+
+    sending = asyncio.Event()
+    release = asyncio.Event()
+    bot = AsyncMock(spec=Bot)
+
+    async def slow_send(*args, **kwargs):
+        sending.set()
+        await release.wait()
+        return MagicMock()
+
+    bot.send_message.side_effect = slow_send
+    first = asyncio.create_task(send_visit_reminders(
+        bot=bot, session_maker=session_maker, worker_id="lease_owner",
+        batch_size=2, auto_generate=False,
+    ))
+    try:
+        await asyncio.wait_for(sending.wait(), timeout=5)
+        await asyncio.sleep(1.4)  # Exceeds the one-second stale-claim timeout.
+        second_count = await send_visit_reminders(
+            bot=bot, session_maker=session_maker, worker_id="other_replica",
+            batch_size=2, auto_generate=False,
+        )
+        assert second_count == 0
+    finally:
+        release.set()
+    assert await asyncio.wait_for(first, timeout=5) == 2
+    assert bot.send_message.await_count == 2
+    async with session_maker() as session:
+        rows = (await session.execute(select(Notification).where(Notification.id.in_(ids)))).scalars().all()
+        assert all(row.status == NotificationStatus.SENT for row in rows)
+        assert all(row.attempt_count == 1 for row in rows)
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_reminder_row_lock_prevents_duplicate_when_heartbeat_fails(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second replica cannot reclaim an in-flight Telegram call after lease expiry."""
+    monkeypatch.setattr(settings, "job_processing_timeout_seconds", 1)
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_NoHeartbeat")
+        client = await _create_user(session, first_name="Client_NoHeartbeat")
+        master = await _create_master(session, owner.id, "Master_NoHeartbeat")
+        svc = await _create_service(session, master.id, "Service_NoHeartbeat")
+        appointment = await _create_appointment(
+            session, master.id, client.id, svc,
+            now_utc + timedelta(hours=20), AppointmentStatus.CONFIRMED,
+        )
+        notification = Notification(
+            appointment_id=appointment.id, type=NotificationType.REMINDER_24H,
+            scheduled_at=now_utc - timedelta(minutes=5), status=NotificationStatus.PENDING,
+        )
+        session.add(notification)
+        await session.commit()
+        notification_id = notification.id
+
+    sending = asyncio.Event()
+    release = asyncio.Event()
+    bot = AsyncMock(spec=Bot)
+
+    async def slow_first_send(*args, **kwargs):
+        if bot.send_message.await_count == 1:
+            sending.set()
+            await release.wait()
+        return MagicMock()
+
+    bot.send_message.side_effect = slow_first_send
+    with patch.object(NotificationRepository, "renew_claims", side_effect=RuntimeError("heartbeat down")):
+        first = asyncio.create_task(send_visit_reminders(
+            bot=bot, session_maker=session_maker, worker_id="locked_sender", auto_generate=False,
+        ))
+        try:
+            await asyncio.wait_for(sending.wait(), timeout=5)
+            await asyncio.sleep(1.4)
+            second_count = await asyncio.wait_for(send_visit_reminders(
+                bot=bot, session_maker=session_maker,
+                worker_id="would_be_duplicate", auto_generate=False,
+            ), timeout=5)
+            assert second_count == 0
+            assert bot.send_message.await_count == 1
+        finally:
+            release.set()
+        assert await asyncio.wait_for(first, timeout=5) == 1
+
+    async with session_maker() as session:
+        row = await session.get(Notification, notification_id)
+        assert row.status == NotificationStatus.SENT
+        assert row.attempt_count == 1
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_reminder_final_status_requires_current_claim_owner(pg_engine: AsyncEngine) -> None:
+    """A stale worker cannot overwrite a later worker's notification state."""
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    now_utc = datetime.now(timezone.utc)
+    async with session_maker() as session:
+        owner = await _create_user(session, first_name="Owner_CAS")
+        client = await _create_user(session, first_name="Client_CAS")
+        master = await _create_master(session, owner.id, "Master_CAS")
+        svc = await _create_service(session, master.id, "Service_CAS")
+        appointment = await _create_appointment(
+            session, master.id, client.id, svc,
+            now_utc + timedelta(hours=20), AppointmentStatus.CONFIRMED,
+        )
+        notification = Notification(
+            appointment_id=appointment.id, type=NotificationType.REMINDER_24H,
+            scheduled_at=now_utc - timedelta(minutes=5), status=NotificationStatus.PENDING,
+        )
+        session.add(notification)
+        await session.commit()
+        notification_id = notification.id
+
+    async with session_maker() as session:
+        repo = NotificationRepository(session)
+        claimed = await repo.claim_due_notifications("owner_1", batch_size=1)
+        attempt = claimed[0].attempt_count
+        assert await repo.mark_sent(notification_id, "owner_2", attempt) is False
+        assert await repo.mark_failed(notification_id, "stale", "owner_1", attempt + 1) is False
+        assert await repo.mark_sent(notification_id, "owner_1", attempt) is True
+        await session.commit()
+    async with session_maker() as session:
+        row = await session.get(Notification, notification_id)
+        assert row.status == NotificationStatus.SENT
+
+
+@requires_postgres
+@pytest.mark.asyncio
 async def test_09_reminder_worker_telegram_forbidden_marks_bot_blocked_per_master(
     pg_engine: AsyncEngine,
 ) -> None:

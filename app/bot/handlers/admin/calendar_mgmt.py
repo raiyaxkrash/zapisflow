@@ -27,7 +27,6 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.repositories.user_repository import UserRepository
 from app.services.master_authorization_service import MasterAuthorizationService
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import RU_WEEKDAYS_FULL, format_rub
 
 router = Router(name="admin_calendar_mgmt")
@@ -107,13 +106,12 @@ async def format_day_info(
 
 @router.callback_query(AdminMenuCallback.filter(F.action == "calendar"))
 async def cb_admin_calendar_root(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Open master calendar month view.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
@@ -134,12 +132,11 @@ async def cb_admin_calendar_root(
 async def cb_admin_calendar_month_nav(
     callback: CallbackQuery,
     callback_data: AdminCalendarCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Navigate between months in calendar.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
@@ -158,13 +155,12 @@ async def cb_admin_calendar_day_select(
     callback: CallbackQuery,
     callback_data: AdminCalendarCallback,
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Open day management card for the selected date.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     target_date = date(callback_data.year, callback_data.month, callback_data.day)
     text, is_day_off = await format_day_info(target_date, session, master_id=master_id)
 
@@ -178,12 +174,11 @@ async def cb_admin_calendar_day_select(
 async def cb_admin_calendar_toggle_day_off(
     callback: CallbackQuery,
     callback_data: AdminCalendarCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Toggle day off status for the date.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     target_date = date(callback_data.year, callback_data.month, callback_data.day)
     schedule_repo = ScheduleRepository(session)
 
@@ -254,7 +249,7 @@ async def cb_admin_calendar_set_hours_prompt(
 
 @router.message(AdminScheduleDaySG.setting_hours, F.text)
 async def msg_admin_calendar_save_hours(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Validate and save custom working hours.
@@ -281,7 +276,6 @@ async def msg_admin_calendar_save_hours(
         return
 
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     schedule_repo = ScheduleRepository(session)
     await schedule_repo.set_date_exception(
         target_date=target_date,
@@ -346,7 +340,7 @@ async def cb_admin_calendar_block_slot_prompt(
 
 @router.message(AdminScheduleDaySG.blocking_slot_start, F.text)
 async def msg_admin_calendar_save_blocked_slot(
-    message: Message, state: FSMContext, db_user: User, session: AsyncSession
+    message: Message, state: FSMContext, db_user: User, session: AsyncSession, master_id: int
 ) -> None:
     """
     Parse blocked interval and insert BlockedInterval record.
@@ -373,7 +367,6 @@ async def msg_admin_calendar_save_blocked_slot(
         await message.answer("⚠️ Начало интервала должно быть раньше окончания.")
         return
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     tz = pytz.timezone(tz_str)
@@ -411,13 +404,12 @@ async def msg_admin_calendar_save_blocked_slot(
 async def cb_admin_calendar_day_bookings(
     callback: CallbackQuery,
     callback_data: AdminCalendarCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     List all appointments booked on the selected day.
     """
     target_date = date(callback_data.year, callback_data.month, callback_data.day)
-    master_id = await LegacyTenantResolver.get_master_id(session)
     settings_repo = MasterSettingsRepository(session)
     app_repo = AppointmentRepository(session)
 

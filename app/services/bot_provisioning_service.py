@@ -139,6 +139,9 @@ class BotProvisioningService:
                 raise DuplicateBotError("Для данного проекта уже выполняется подключение бота.") from exc
             raise DuplicateBotError("Конфликт при подключении бота.") from exc
 
+        if existing_current and self.registry:
+            await self.registry.invalidate_bot(existing_current.id, reason="bot_reconnected")
+
         await self.audit_service.log_event(
             action=AuditEvent.BOT_PROVISION_STARTED,
             actor_user_id=actor_user_id,
@@ -172,6 +175,8 @@ class BotProvisioningService:
             bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
             bot_instance.last_error = None
             await self.session.commit()
+            if self.registry:
+                await self.registry.invalidate_bot(bot_instance.id, reason="bot_reconnected")
 
             await self.audit_service.log_event(
                 action=AuditEvent.BOT_CONNECTED,
@@ -239,6 +244,8 @@ class BotProvisioningService:
             bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
             bot_instance.last_error = None
             await self.session.commit()
+            if self.registry:
+                await self.registry.invalidate_bot(bot_instance.id, reason="bot_reconnected")
 
             await self.audit_service.log_event(
                 action=AuditEvent.BOT_CONNECTED,
@@ -454,7 +461,10 @@ class BotProvisioningService:
             orig_str = str(exc.orig) if hasattr(exc, "orig") else str(exc)
             if "uq_bot_instances_active_per_master" in orig_str:
                 return False, ["У этого мастера уже есть активный бот."]
-            return False, [f"Ошибка активации: {exc}"]
+            return False, ["Ошибка активации. Обратитесь в поддержку."]
+
+        if bot_instance and self.registry:
+            await self.registry.invalidate_bot(bot_instance.id, reason="bot_activated")
 
         await self.audit_service.log_event(
             action=AuditEvent.MASTER_ACTIVATED,

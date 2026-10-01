@@ -438,6 +438,7 @@ async def cb_confirm_bot_connection(
     callback: CallbackQuery,
     state: FSMContext,
     session: AsyncSession,
+    registry: Optional[BotRegistry] = None,
 ) -> None:
     """Commit bot provisioning and set webhook."""
     data = await state.get_data()
@@ -473,7 +474,7 @@ async def cb_confirm_bot_connection(
         return
 
     gateway = TelegramProvisioningGateway()
-    service = BotProvisioningService(session=session, gateway=gateway, crypto=crypto)
+    service = BotProvisioningService(session=session, gateway=gateway, crypto=crypto, registry=registry)
     identity = BotIdentity(id=bot_id, username=bot_username, first_name=bot_first_name)
 
     try:
@@ -564,7 +565,9 @@ async def cb_checklist(callback: CallbackQuery, session: AsyncSession) -> None:
 
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:activate:"))
-async def cb_activate_bot(callback: CallbackQuery, session: AsyncSession) -> None:
+async def cb_activate_bot(
+    callback: CallbackQuery, session: AsyncSession, registry: Optional[BotRegistry] = None
+) -> None:
     """Activate Master and BotInstance to ACTIVE state."""
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
@@ -575,7 +578,7 @@ async def cb_activate_bot(callback: CallbackQuery, session: AsyncSession) -> Non
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
         return
 
-    service = BotProvisioningService(session=session)
+    service = BotProvisioningService(session=session, registry=registry)
     try:
         is_ready, missing = await service.activate_master_and_bot(master_id, user.id)
     except AccessDeniedError:
@@ -607,7 +610,9 @@ async def cb_activate_bot(callback: CallbackQuery, session: AsyncSession) -> Non
 # ---------------------------------------------------------------------------
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:retry:"))
-async def cb_retry_provisioning(callback: CallbackQuery, session: AsyncSession) -> None:
+async def cb_retry_provisioning(
+    callback: CallbackQuery, session: AsyncSession, registry: Optional[BotRegistry] = None
+) -> None:
     """Retry setWebhook for an ERROR bot instance."""
     master_id = int(callback.data.split(":")[3])
     user = await _get_or_create_user(session, callback.from_user)
@@ -624,7 +629,7 @@ async def cb_retry_provisioning(callback: CallbackQuery, session: AsyncSession) 
         await callback.answer("Бот не найден.", show_alert=True)
         return
 
-    service = BotProvisioningService(session=session)
+    service = BotProvisioningService(session=session, registry=registry)
     try:
         await service.retry_provisioning(bot.id, user.id)
         await callback.message.edit_text(
@@ -633,7 +638,7 @@ async def cb_retry_provisioning(callback: CallbackQuery, session: AsyncSession) 
         )
     except Exception as exc:
         await callback.message.edit_text(
-            f"❌ <b>Повторное подключение не удалось:</b>\n{str(exc)[:200]}\n\n"
+            "❌ <b>Повторное подключение не удалось.</b> Обратитесь в поддержку.\n\n"
             f"Служба поддержки: {settings.support_tag} ({settings.support_url})",
             reply_markup=main_menu_keyboard(),
         )
@@ -708,7 +713,7 @@ async def cb_confirm_disable_bot(
         )
     except Exception as exc:
         logger.error("Failed to disable bot %s for master %s: %s", bot.id, master_id, exc)
-        await callback.answer(f"Ошибка при отключении: {exc}", show_alert=True)
+        await callback.answer("Ошибка при отключении. Обратитесь в поддержку.", show_alert=True)
     await callback.answer()
 
 
@@ -747,7 +752,7 @@ async def cb_enable_bot(
         )
     except Exception as exc:
         await callback.message.edit_text(
-            f"❌ <b>Не удалось включить бота:</b>\n{str(exc)[:200]}",
+            "❌ <b>Не удалось включить бота.</b> Обратитесь в поддержку.",
             reply_markup=project_card_keyboard(master, bot),
         )
     await callback.answer()
@@ -784,7 +789,12 @@ async def cb_rotate_token_prompt(callback: CallbackQuery, state: FSMContext, ses
 
 
 @manager_router.message(RotateTokenStates.waiting_for_token)
-async def msg_receive_rotated_token(message: Message, state: FSMContext, session: AsyncSession) -> None:
+async def msg_receive_rotated_token(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    registry: Optional[BotRegistry] = None,
+) -> None:
     """Process token rotation."""
     try:
         await message.delete()
@@ -801,7 +811,7 @@ async def msg_receive_rotated_token(message: Message, state: FSMContext, session
         return
 
     user = await _get_or_create_user(session, message.from_user)
-    service = BotProvisioningService(session=session)
+    service = BotProvisioningService(session=session, registry=registry)
 
     try:
         await service.rotate_token(bot_instance_id, user.id, new_token)
@@ -816,7 +826,7 @@ async def msg_receive_rotated_token(message: Message, state: FSMContext, session
         )
     except Exception as exc:
         await message.answer(
-            f"❌ <b>Ошибка ротации токена:</b> {str(exc)[:200]}",
+            "❌ <b>Ошибка ротации токена.</b> Обратитесь в поддержку.",
             reply_markup=main_menu_keyboard(),
         )
     finally:
@@ -957,6 +967,16 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
         return
 
+    if settings.is_production:
+        await callback.message.edit_text(
+            "💳 <b>Оплата подписки</b>\n\n"
+            "Автоматическая оплата временно недоступна. "
+            f"Для подключения тарифа обратитесь в поддержку: {settings.support_tag}.",
+            reply_markup=subscription_payment_keyboard(master.id, 0),
+        )
+        await callback.answer()
+        return
+
     sub_service = SubscriptionService(session)
     try:
         payment, intent = await sub_service.create_subscription_payment(
@@ -968,7 +988,7 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
     except Exception as exc:
         logger.exception("Failed to create subscription payment: %s", exc)
         await callback.answer(
-            f"Ошибка создания платежа: {str(exc)[:60]}.\nСлужба поддержки: {settings.support_tag}",
+            f"Ошибка создания платежа.\nСлужба поддержки: {settings.support_tag}",
             show_alert=True,
         )
         return
@@ -976,14 +996,7 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
     plan = await sub_service.get_active_plan(plan_code)
     amount_int = int(payment.amount)
 
-    if settings.is_production:
-        note = (
-            f"<i>Автоматический платёжный шлюз находится на этапе подключения. "
-            f"Для активации коммерческого тарифа в пилотном режиме обратитесь в службу поддержки: "
-            f"{settings.support_tag} ({settings.support_url}).</i>"
-        )
-    else:
-        note = "<i>Для тестирования и ручной активации в текущей среде нажмите кнопку подтверждения:</i>"
+    note = "<i>Для тестирования и ручной активации в текущей среде нажмите кнопку подтверждения:</i>"
 
     text = (
         f"💳 <b>Оплата подписки: {master.display_name}</b>\n\n"
@@ -1034,7 +1047,7 @@ async def cb_subscription_confirm(callback: CallbackQuery, session: AsyncSession
     except Exception as exc:
         logger.exception("Failed to process payment #%s: %s", payment_id, exc)
         await callback.answer(
-            f"Ошибка обработки: {str(exc)[:60]}.\nСлужба поддержки: {settings.support_tag}",
+            f"Ошибка обработки.\nСлужба поддержки: {settings.support_tag}",
             show_alert=True,
         )
         return

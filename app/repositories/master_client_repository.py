@@ -65,7 +65,9 @@ class MasterClientRepository:
 
     async def update_notes(self, master_id: int, user_id: int, notes: Optional[str]) -> None:
         """Update master-specific notes about the client."""
-        client = await self.get_or_create(master_id, user_id)
+        client = await self.get_client(master_id, user_id)
+        if client is None:
+            raise LookupError("Client does not belong to current master")
         client.notes = notes
         await self.session.flush()
 

@@ -24,7 +24,6 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.services.booking_service import BookingService
 from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.payment_service import PaymentService
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="client_payment")
@@ -65,7 +64,7 @@ async def msg_receive_proof(
     state: FSMContext,
     db_user: User,
     bot: Bot,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Receive uploaded proof image or document, update booking status and notify admins.
@@ -96,7 +95,6 @@ async def msg_receive_proof(
 
     user_comment = message.caption or None
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     payment_service = PaymentService(session)
     appointment, payment, _proof = await payment_service.submit_payment_proof(
         master_id=master_id,
@@ -204,13 +202,12 @@ async def cb_cancel_hold_booking(
     callback_data: BookingActionCallback,
     state: FSMContext,
     db_user: User,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Cancel booking on requisites screen before payment is confirmed.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     booking_service = BookingService(session)
 
     try:

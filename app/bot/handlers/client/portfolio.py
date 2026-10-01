@@ -18,7 +18,6 @@ from app.bot.keyboards.client import (
 )
 from app.database.models.portfolio import PortfolioCategory, PortfolioItem
 from app.repositories.portfolio_repository import PortfolioRepository
-from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="client_portfolio")
 
@@ -26,13 +25,12 @@ router = Router(name="client_portfolio")
 @router.callback_query(MenuCallback.filter(F.action == "portfolio"))
 @router.callback_query(PortfolioNavCallback.filter(F.action == "categories"))
 async def cb_portfolio_categories(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     List active portfolio categories for current master.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     portfolio_repo = PortfolioRepository(session)
     categories = await portfolio_repo.list_categories(master_id=master_id, active_only=True)
 
@@ -65,14 +63,13 @@ async def cb_portfolio_categories(
 async def cb_portfolio_view_item(
     callback: CallbackQuery,
     callback_data: PortfolioNavCallback,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     View works within a category with slider navigation strictly verifying master ownership.
     """
     category_id = callback_data.category_id
     index = callback_data.item_index
-    master_id = await LegacyTenantResolver.get_master_id(session)
     portfolio_repo = PortfolioRepository(session)
 
     # Fetch items for this category ensuring tenant ownership

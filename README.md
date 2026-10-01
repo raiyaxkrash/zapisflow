@@ -204,6 +204,7 @@ cp .env.example .env
 # Режим окружения (development / production)
 APP_ENV=production
 APP_MODE=webhook
+DOMAIN=api.yourdomain.com
 
 # Публичный URL для вебхуков (обязательно HTTPS в production)
 WEBHOOK_BASE_URL=https://api.yourdomain.com
@@ -212,7 +213,8 @@ WEBHOOK_PORT=8000
 WEBHOOK_MAX_BODY_BYTES=1048576
 
 # PostgreSQL 16 (asyncpg)
-DATABASE_URL=postgresql+asyncpg://postgres:secure_password@postgres:5432/beauty_bot_prod
+POSTGRES_PASSWORD=secure_password
+DATABASE_URL=postgresql+asyncpg://postgres:secure_password@postgres:5432/beauty_bot_db
 DB_POOL_SIZE=20
 DB_MAX_OVERFLOW=20
 DB_POOL_PRE_PING=True
@@ -250,7 +252,7 @@ TRIAL_DURATION_DAYS=14
 docker compose up -d postgres redis
 
 # 2. Применение миграций Alembic
-docker compose run --rm backend alembic upgrade head
+docker compose run --rm migrate
 
 # 3. Запуск веб-приложения и Caddy Reverse Proxy
 docker compose up -d backend caddy

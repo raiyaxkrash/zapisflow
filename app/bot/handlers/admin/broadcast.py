@@ -17,7 +17,6 @@ from app.database.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.services.broadcast_service import BroadcastService
 from app.services.master_authorization_service import MasterAuthorizationService
-from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="admin_broadcast")
 router.message.filter(IsAdminFilter())
@@ -26,13 +25,12 @@ router.callback_query.filter(IsAdminFilter())
 
 @router.callback_query(AdminMenuCallback.filter(F.action == "broadcast"))
 async def cb_admin_broadcast_root(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Open mass broadcast management menu with subscriber statistics.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     broadcast_svc = BroadcastService(session)
     eligible_users = await broadcast_svc.get_eligible_users(master_id=master_id)
 
@@ -180,18 +178,18 @@ async def prompt_button_step(event: Message | CallbackQuery, state: FSMContext) 
 
 @router.callback_query(AdminBroadcastSG.setting_button, F.data == "adm_bc:skip_button")
 async def cb_broadcast_skip_button(
-    callback: CallbackQuery, state: FSMContext, db_user: User, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, db_user: User, session: AsyncSession, master_id: int
 ) -> None:
     """
     Skip button step and show preview.
     """
     await state.update_data(button_text=None, button_url=None)
-    await show_broadcast_preview(callback, state, db_user, session)
+    await show_broadcast_preview(callback, state, db_user, session, master_id)
 
 
 @router.message(AdminBroadcastSG.setting_button, F.text)
 async def msg_broadcast_button(
-    message: Message, state: FSMContext, db_user: User, session: AsyncSession
+    message: Message, state: FSMContext, db_user: User, session: AsyncSession, master_id: int
 ) -> None:
     """
     Parse button text and URL.
@@ -207,20 +205,19 @@ async def msg_broadcast_button(
 
     b_text, b_url = match.groups()
     await state.update_data(button_text=b_text.strip(), button_url=b_url.strip())
-    await show_broadcast_preview(message, state, db_user, session)
+    await show_broadcast_preview(message, state, db_user, session, master_id)
 
 
 async def show_broadcast_preview(
     event: Message | CallbackQuery,
     state: FSMContext,
     db_user: User,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Create campaign in DRAFT and render preview card.
     """
     data = await state.get_data()
-    master_id = await LegacyTenantResolver.get_master_id(session)
     auth_service = MasterAuthorizationService(session)
     if not await auth_service.is_admin(master_id, db_user.id):
         if isinstance(event, Message):
@@ -287,7 +284,7 @@ async def show_broadcast_preview(
 
 @router.callback_query(F.data.startswith("adm_bc:send:"))
 async def cb_broadcast_execute(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, bot: Bot, session: AsyncSession, master_id: int
 ) -> None:
     """
     Execute broadcast dispatch.
@@ -307,7 +304,6 @@ async def cb_broadcast_execute(
 
     await callback.answer("Рассылка запущена! 🚀", show_alert=False)
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     broadcast_svc = BroadcastService(session)
     completed_bc = await broadcast_svc.execute_broadcast(
         master_id=master_id, broadcast_id=broadcast_id, bot=bot

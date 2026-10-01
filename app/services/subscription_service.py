@@ -10,6 +10,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
@@ -266,7 +267,11 @@ class SubscriptionService:
             )
 
         plan = await self.get_active_plan(plan_code)
+        if provider is None and (settings.is_production or settings.payment_provider.lower() != "manual"):
+            raise SubscriptionError("Автоматическая оплата временно недоступна. Обратитесь в поддержку.")
         billing_prov = provider or ManualBillingProvider()
+        if settings.is_production and billing_prov.provider_code == "MANUAL":
+            raise SubscriptionError("Ручной платёж не создаётся в рабочей среде")
 
         intent = await billing_prov.create_payment_intent(
             master_id=master_id,
@@ -274,6 +279,13 @@ class SubscriptionService:
             return_url=return_url,
             metadata={"actor_user_id": actor_user_id, "plan_code": plan_code},
         )
+        if (
+            intent.provider != billing_prov.provider_code
+            or not intent.provider_payment_id
+            or intent.amount != plan.price
+            or intent.currency != plan.currency
+        ):
+            raise SubscriptionError("Платёжный провайдер вернул некорректные параметры платежа")
 
         payment = SubscriptionPayment(
             master_id=master_id,
@@ -327,11 +339,12 @@ class SubscriptionService:
         elif paid_at.tzinfo is None:
             paid_at = paid_at.replace(tzinfo=timezone.utc)
 
-        # 1. Fetch payment
+        # Lock the payment before checking status. A master lock alone does not
+        # refresh a stale payment read by another concurrent transaction.
         stmt = select(SubscriptionPayment).where(
             SubscriptionPayment.provider == provider,
             SubscriptionPayment.provider_payment_id == provider_payment_id,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
         res = await self.session.execute(stmt)
         payment = res.scalars().first()
         if not payment:
@@ -339,13 +352,41 @@ class SubscriptionService:
                 f"SubscriptionPayment not found for provider {provider} id {provider_payment_id}"
             )
 
-        # 2. Idempotency check: if already SUCCEEDED, do not extend twice!
+        # The locked row is the single source of truth for payment application.
         if payment.status == "SUCCEEDED":
             logger.info(
                 "Duplicate payment callback for provider %s payment %s, ignoring idempotent duplicate",
                 provider,
                 provider_payment_id,
             )
+            return True
+        if payment.status != "PENDING":
+            raise SubscriptionError(f"Платёж в статусе {payment.status} не может быть подтверждён")
+        if (
+            payment.plan_id is None
+            or payment.amount is None
+            or payment.amount <= 0
+            or not payment.currency
+            or len(payment.currency) != 3
+            or payment.period_days is None
+            or payment.period_days <= 0
+        ):
+            raise SubscriptionError("Параметры платежа некорректны")
+        plan = await self.session.get(SubscriptionPlan, payment.plan_id)
+        if (
+            plan is None
+            or payment.currency != plan.currency
+            or payment.amount != plan.price
+            or payment.period_days != plan.period_days
+        ):
+            raise SubscriptionError("Сумма, валюта или срок платежа не соответствуют тарифу")
+
+        existing_period = await self.session.scalar(
+            select(SubscriptionPeriod.id).where(SubscriptionPeriod.subscription_payment_id == payment.id)
+        )
+        if existing_period is not None:
+            # An old/inconsistent status must never apply the same payment again.
+            logger.warning("Payment #%s already has subscription period #%s", payment.id, existing_period)
             return True
 
         # 3. Lock Master row for concurrency safety
@@ -366,7 +407,7 @@ class SubscriptionService:
         # - If currently ACTIVE and paid_until in future -> extend from paid_until
         # - If currently TRIAL and trial_ends_at in future -> extend from trial_ends_at (preserve trial days!)
         # - Else (EXPIRED/other) -> extend from now_utc
-        if master.subscription_status == SubscriptionStatus.ACTIVE and master.paid_until and master.paid_until > now_utc:
+        if master.paid_until and master.paid_until > now_utc:
             base_dt = master.paid_until
         elif master.subscription_status == SubscriptionStatus.TRIAL and master.trial_ends_at and master.trial_ends_at > now_utc:
             base_dt = master.trial_ends_at
@@ -375,16 +416,8 @@ class SubscriptionService:
 
         new_paid_until = base_dt + timedelta(days=period_days)
 
-        # 5. Apply state transitions
-        payment.status = "SUCCEEDED"
-        payment.paid_at = paid_at
-        if sanitized_metadata:
-            payment.metadata_json = json.dumps(sanitized_metadata)
-
-        master.paid_until = new_paid_until
-        master.subscription_status = SubscriptionStatus.ACTIVE
-
-        # 6. Create historical billing period
+        # Insert the unique payment -> period link before mutating the entitlement.
+        # A savepoint lets us classify an integrity race without poisoning the session.
         period = SubscriptionPeriod(
             master_id=master.id,
             plan_id=payment.plan_id,
@@ -395,8 +428,28 @@ class SubscriptionService:
             amount=payment.amount,
             currency=payment.currency,
             external_payment_id=provider_payment_id,
+            subscription_payment_id=payment.id,
         )
-        self.session.add(period)
+        try:
+            async with self.session.begin_nested():
+                self.session.add(period)
+                await self.session.flush()
+        except IntegrityError as exc:
+            existing_period = await self.session.scalar(
+                select(SubscriptionPeriod.id).where(SubscriptionPeriod.subscription_payment_id == payment.id)
+            )
+            if existing_period is not None:
+                return True
+            raise SubscriptionError("Не удалось сохранить период подписки") from exc
+
+        payment.status = "SUCCEEDED"
+        payment.paid_at = paid_at
+        if sanitized_metadata:
+            payment.metadata_json = json.dumps(sanitized_metadata)
+
+        master.paid_until = new_paid_until
+        if master.subscription_status != SubscriptionStatus.SUSPENDED:
+            master.subscription_status = SubscriptionStatus.ACTIVE
 
         # 7. Audit log
         action_name = "SUBSCRIPTION_RENEWED" if prev_status == SubscriptionStatus.ACTIVE else "SUBSCRIPTION_ACTIVATED"

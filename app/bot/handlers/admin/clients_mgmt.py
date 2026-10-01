@@ -3,7 +3,7 @@ Admin CRM clients database and profile management handlers.
 Search clients by name/phone/username, view LTV and appointment history, add master notes.
 """
 
-from typing import Optional
+from html import escape
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -19,11 +19,9 @@ from app.bot.keyboards.admin import (
 from app.bot.states.admin import AdminClientNoteSG, AdminClientSearchSG
 from app.config.settings import settings
 from app.database.models.user import User
-from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.master_client_repository import MasterClientRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.user_repository import UserRepository
-from app.services.tenant_context import LegacyTenantResolver
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="admin_clients_mgmt")
@@ -37,17 +35,19 @@ async def format_client_crm_card(
     """
     Format rich CRM profile with stats and LTV strictly for the given master.
     """
-    user_repo = UserRepository(session)
-    stats = await user_repo.get_user_crm_stats(user.id, master_id=master_id)
     mc_repo = MasterClientRepository(session)
     mc = await mc_repo.get_client(master_id, user.id)
+    if mc is None:
+        raise ValueError("Client does not belong to current master")
+    user_repo = UserRepository(session)
+    stats = await user_repo.get_user_crm_stats(user.id, master_id=master_id)
 
-    full_name = user.first_name
+    full_name = escape(user.first_name)
     if user.last_name:
-        full_name += f" {user.last_name}"
+        full_name += f" {escape(user.last_name)}"
 
-    phone_str = user.phone or "не указан"
-    username_str = f"@{user.username}" if user.username else "нет"
+    phone_str = escape(user.phone) if user.phone else "не указан"
+    username_str = f"@{escape(user.username)}" if user.username else "нет"
     registered_str = user.first_seen_at.strftime("%d.%m.%Y")
 
     first_visit = (
@@ -77,9 +77,9 @@ async def format_client_crm_card(
         f"🗓 <b>Последний визит:</b> {last_visit}\n"
     )
 
-    notes = (mc.notes if mc and mc.notes else None) or user.admin_notes
+    notes = mc.notes
     if notes:
-        card += f"\n📝 <b>Заметка мастера:</b> {notes}\n"
+        card += f"\n📝 <b>Заметка мастера:</b> {escape(notes)}\n"
 
     return card
 
@@ -137,7 +137,7 @@ async def cb_admin_client_search_prompt(
 
 @router.message(AdminClientSearchSG.entering_query, F.text)
 async def msg_admin_client_search_results(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Perform search and return list of matching clients.
@@ -145,7 +145,6 @@ async def msg_admin_client_search_results(
     query_text = message.text.strip()
     await state.clear()
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
     user_repo = UserRepository(session)
     users = await user_repo.search_users_for_master(master_id=master_id, search_text=query_text, limit=20)
 
@@ -205,19 +204,17 @@ async def cb_admin_client_detail(
     callback: CallbackQuery,
     callback_data: AdminClientCallback,
     state: FSMContext,
-    session: AsyncSession,
+    session: AsyncSession, master_id: int,
 ) -> None:
     """
     Show full CRM profile card for a client.
     """
     await state.clear()
-    master_id = await LegacyTenantResolver.get_master_id(session)
-    user_repo = UserRepository(session)
-    user = await user_repo.get_by_id(callback_data.user_id)
-
-    if not user:
+    client = await MasterClientRepository(session).get_client(master_id, callback_data.user_id)
+    if client is None:
         await callback.answer("Клиент не найден", show_alert=True)
         return
+    user = client.user
 
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
@@ -237,10 +234,15 @@ async def cb_admin_client_add_note_prompt(
     callback: CallbackQuery,
     callback_data: AdminClientCallback,
     state: FSMContext,
+    session: AsyncSession,
+    master_id: int,
 ) -> None:
     """
     Prompt admin to input internal CRM note for the client.
     """
+    if await MasterClientRepository(session).get_client(master_id, callback_data.user_id) is None:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
     await state.set_state(AdminClientNoteSG.entering_note)
     await state.update_data(user_id=callback_data.user_id)
 
@@ -269,7 +271,7 @@ async def cb_admin_client_add_note_prompt(
 
 @router.message(AdminClientNoteSG.entering_note, F.text)
 async def msg_admin_client_save_note(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, master_id: int
 ) -> None:
     """
     Save internal CRM note and show updated profile.
@@ -278,16 +280,14 @@ async def msg_admin_client_save_note(
     user_id = data["user_id"]
     await state.clear()
 
-    master_id = await LegacyTenantResolver.get_master_id(session)
-    user_repo = UserRepository(session)
-    user = await user_repo.get_by_id(user_id)
-    if not user:
+    mc_repo = MasterClientRepository(session)
+    client = await mc_repo.get_client(master_id, user_id)
+    if client is None:
         await message.answer("Клиент не найден.")
         return
+    user = client.user
 
     note_text = message.text.strip()
-    user.admin_notes = note_text
-    mc_repo = MasterClientRepository(session)
     await mc_repo.update_notes(master_id=master_id, user_id=user_id, notes=note_text)
     await session.flush()
 

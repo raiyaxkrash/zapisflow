@@ -31,23 +31,28 @@ class UserContextMiddleware(BaseMiddleware):
         session = data.get("session")
 
         if tg_user and session:
-            # 1. Resolve or register user
+            # Resolve tenancy before creating or updating a global User record.
+            master_id = data.get("master_id")
+            if master_id is None:
+                if settings.app_mode == "polling":
+                    master_id = await LegacyTenantResolver.get_master_id(session)
+                else:
+                    return None
+            if settings.app_mode == "webhook":
+                bot_instance = data.get("bot_instance")
+                if bot_instance is None or bot_instance.master_id != master_id:
+                    return None
+            data["master_id"] = master_id
+
+            # 1. Resolve or register user and its tenant CRM membership.
             user_repo = UserRepository(session)
             db_user, is_new = await user_repo.get_or_create(
                 telegram_id=tg_user.id,
                 first_name=tg_user.first_name,
                 last_name=tg_user.last_name,
                 username=tg_user.username,
+                master_id=master_id,
             )
-
-            # 2. Resolve current master_id
-            master_id = data.get("master_id")
-            if master_id is None:
-                if settings.app_mode == "polling":
-                    master_id = await LegacyTenantResolver.get_master_id(session)
-                else:
-                    return None  # Fail closed in webhook mode
-            data["master_id"] = master_id
 
             # 3. Dynamic tenant authorization
             auth_service = MasterAuthorizationService(session)
@@ -59,12 +64,12 @@ class UserContextMiddleware(BaseMiddleware):
             data["is_admin"] = role in (AdminRole.OWNER, AdminRole.ADMIN)
             data["is_owner"] = role == AdminRole.OWNER
 
-            # Commit user registration independently of handler transaction
-            await session.commit()
+            # Keep registration and CRM membership in the update transaction.
+            # DbSessionMiddleware commits them together with the durable update marker.
+            await session.flush()
         else:
             data["db_user"] = None
             data["current_user"] = None
-            data["master_id"] = None
             data["admin_role"] = AdminRole.NONE
             data["is_admin"] = False
             data["is_owner"] = False

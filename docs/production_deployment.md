@@ -62,6 +62,7 @@
 # Окружение
 APP_ENV=production
 APP_MODE=webhook
+DOMAIN=api.beautybot.example.com
 
 # Вебхук и публичный домен (строго HTTPS)
 WEBHOOK_BASE_URL=https://api.beautybot.example.com
@@ -70,7 +71,8 @@ WEBHOOK_PORT=8000
 WEBHOOK_MAX_BODY_BYTES=1048576
 
 # База данных PostgreSQL (строго уникальные пароли!)
-DATABASE_URL=postgresql+asyncpg://beauty_user:SUPER_STRONG_PASSWORD@postgres:5432/beauty_bot_prod
+POSTGRES_PASSWORD=SUPER_STRONG_PASSWORD
+DATABASE_URL=postgresql+asyncpg://postgres:SUPER_STRONG_PASSWORD@postgres:5432/beauty_bot_db
 DB_POOL_SIZE=20
 DB_MAX_OVERFLOW=20
 DB_POOL_PRE_PING=True
@@ -96,10 +98,12 @@ SCHEDULER_ENABLED=True
 SCHEDULER_TICK_SECONDS=30
 SCHEDULER_BATCH_SIZE=100
 
-# Режим биллинга
-BILLING_PROVIDER=MANUAL
+# Пока платёжный провайдер не подключён, онлайн-оплата выключена.
+PAYMENT_PROVIDER=disabled
 TRIAL_DURATION_DAYS=14
 ```
+
+`REDIS_PASSWORD` обязателен; используйте латинские буквы, цифры, `_` и `-`.
 
 ---
 
@@ -112,7 +116,7 @@ docker compose up -d postgres redis
 
 ### Шаг 2. Применение миграций Alembic:
 ```bash
-docker compose run --rm backend alembic upgrade head
+docker compose run --rm migrate
 ```
 
 ### Шаг 3. Запуск веб-приложения и обратного прокси:
@@ -126,13 +130,13 @@ docker compose up -d backend caddy
 
 1. **Liveness Check:**
    ```bash
-   curl -i http://localhost:8000/health/live
+   curl -i https://api.beautybot.example.com/health/live
    # Ожидаемый ответ: HTTP 200 {"status":"alive"}
    ```
 
 2. **Readiness Check (проверка PostgreSQL и Redis):**
    ```bash
-   curl -i http://localhost:8000/health/ready
+   curl -i https://api.beautybot.example.com/health/ready
    # Ожидаемый ответ: HTTP 200 {"status":"ready","database":"ok","redis":"ok"}
    ```
 
@@ -143,19 +147,19 @@ docker compose up -d backend caddy
 ### Резервное копирование PostgreSQL (ежедневно по cron):
 ```bash
 # Дамп в сжатом бинарном формате custom (-F c)
-pg_dump -h localhost -p 5432 -U beauty_user -d beauty_bot_prod -F c -b -v -f /backups/postgres_$(date +%Y%m%d_%H%M%S).dump
+docker compose exec -T postgres pg_dump -U postgres -d beauty_bot_db -F c -b -v > /backups/postgres_$(date +%Y%m%d_%H%M%S).dump
 ```
 
 ### Восстановление PostgreSQL из резервной копии:
 ```bash
 # Восстановление в чистую БД
-pg_restore -h localhost -p 5432 -U beauty_user -d beauty_bot_prod --clean --if-exists -v /backups/postgres_20261001_000000.dump
+docker compose exec -T postgres pg_restore -U postgres -d beauty_bot_db --clean --if-exists -v < /backups/postgres_20261001_000000.dump
 ```
 
 ### Резервное копирование Redis:
 ```bash
-redis-cli -a SUPER_STRONG_REDIS_PASSWORD BGSAVE
-cp /var/lib/redis/dump.rdb /backups/redis_$(date +%Y%m%d_%H%M%S).rdb
+docker compose exec -T redis sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli BGSAVE'
+docker compose cp redis:/data/dump.rdb /backups/redis_$(date +%Y%m%d_%H%M%S).rdb
 ```
 
 ---

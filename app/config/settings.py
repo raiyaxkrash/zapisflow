@@ -4,6 +4,8 @@ Configuration settings for the application using Pydantic Settings v2.
 
 from pathlib import Path
 from typing import List
+import re
+from urllib.parse import quote
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
@@ -79,6 +81,7 @@ class Settings(BaseSettings):
     manager_webhook_secret: str = Field(default="", alias="MANAGER_WEBHOOK_SECRET")
     trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
     support_telegram_username: str = Field(default="zapisflow", alias="SUPPORT_TELEGRAM_USERNAME")
+    payment_provider: str = Field(default="manual", alias="PAYMENT_PROVIDER")
 
     # Phase 8: Multi-Replica Multi-Tenant Scheduler & Reliable Background Jobs
     scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
@@ -134,6 +137,11 @@ class Settings(BaseSettings):
         if not self.manager_webhook_secret or len(self.manager_webhook_secret) < 32:
             errors.append("MANAGER_WEBHOOK_SECRET must be at least 32 characters in production")
 
+        if not self.redis_password:
+            errors.append("REDIS_PASSWORD is required in production")
+        elif not re.fullmatch(r"[A-Za-z0-9_-]+", self.redis_password):
+            errors.append("REDIS_PASSWORD must use only URL-safe letters, digits, '_' or '-'")
+
         if not self.bot_token_encryption_key:
             errors.append("BOT_TOKEN_ENCRYPTION_KEY is required in production")
         else:
@@ -176,7 +184,8 @@ class Settings(BaseSettings):
         Constructs Redis connection URL.
         """
         if self.redis_password:
-            return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
+            encoded_password = quote(self.redis_password, safe="")
+            return f"redis://:{encoded_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
 

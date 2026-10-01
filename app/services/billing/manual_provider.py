@@ -33,13 +33,12 @@ class ManualBillingProvider(BillingProvider):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> PaymentIntent:
         provider_payment_id = f"man_{uuid.uuid4().hex[:16]}"
-        checkout_url = f"https://dev.beautybot.local/billing/mock-checkout/{provider_payment_id}"
         return PaymentIntent(
             provider=self.provider_code,
             provider_payment_id=provider_payment_id,
             amount=plan.price,
             currency=plan.currency,
-            payment_url=checkout_url,
+            payment_url=None,
             metadata=metadata,
         )
 

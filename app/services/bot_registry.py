@@ -99,6 +99,8 @@ class BotRegistry:
             raise BotUnavailableError(f"BotInstance #{instance.id} is in ERROR status: {err}")
         if instance.status == BotInstanceStatus.PROVISIONING:
             raise BotProvisioningError(f"BotInstance #{instance.id} is still PROVISIONING")
+        if not instance.is_current:
+            raise BotUnavailableError(f"BotInstance #{instance.id} is no longer current")
         if instance.status not in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED):
             raise BotUnavailableError(f"BotInstance #{instance.id} status is {instance.status}")
 
@@ -127,14 +129,27 @@ class BotRegistry:
         self,
         bot_instance_id: int,
         session: Optional[AsyncSession] = None,
+        expected_token_version: Optional[int] = None,
     ) -> Bot:
-        """Get or construct a cached aiogram.Bot by BotInstance ID."""
+        """Get a bot, rechecking PostgreSQL after TTL or a known version change.
+
+        Webhook ingress has already loaded the BotInstance from PostgreSQL and
+        supplies its token version. This prevents a missed Pub/Sub message from
+        serving a rotated token on the next incoming update.
+        """
         now = time.time()
 
         # 1. Fast read path: Check cache
         async with self._lock:
             cached = self._cache.get(bot_instance_id)
-            if cached and now < cached.expires_at:
+            if (
+                cached
+                and now < cached.expires_at
+                and (
+                    expected_token_version is None
+                    or cached.token_version == expected_token_version
+                )
+            ):
                 self._cache.move_to_end(bot_instance_id)
                 return cached.bot
 
@@ -164,7 +179,10 @@ class BotRegistry:
             if cached:
                 if (
                     instance.status in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED)
+                    and instance.is_current
                     and instance.token_version == cached.token_version
+                    and instance.master_id == cached.master_id
+                    and (instance.telegram_bot_id or 0) == cached.telegram_bot_id
                 ):
                     # Metadata unchanged: refresh TTL and return cached bot
                     cached.expires_at = now + self.ttl_seconds
@@ -223,59 +241,54 @@ class BotRegistry:
         telegram_bot_id: int,
         session: Optional[AsyncSession] = None,
     ) -> Bot:
-        """Resolve Bot by Telegram Bot ID."""
-        async with self._lock:
-            instance_id = self._telegram_bot_id_to_instance_id.get(telegram_bot_id)
-
-        if instance_id:
-            try:
-                return await self.get_by_instance_id(instance_id, session=session)
-            except (BotNotFoundError, BotDisabledError, BotUnavailableError):
-                pass
-
-        # Lookup in DB
+        """Resolve Bot by Telegram ID using current PostgreSQL metadata."""
         if session is not None:
             repo = BotInstanceRepository(session)
             instance = await repo.get_by_telegram_bot_id(telegram_bot_id)
             if not instance:
                 raise BotNotFoundError(f"Bot with telegram_bot_id {telegram_bot_id} not found")
-            return await self.get_by_instance_id(instance.id, session=session)
+            self._validate_status_policy(instance)
+            return await self.get_by_instance_id(
+                instance.id, session=session, expected_token_version=instance.token_version
+            )
 
         async with async_session_factory() as local_session:
             repo = BotInstanceRepository(local_session)
             instance = await repo.get_by_telegram_bot_id(telegram_bot_id)
             if not instance:
                 raise BotNotFoundError(f"Bot with telegram_bot_id {telegram_bot_id} not found")
-            return await self.get_by_instance_id(instance.id, session=local_session)
+            self._validate_status_policy(instance)
+            return await self.get_by_instance_id(
+                instance.id, session=local_session, expected_token_version=instance.token_version
+            )
 
     async def get_by_master_id(
         self,
         master_id: int,
         session: Optional[AsyncSession] = None,
     ) -> Bot:
-        """Resolve active Bot for a specific master."""
-        async with self._lock:
-            instance_id = self._master_id_to_instance_id.get(master_id)
+        """Resolve the current active bot from PostgreSQL before any cache lookup.
 
-        if instance_id:
-            try:
-                return await self.get_by_instance_id(instance_id, session=session)
-            except (BotNotFoundError, BotDisabledError, BotUnavailableError):
-                pass
-
+        Scheduler sends must not use a former bot after disable or reconnect,
+        even if this replica missed the Pub/Sub invalidation event.
+        """
         if session is not None:
             repo = BotInstanceRepository(session)
             instance = await repo.get_active_by_master_id(master_id)
             if not instance:
                 raise BotNotFoundError(f"Active bot instance for master #{master_id} not found")
-            return await self.get_by_instance_id(instance.id, session=session)
+            return await self.get_by_instance_id(
+                instance.id, session=session, expected_token_version=instance.token_version
+            )
 
         async with async_session_factory() as local_session:
             repo = BotInstanceRepository(local_session)
             instance = await repo.get_active_by_master_id(master_id)
             if not instance:
                 raise BotNotFoundError(f"Active bot instance for master #{master_id} not found")
-            return await self.get_by_instance_id(instance.id, session=local_session)
+            return await self.get_by_instance_id(
+                instance.id, session=local_session, expected_token_version=instance.token_version
+            )
 
     async def _evict_entry(self, bot_instance_id: int, reason: str = "manual") -> bool:
         """Internal eviction helper under lock."""
@@ -364,40 +377,40 @@ class BotRegistry:
         logger.info("Started Redis Pub/Sub invalidation listener on channel '%s'", self.invalidation_channel)
 
     async def _listen_invalidation_loop(self) -> None:
-        """Continuously receive and handle invalidation messages from Redis."""
-        try:
-            self._pubsub = self._redis_client.pubsub()
-            await self._pubsub.subscribe(self.invalidation_channel)
+        """Reconnect after Redis outages; PostgreSQL and TTL remain the fallback."""
+        while True:
+            try:
+                self._pubsub = self._redis_client.pubsub()
+                await self._pubsub.subscribe(self.invalidation_channel)
 
-            async for message in self._pubsub.listen():
-                if message and message.get("type") == "message":
+                async for message in self._pubsub.listen():
+                    if message and message.get("type") == "message":
+                        try:
+                            data = json.loads(message["data"])
+                            bot_instance_id = data.get("bot_instance_id")
+                            reason = data.get("reason", "pubsub_invalidation")
+                            if bot_instance_id:
+                                logger.info(
+                                    "Received remote invalidation for BotInstance #%s (reason=%s)",
+                                    bot_instance_id,
+                                    reason,
+                                )
+                                await self.invalidate_bot_instance(bot_instance_id, reason=f"remote:{reason}")
+                        except Exception as err:
+                            logger.warning("Error parsing invalidation message: %s", err)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Invalidation listener disconnected; retrying: %s", exc)
+            finally:
+                if self._pubsub:
                     try:
-                        data = json.loads(message["data"])
-                        bot_instance_id = data.get("bot_instance_id")
-                        reason = data.get("reason", "pubsub_invalidation")
-                        if bot_instance_id:
-                            logger.info(
-                                "Received remote invalidation for BotInstance #%s (reason=%s)",
-                                bot_instance_id,
-                                reason,
-                            )
-                            await self.invalidate_bot_instance(bot_instance_id, reason=f"remote:{reason}")
-                    except Exception as err:
-                        logger.warning("Error parsing invalidation message: %s", err)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.warning("Invalidation listener stopped unexpectedly: %s", e)
-        finally:
-            if self._pubsub:
-                try:
-                    await self._pubsub.unsubscribe(self.invalidation_channel)
-                    if hasattr(self._pubsub, "aclose"):
+                        await self._pubsub.unsubscribe(self.invalidation_channel)
                         await self._pubsub.aclose()
-                    else:
-                        await self._pubsub.close()
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+                    self._pubsub = None
+            await asyncio.sleep(1)
 
     async def close(self) -> None:
         """Gracefully shutdown BotRegistry: stop listener and close all cached bot sessions."""

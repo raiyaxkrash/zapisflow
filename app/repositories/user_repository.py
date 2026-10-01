@@ -31,9 +31,14 @@ class UserRepository(BaseRepository[User]):
         result = await self.session.execute(query)
         return result.scalars().first()
 
-    async def get_by_phone_exact(self, phone: str) -> Optional[User]:
-        """Reuse a manual client only when the phone has one exact owner."""
-        result = await self.session.execute(select(User).where(User.phone == phone).limit(2))
+    async def get_by_phone_exact(self, phone: str, master_id: int) -> Optional[User]:
+        """Reuse a manual client only from this master's existing CRM."""
+        result = await self.session.execute(
+            select(User)
+            .join(MasterClient, MasterClient.user_id == User.id)
+            .where(User.phone == phone, MasterClient.master_id == master_id)
+            .limit(2)
+        )
         matches = result.scalars().all()
         return matches[0] if len(matches) == 1 else None
 

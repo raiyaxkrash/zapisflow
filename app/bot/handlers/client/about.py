@@ -8,19 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.client import MenuCallback
 from app.repositories.master_settings_repository import MasterSettingsRepository
-from app.services.tenant_context import LegacyTenantResolver
 
 router = Router(name="client_about")
 
 
 @router.callback_query(MenuCallback.filter(F.action == "about"))
 async def cb_about_master(
-    callback: CallbackQuery, session: AsyncSession
+    callback: CallbackQuery, session: AsyncSession, master_id: int
 ) -> None:
     """
     Display 'About Me' master profile, experience and studio address.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     settings_repo = MasterSettingsRepository(session)
     master_name = await settings_repo.get_value(master_id, "master_name", "Анастасия")
     description = await settings_repo.get_value(
@@ -73,12 +71,11 @@ async def cb_about_master(
 
 @router.callback_query(MenuCallback.filter(F.action == "contact"))
 async def cb_contact_master(
-    callback: CallbackQuery, session: AsyncSession
+    callback: CallbackQuery, session: AsyncSession, master_id: int
 ) -> None:
     """
     Display contact methods and direct link to master.
     """
-    master_id = await LegacyTenantResolver.get_master_id(session)
     settings_repo = MasterSettingsRepository(session)
     phone = await settings_repo.get_value(master_id, "default_phone_requisites", "+7 (999) 000-00-00")
     telegram_link = await settings_repo.get_value(master_id, "master_telegram", "https://t.me/")

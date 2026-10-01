@@ -10,7 +10,9 @@ from app.bot.bot_instance import create_bot, create_dispatcher
 from app.config.settings import settings
 from app.database.session import close_db, init_db
 
-from app.core.security import SensitiveDataFilter
+from app.core.security import SensitiveDataFilter, install_sensitive_logging
+
+install_sensitive_logging()
 
 _stdout_handler = logging.StreamHandler(sys.stdout)
 _stdout_handler.addFilter(SensitiveDataFilter())

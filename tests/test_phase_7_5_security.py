@@ -851,14 +851,14 @@ async def test_17_manager_update_concurrent_dedup():
     update_id = 99912345
 
     results = await asyncio.gather(
-        dedup.should_process_manager(update_id),
-        dedup.should_process_manager(update_id),
-        dedup.should_process_manager(update_id),
+        dedup.acquire_manager(update_id),
+        dedup.acquire_manager(update_id),
+        dedup.acquire_manager(update_id),
     )
 
-    # Exactly 1 True, 2 False
-    assert results.count(True) == 1
-    assert results.count(False) == 2
+    # Exactly one owner, two concurrent requests still in processing.
+    assert sum(result.claim is not None for result in results) == 1
+    assert sum(result.state.value == "processing" for result in results) == 2
 
 
 # ===========================================================================

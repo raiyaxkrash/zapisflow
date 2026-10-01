@@ -526,6 +526,8 @@ async def test_16_client_x_at_both_a_and_b_has_separate_notes(pg_session: AsyncS
     master_b = await _create_master(pg_session, owner.id, "Master B")
 
     client_repo = MasterClientRepository(pg_session)
+    await client_repo.get_or_create(master_id=master_a.id, user_id=client_x.id)
+    await client_repo.get_or_create(master_id=master_b.id, user_id=client_x.id)
     await client_repo.update_notes(master_id=master_a.id, user_id=client_x.id, notes="Prefers pink color")
     await client_repo.update_notes(master_id=master_b.id, user_id=client_x.id, notes="Allergic to latex")
 

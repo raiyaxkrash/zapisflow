@@ -1,8 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: beauty_bot_postgres
-    restart: always
+    restart: unless-stopped
     environment:
       POSTGRES_DB: beauty_bot_db
       POSTGRES_USER: postgres
@@ -10,65 +9,110 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d beauty_bot_db"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
     networks:
       - backend
 
   redis:
     image: redis:7-alpine
-    container_name: beauty_bot_redis
-    restart: always
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        test -n "$$REDIS_PASSWORD"
+        case "$$REDIS_PASSWORD" in *[!A-Za-z0-9_-]*) echo 'REDIS_PASSWORD must use URL-safe characters' >&2; exit 1;; esac
+        umask 077
+        printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis-auth.conf
+        exec redis-server /tmp/redis-auth.conf --appendonly yes
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
     networks:
       - backend
 
   migrate:
     build: .
-    image: beauty_bot_app:local
+    image: zapisflow_app:local
     restart: "no"
     env_file:
       - .env
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
     depends_on:
       postgres:
         condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
     networks:
       - backend
-    command: ["alembic", "upgrade", "head"]
 
-  bot:
+  backend:
     build: .
-    image: beauty_bot_app:local
-    container_name: beauty_bot_app
-    restart: always
+    image: zapisflow_app:local
+    restart: unless-stopped
     env_file:
       - .env
     environment:
+      APP_ENV: production
+      APP_MODE: webhook
       DATABASE_URL: ${DATABASE_URL}
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      WEBHOOK_HOST: 0.0.0.0
+      WEBHOOK_PORT: 8000
     depends_on:
       postgres:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.main"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
     networks:
       - backend
-    command: ["python", "-m", "app.main"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - backend
 
 networks:
   backend:
@@ -77,3 +121,5 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  caddy_data:
+  caddy_config:
