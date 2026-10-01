@@ -82,10 +82,18 @@ async def cb_start_booking(
     if not is_admin:
         policy = SubscriptionAccessPolicy(session)
         if not await policy.can_accept_new_booking(master_id):
-            await callback.answer(
-                "🌸 Онлайн-запись сейчас временно недоступна. Пожалуйста, свяжитесь с мастером напрямую.",
-                show_alert=True,
-            )
+            settings_repo = MasterSettingsRepository(session)
+            master_settings = await settings_repo.get_by_master_id(master_id)
+            contacts_list = []
+            if master_settings:
+                if master_settings.studio_phone:
+                    contacts_list.append(master_settings.studio_phone)
+                if master_settings.telegram_username:
+                    tg_user = master_settings.telegram_username.lstrip("@")
+                    contacts_list.append(f"@{tg_user}")
+            contacts_str = f": {' / '.join(contacts_list)}" if contacts_list else "."
+            alert_text = f"Запись временно недоступна. Пожалуйста, свяжитесь с мастером напрямую{contacts_str}"
+            await callback.answer(alert_text, show_alert=True)
             return
 
     await state.clear()

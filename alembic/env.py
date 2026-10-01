@@ -1,5 +1,12 @@
 import asyncio
 from logging.config import fileConfig
+from pathlib import Path
+import sys
+
+# Ensure repository root is in sys.path for CLI execution
+root_dir = Path(__file__).resolve().parents[1]
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection

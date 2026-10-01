@@ -212,6 +212,12 @@ def subscription_projects_keyboard(masters: Sequence[Master]) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def support_button(text: Optional[str] = None) -> InlineKeyboardButton:
+    """Standardized support link button to @zapisflow."""
+    btn_text = text or f"💬 Поддержка @{settings.support_telegram_username}"
+    return InlineKeyboardButton(text=btn_text, url=settings.support_url)
+
+
 def subscription_card_keyboard(
     master_id: int,
     plans: Sequence[SubscriptionPlan],
@@ -229,14 +235,12 @@ def subscription_card_keyboard(
     ) and status != EffectiveSubscriptionStatus.SUSPENDED and can_pay
     for plan in (plans if show_pay_action else ()):
         price_fmt = f"{plan.price:,.2f}".replace(",", " ").removesuffix(".00") + " ₽"
-        if settings.payment_provider.lower() == "yookassa_web":
-            btn_text = f"💳 Оплатить {price_fmt}"
-        elif status == EffectiveSubscriptionStatus.EXPIRED:
-            btn_text = f"💳 Оплатить {price_fmt} ({plan.name})"
-        elif status == EffectiveSubscriptionStatus.PAID_ACTIVE:
+        if status == EffectiveSubscriptionStatus.PAID_ACTIVE:
             btn_text = f"💳 Продлить: {plan.name} — {price_fmt}"
         elif status == EffectiveSubscriptionStatus.TRIAL_ACTIVE:
             btn_text = f"💳 Оформить: {plan.name} — {price_fmt}"
+        elif status == EffectiveSubscriptionStatus.EXPIRED:
+            btn_text = f"💳 Оплатить {price_fmt} ({plan.name})"
         else:
             btn_text = f"💳 {plan.name} — {price_fmt}"
 
@@ -247,14 +251,7 @@ def subscription_card_keyboard(
             )
         ])
 
-    if status == EffectiveSubscriptionStatus.SUSPENDED or not show_pay_action:
-        rows.append([
-            InlineKeyboardButton(
-                text="🆘 Написать в поддержку",
-                url=settings.support_url,
-            )
-        ])
-
+    rows.append([support_button()])
     rows.append([InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")])
     rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -267,7 +264,7 @@ def subscription_checkout_keyboard(
 ) -> InlineKeyboardMarkup:
     """Provider-confirmed redirect returned by YooKassa for this order with status check button."""
     rows = [
-        [InlineKeyboardButton(text="💳 Перейти к оплате", url=url)],
+        [InlineKeyboardButton(text="🔗 Перейти к оплате", url=url)],
     ]
     if payment_id is not None:
         rows.append([
@@ -276,7 +273,7 @@ def subscription_checkout_keyboard(
                 callback_data=f"mgr:sub:check:{master_id}:{payment_id}",
             )
         ])
-    rows.append([InlineKeyboardButton(text="🆘 Поддержка", url=settings.support_url)])
+    rows.append([support_button()])
     rows.append([InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:sub:{master_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -289,14 +286,14 @@ def subscription_pending_keyboard(
     """Pending payment status screen keyboard."""
     rows = []
     if payment_url:
-        rows.append([InlineKeyboardButton(text="💳 Перейти к оплате", url=payment_url)])
+        rows.append([InlineKeyboardButton(text="🔗 Перейти к оплате", url=payment_url)])
     rows.append([
         InlineKeyboardButton(
             text="🔄 Проверить оплату",
             callback_data=f"mgr:sub:check:{master_id}:{payment_id}",
         )
     ])
-    rows.append([InlineKeyboardButton(text="🆘 Поддержка", url=settings.support_url)])
+    rows.append([support_button()])
     rows.append([InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:sub:{master_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -308,7 +305,7 @@ def subscription_canceled_keyboard(
     """Canceled payment screen keyboard."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Оплатить снова", callback_data=f"mgr:sub:pay:{master_id}:{plan_code}")],
-        [InlineKeyboardButton(text="🆘 Поддержка", url=settings.support_url)],
+        [support_button()],
         [InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:sub:{master_id}")],
     ])
 
@@ -317,6 +314,7 @@ def subscription_success_keyboard(master_id: int) -> InlineKeyboardMarkup:
     """Success subscription payment screen keyboard."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Моя подписка", callback_data=f"mgr:sub:{master_id}")],
+        [support_button()],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")],
     ])
 

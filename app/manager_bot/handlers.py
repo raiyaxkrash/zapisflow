@@ -79,6 +79,7 @@ from app.manager_bot.keyboards import (
     subscription_pending_keyboard,
     subscription_projects_keyboard,
     subscription_success_keyboard,
+    support_button,
 )
 from app.services.bot_registry import BotRegistry
 from app.services.crm_service import MasterCrmService
@@ -86,6 +87,7 @@ from app.services.master_authorization_service import AdminRole, MasterAuthoriza
 from app.services.master_contacts import CONTACT_FIELD_LABELS, MasterContactsService
 from app.services.platform_admin_service import PlatformAdminService
 from app.services.rate_limiter import check_rate_limit
+from app.services.subscription_entitlement_service import SubscriptionEntitlementService
 from app.services.subscription_service import SubscriptionService
 from app.database.session import async_session_factory
 from app.services.billing.yookassa_checkout import YooKassaCheckoutService
@@ -1595,8 +1597,14 @@ async def cb_subscription_screen(callback: CallbackQuery, state: FSMContext, ses
     master_id = int(callback.data.split(":")[2])
     user = await _get_or_create_user(session, callback.from_user)
 
+    auth_svc = MasterAuthorizationService(session)
+    role = await auth_svc.get_role(master_id, user.id)
+    if role == AdminRole.STAFF:
+        await callback.answer("Доступ ограничен. Обратитесь к владельцу проекта.", show_alert=True)
+        return
+
     master = await session.get(Master, master_id)
-    if not master or master.owner_user_id != user.id:
+    if not master or (master.owner_user_id != user.id and role != AdminRole.ADMIN):
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
         return
 
@@ -1614,6 +1622,12 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
     plan_code = parts[4]
     user = await _get_or_create_user(session, callback.from_user)
 
+    auth_svc = MasterAuthorizationService(session)
+    role = await auth_svc.get_role(master_id, user.id)
+    if role == AdminRole.STAFF:
+        await callback.answer("Доступ ограничен. Обратитесь к владельцу проекта.", show_alert=True)
+        return
+
     master = await session.get(Master, master_id)
     if not master or master.owner_user_id != user.id:
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
@@ -1630,10 +1644,22 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
                 master_id=master.id,
                 plan_code=plan_code,
             )
-        except (SubscriptionError, YooKassaGatewayError, ValueError):
-            await callback.answer(
-                f"Не удалось открыть оплату. Поддержка: {settings.support_tag}", show_alert=True
+        except (SubscriptionError, YooKassaGatewayError, ValueError) as exc:
+            logger.warning("YooKassa checkout unavailable: %s", exc)
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+            fallback_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [support_button("💬 Написать в поддержку")],
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data=f"mgr:sub:{master.id}")],
+                ]
             )
+            await callback.message.edit_text(
+                "💳 <b>Оплата подписки</b>\n\n"
+                "Оплата онлайн временно недоступна.\n"
+                f"Для активации или продления подписки, пожалуйста, свяжитесь с поддержкой: {settings.support_tag}",
+                reply_markup=fallback_kb,
+            )
+            await callback.answer()
             return
 
         if redirect.confirmation_url is None:
@@ -1643,10 +1669,10 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
             return
         amount = f"{order.amount:,.2f}".replace(",", " ").removesuffix(".00")
         text = (
-            "💳 <b>Оплата подписки</b>\n\n"
-            f"Тариф:\n<b>{escape(order.plan_name)}</b>\n\n"
-            f"Стоимость:\n<b>{amount} ₽</b>\n\n"
-            f"Период:\n<b>{order.period_days} дней</b>"
+            f"💳 <b>Оплата подписки {escape(order.plan_name)} ({order.period_days} дней)</b>\n\n"
+            f"Сумма: <b>{amount} ₽</b>\n\n"
+            "Нажмите кнопку ниже для перехода к оплате.\n"
+            "После оплаты нажмите «Проверить оплату»."
         )
         await callback.message.edit_text(
             text,
@@ -1658,15 +1684,18 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
         return
 
     if settings.is_production:
-        notice = (
-            "Оплата в этом боте недоступна. Здесь отображается статус подписки."
-            if settings.payment_provider.lower() == "yookassa_web"
-            else "Автоматическая оплата временно недоступна."
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        fallback_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [support_button("💬 Написать в поддержку")],
+                [InlineKeyboardButton(text="◀️ Назад", callback_data=f"mgr:sub:{master.id}")],
+            ]
         )
         await callback.message.edit_text(
             "💳 <b>Оплата подписки</b>\n\n"
-            f"{notice} Для вопросов обратитесь в поддержку: {settings.support_tag}.",
-            reply_markup=subscription_payment_keyboard(master.id, 0),
+            "Автоматическая оплата временно недоступна. "
+            f"Пожалуйста, напишите в поддержку {settings.support_tag}, чтобы активировать подписку.",
+            reply_markup=fallback_kb,
         )
         await callback.answer()
         return
@@ -4278,6 +4307,11 @@ async def cb_manager_staff_router(
         master_id = int(parts[3])
         if not await auth_svc.is_admin(master_id, user.id):
             await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        entitlement_svc = SubscriptionEntitlementService(session)
+        can_add, reason = await entitlement_svc.can_create_staff(master_id)
+        if not can_add:
+            await callback.answer(reason or "Добавление сотрудников недоступно.", show_alert=True)
             return
         await state.set_state(ManagerStaffStates.waiting_for_name)
         await state.update_data(staff_master_id=master_id)

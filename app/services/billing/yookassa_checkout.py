@@ -347,11 +347,17 @@ class YooKassaCheckoutService:
                 raise SubscriptionError("Конфликт идентификатора платежа")
 
             if remote.status == "succeeded" and remote.paid:
-                # TODO: После получения оплаты зарегистрировать доход и
-                # сформировать чек в «Мой налог». ЮKassa не делает это за НПД.
-                return await SubscriptionService(session).process_successful_payment(
+                ok = await SubscriptionService(session).process_successful_payment(
                     PROVIDER_CODE, remote.id
                 )
+                try:
+                    from app.services.subscription_notification_service import SubscriptionNotificationService
+                    await SubscriptionNotificationService(session).send_payment_success_notification(
+                        payment.master_id, payment.id
+                    )
+                except Exception:
+                    pass
+                return ok
             if remote.status == "canceled" and payment.status == "PENDING":
                 payment.status = "CANCELLED"
             return False
@@ -490,6 +496,13 @@ class YooKassaCheckoutService:
                     PROVIDER_CODE, remote.id
                 )
                 await session.refresh(master)
+                try:
+                    from app.services.subscription_notification_service import SubscriptionNotificationService
+                    await SubscriptionNotificationService(session).send_payment_success_notification(
+                        payment.master_id, payment.id
+                    )
+                except Exception:
+                    pass
                 return PaymentCheckResult(
                     status="SUCCEEDED",
                     payment_id=payment.id,
