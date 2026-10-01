@@ -20,24 +20,28 @@ from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.bot_instance import create_dispatcher
 from app.config.settings import settings
 from app.core.security import install_sensitive_logging
 from app.database.models.master import BotInstanceStatus
+from app.database.models.subscription import SubscriptionPayment
 from app.database.session import async_session_factory, close_db, engine, init_db
 from app.manager_bot.dispatcher import create_manager_dispatcher
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.scheduler import MultiTenantScheduler
 from app.services.bot_registry import BotRegistry
+from app.services.billing.yookassa_checkout import YooKassaCheckoutService
+from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError
 from app.services.exceptions import (
     BotDisabledError,
     BotNotFoundError,
     BotProvisioningError,
     BotRegistryError,
     BotUnavailableError,
+    SubscriptionError,
 )
 from app.services.update_dedup import (
     DedupState,
@@ -82,6 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Strict production configuration check (fail fast on invalid config)
     settings.validate_production_configuration()
+    settings.validate_payment_configuration()
 
     # Initialize Database if not already done
     await init_db()
@@ -218,6 +223,60 @@ def create_app(
     async def health_live() -> dict[str, str]:
         """Lightweight liveness probe."""
         return {"status": "alive"}
+
+    @app.post("/billing/yookassa/webhook", tags=["billing"])
+    async def yookassa_webhook(request: Request) -> dict[str, bool]:
+        """Reconcile a provider event against authenticated YooKassa API state.
+
+        The notification body is only a lookup hint. It never activates a
+        subscription on its own, and no browser redirect can call this path.
+        """
+        if settings.payment_provider.lower() != "yookassa_web":
+            raise HTTPException(status_code=404, detail="Not found")
+        raw_body = await read_limited_request_body(request, min(settings.webhook_max_body_bytes, 65536))
+        try:
+            event = json.loads(raw_body)
+            if not isinstance(event, dict) or event.get("event") not in {
+                "payment.succeeded", "payment.canceled"
+            }:
+                return {"ok": True}
+            payment_data = event["object"]
+            payment_id = payment_data["id"]
+            checkout_ref = uuid.UUID(payment_data["metadata"]["checkout_ref"])
+            if not isinstance(payment_id, str) or len(payment_id) > 128:
+                raise ValueError("invalid payment id")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise HTTPException(status_code=400, detail="Invalid notification")
+
+        # Do not send arbitrary IDs to the provider API. An unknown opaque
+        # checkout reference cannot correspond to one of our orders.
+        session_maker = app.state.session_factory or async_session_factory
+        async with session_maker() as session:
+            known = await session.scalar(
+                select(SubscriptionPayment.id).where(
+                    SubscriptionPayment.checkout_ref == checkout_ref,
+                    SubscriptionPayment.provider == "YOOKASSA",
+                )
+            )
+        if known is None:
+            return {"ok": True}
+
+        shop_id, secret_key = settings.yookassa_credentials
+        service = YooKassaCheckoutService(
+            session_maker,
+            YooKassaClient(shop_id, secret_key),
+        )
+        try:
+            await service.reconcile(payment_id)
+        except YooKassaGatewayError:
+            logger.error("YooKassa verification temporarily unavailable")
+            raise HTTPException(status_code=503, detail="Verification unavailable")
+        except (SubscriptionError, ValueError):
+            # Verified mismatch is permanent and needs operator review. Do not
+            # echo provider fields or attempt to apply the payment.
+            logger.error("YooKassa notification did not match local payment_id=%s", known)
+            return {"ok": True}
+        return {"ok": True}
 
     @app.get("/health/ready", tags=["health"])
     async def health_ready() -> JSONResponse:

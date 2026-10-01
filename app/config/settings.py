@@ -5,8 +5,8 @@ Configuration settings for the application using Pydantic Settings v2.
 from pathlib import Path
 from typing import List
 import re
-from urllib.parse import quote
-from pydantic import Field
+from urllib.parse import quote, urlsplit
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
     support_telegram_username: str = Field(default="zapisflow", alias="SUPPORT_TELEGRAM_USERNAME")
     payment_provider: str = Field(default="manual", alias="PAYMENT_PROVIDER")
+    payment_currency: str = Field(default="RUB", alias="PAYMENT_CURRENCY")
+    yookassa_mode: str = Field(default="test", alias="YOOKASSA_MODE")
+    yookassa_shop_id: str = Field(default="", alias="YOOKASSA_SHOP_ID")
+    yookassa_secret_key: SecretStr = Field(default=SecretStr(""), alias="YOOKASSA_SECRET_KEY")
+    yookassa_test_shop_id: str = Field(default="", alias="YOOKASSA_TEST_SHOP_ID")
+    yookassa_test_secret_key: SecretStr = Field(default=SecretStr(""), alias="YOOKASSA_TEST_SECRET_KEY")
+    billing_return_url: str = Field(default="", alias="BILLING_RETURN_URL")
+    yookassa_reconciliation_interval_seconds: int = Field(
+        default=300, alias="YOOKASSA_RECONCILIATION_INTERVAL_SECONDS"
+    )
 
     # Phase 8: Multi-Replica Multi-Tenant Scheduler & Reliable Background Jobs
     scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
@@ -110,6 +120,36 @@ class Settings(BaseSettings):
         username = self.support_telegram_username.strip().lstrip("@")
         return f"@{username}"
 
+    @property
+    def yookassa_credentials(self) -> tuple[str, str]:
+        """Select one credential pair without ever mixing test and live shops."""
+        if self.yookassa_mode.lower() == "live":
+            return self.yookassa_shop_id, self.yookassa_secret_key.get_secret_value()
+        if self.yookassa_mode.lower() == "test":
+            return self.yookassa_test_shop_id, self.yookassa_test_secret_key.get_secret_value()
+        raise ValueError("YOOKASSA_MODE must be 'test' or 'live'")
+
+    def validate_payment_configuration(self) -> None:
+        """Fail closed when external web checkout is enabled without its dependencies."""
+        if self.payment_provider.lower() != "yookassa_web":
+            return
+        errors: list[str] = []
+        if self.payment_currency != "RUB":
+            errors.append("PAYMENT_CURRENCY must be RUB for YooKassa checkout")
+        if self.yookassa_mode.lower() not in {"test", "live"}:
+            errors.append("YOOKASSA_MODE must be 'test' or 'live'")
+        elif self.is_production and self.yookassa_mode.lower() != "live":
+            errors.append("YOOKASSA_MODE must be 'live' in production")
+        else:
+            shop_id, secret_key = self.yookassa_credentials
+            if not shop_id or not secret_key:
+                errors.append("YooKassa shop ID and secret key are required for the selected mode")
+        parsed = urlsplit(self.billing_return_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            errors.append("BILLING_RETURN_URL must be an HTTPS URL without credentials")
+        if errors:
+            raise ValueError("Payment configuration invalid: " + "; ".join(errors))
+
     def validate_production_configuration(self) -> None:
         """
         Strict validation for production deployment.
@@ -122,6 +162,8 @@ class Settings(BaseSettings):
         """
         if not self.is_production:
             return
+
+        self.validate_payment_configuration()
 
         errors: list[str] = []
 

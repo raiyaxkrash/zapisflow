@@ -63,3 +63,53 @@ def test_redis_password_is_used_and_required_in_production() -> None:
     )
     with pytest.raises(ValueError, match="REDIS_PASSWORD must use only URL-safe"):
         invalid.validate_production_configuration()
+
+
+def test_yookassa_web_checkout_requires_selected_mode_credentials() -> None:
+    missing = Settings(
+        _env_file=None,
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="test",
+        BILLING_RETURN_URL="https://pay.example.test/return",
+    )
+    with pytest.raises(ValueError, match="shop ID and secret key"):
+        missing.validate_payment_configuration()
+
+    configured = Settings(
+        _env_file=None,
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="test",
+        YOOKASSA_TEST_SHOP_ID="test-shop",
+        YOOKASSA_TEST_SECRET_KEY="test-secret",
+        YOOKASSA_SHOP_ID="live-shop",
+        YOOKASSA_SECRET_KEY="live-secret",
+        BILLING_RETURN_URL="https://pay.example.test/return",
+    )
+    configured.validate_payment_configuration()
+    assert configured.yookassa_credentials == ("test-shop", "test-secret")
+    assert "test-secret" not in repr(configured)
+
+
+def test_yookassa_production_rejects_test_mode_without_leaking_credentials() -> None:
+    configured = Settings(
+        _env_file=None,
+        APP_ENV="production",
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="test",
+        YOOKASSA_TEST_SHOP_ID="test-shop",
+        YOOKASSA_TEST_SECRET_KEY="never-print-this-secret",
+        BILLING_RETURN_URL="https://pay.example.test/return",
+    )
+    with pytest.raises(ValueError, match="must be 'live' in production") as caught:
+        configured.validate_payment_configuration()
+    assert "never-print-this-secret" not in str(caught.value)
+
+    missing_live = Settings(
+        _env_file=None,
+        APP_ENV="production",
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="live",
+        BILLING_RETURN_URL="https://pay.example.test/return",
+    )
+    with pytest.raises(ValueError, match="shop ID and secret key"):
+        missing_live.validate_production_configuration()

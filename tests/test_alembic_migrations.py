@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import UniqueConstraint
+
+from app.database.models.subscription import SubscriptionPayment
 
 from tests.conftest import POSTGRES_AVAILABLE, TEST_DATABASE_URL, requires_postgres
 
@@ -44,9 +47,22 @@ def test_alembic_revision_graph_consistency() -> None:
     assert "2026_10_01_0013" in rev_ids
     assert "2026_10_01_0014" in rev_ids
     assert "2026_10_01_0015" in rev_ids
-    # 0015 is head, 0001 is base
-    assert rev_ids[0] == "2026_10_01_0015"
+    assert "2026_10_01_0016" in rev_ids
+    # 0016 is head, 0001 is base
+    assert rev_ids[0] == "2026_10_01_0016"
     assert rev_ids[-1] == "2026_09_30_0001"
+
+
+def test_subscription_checkout_reference_is_nullable_and_unique() -> None:
+    """Existing payments keep NULL while new checkout references cannot collide."""
+    table = SubscriptionPayment.__table__
+    assert table.c.checkout_ref.nullable is True
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and constraint.name == "uq_subscription_payment_checkout_ref"
+        and tuple(column.name for column in constraint.columns) == ("checkout_ref",)
+        for constraint in table.constraints
+    )
 
 
 @requires_postgres

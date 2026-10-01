@@ -363,7 +363,7 @@ class SubscriptionService:
         if payment.status != "PENDING":
             raise SubscriptionError(f"Платёж в статусе {payment.status} не может быть подтверждён")
         if (
-            payment.plan_id is None
+            (payment.plan_id is None and provider != "YOOKASSA")
             or payment.amount is None
             or payment.amount <= 0
             or not payment.currency
@@ -372,12 +372,18 @@ class SubscriptionService:
             or payment.period_days <= 0
         ):
             raise SubscriptionError("Параметры платежа некорректны")
-        plan = await self.session.get(SubscriptionPlan, payment.plan_id)
-        if (
+        plan = await self.session.get(SubscriptionPlan, payment.plan_id) if payment.plan_id else None
+        # An externally captured YooKassa order is verified against its
+        # immutable local amount/currency snapshot before reaching this method.
+        # A later catalog edit must not discard money already paid for that
+        # snapshot. Legacy/manual payments retain their original plan check.
+        if provider != "YOOKASSA" and (
             plan is None
-            or payment.currency != plan.currency
-            or payment.amount != plan.price
-            or payment.period_days != plan.period_days
+            or (
+                payment.currency != plan.currency
+                or payment.amount != plan.price
+                or payment.period_days != plan.period_days
+            )
         ):
             raise SubscriptionError("Сумма, валюта или срок платежа не соответствуют тарифу")
 

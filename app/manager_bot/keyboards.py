@@ -171,7 +171,10 @@ def subscription_card_keyboard(
 ) -> InlineKeyboardMarkup:
     """Action buttons for subscription management screen."""
     rows = []
-    for plan in plans:
+    # Only the explicit local manual/test flow exposes a pay callback.
+    # Independent web checkout is never linked from inside Telegram.
+    show_pay_action = settings.payment_provider.lower() == "manual" and not settings.is_production
+    for plan in (plans if show_pay_action else ()):
         price_int = int(plan.price)
         price_fmt = f"{price_int:,} ₽".replace(",", " ")
         if status == EffectiveSubscriptionStatus.EXPIRED:
@@ -190,7 +193,7 @@ def subscription_card_keyboard(
             )
         ])
 
-    if status == EffectiveSubscriptionStatus.SUSPENDED:
+    if status == EffectiveSubscriptionStatus.SUSPENDED or not show_pay_action:
         rows.append([
             InlineKeyboardButton(
                 text="🆘 Написать в поддержку",

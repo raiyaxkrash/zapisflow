@@ -883,7 +883,7 @@ async def _show_subscription_screen(callback: CallbackQuery, master: Master, ses
     else:
         primary_plan = plans[0]
 
-    plan_name = primary_plan.name
+    plan_name = escape(primary_plan.name)
     price_fmt = f"{int(primary_plan.price):,} ₽".replace(",", " ")
 
     if eff_sub.status == EffectiveSubscriptionStatus.TRIAL_ACTIVE:
@@ -892,7 +892,7 @@ async def _show_subscription_screen(callback: CallbackQuery, master: Master, ses
             f"🟡 <b>Пробный период</b>\n"
             f"Осталось: <b>{eff_sub.days_remaining} дн.</b> (действует до {date_str})\n\n"
             f"После окончания пробного периода действует основной тариф <b>{plan_name}</b> ({price_fmt}/мес).\n"
-            f"Вы можете оплатить подписку заранее — оставшиеся дни триала сохранятся!"
+            f"При оплате заранее оставшиеся дни триала сохранятся."
         )
     elif eff_sub.status == EffectiveSubscriptionStatus.PAID_ACTIVE:
         date_str = eff_sub.expires_at.strftime("%d.%m.%Y") if eff_sub.expires_at else "—"
@@ -916,10 +916,16 @@ async def _show_subscription_screen(callback: CallbackQuery, master: Master, ses
             f"{settings.support_tag} ({settings.support_url})."
         )
 
+    footer = (
+        "Здесь отображается статус подписки вашего проекта. "
+        f"По вопросам обращайтесь в поддержку: {settings.support_tag}."
+        if settings.payment_provider.lower() != "manual" or settings.is_production
+        else "Выберите тариф для оплаты:"
+    )
     text = (
-        f"💳 <b>Управление подпиской: {master.display_name}</b>\n\n"
+        f"💳 <b>Управление подпиской: {escape(master.display_name)}</b>\n\n"
         f"📊 <b>Текущий статус:</b>\n{status_line}\n\n"
-        "Выберите тариф для оплаты:"
+        f"{footer}"
     )
 
     await callback.message.edit_text(
@@ -995,10 +1001,14 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
         return
 
     if settings.is_production:
+        notice = (
+            "Оплата в этом боте недоступна. Здесь отображается статус подписки."
+            if settings.payment_provider.lower() == "yookassa_web"
+            else "Автоматическая оплата временно недоступна."
+        )
         await callback.message.edit_text(
             "💳 <b>Оплата подписки</b>\n\n"
-            "Автоматическая оплата временно недоступна. "
-            f"Для подключения тарифа обратитесь в поддержку: {settings.support_tag}.",
+            f"{notice} Для вопросов обратитесь в поддержку: {settings.support_tag}.",
             reply_markup=subscription_payment_keyboard(master.id, 0),
         )
         await callback.answer()
