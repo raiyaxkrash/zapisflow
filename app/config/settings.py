@@ -4,7 +4,7 @@ Configuration settings for the application using Pydantic Settings v2.
 
 from pathlib import Path
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 import re
 from urllib.parse import quote, urlsplit
 from pydantic import Field, SecretStr
@@ -53,10 +53,12 @@ class Settings(BaseSettings):
     grid_step_minutes: int = Field(default=30, alias="GRID_STEP_MINUTES")
 
     # Requisites
-    bank_name: str = Field(default="Сбербанк", alias="BANK_NAME")
-    bank_card_number: str = Field(default="2202 2000 0000 0000", alias="BANK_CARD_NUMBER")
-    default_phone_requisites: str = Field(default="+7 (999) 000-00-00", alias="DEFAULT_PHONE_REQUISITES")
-    bank_recipient_name: str = Field(default="Иван И.", alias="BANK_RECIPIENT_NAME")
+    # Client prepayment requisites are tenant-specific and must never have
+    # plausible-looking global defaults that could send money to a sample account.
+    bank_name: Optional[str] = Field(default=None, alias="BANK_NAME")
+    bank_card_number: Optional[str] = Field(default=None, alias="BANK_CARD_NUMBER")
+    default_phone_requisites: Optional[str] = Field(default=None, alias="DEFAULT_PHONE_REQUISITES")
+    bank_recipient_name: Optional[str] = Field(default=None, alias="BANK_RECIPIENT_NAME")
 
     # Phase 5: Dynamic Bot Instances, Token Security & BotRegistry
     bot_token_encryption_key: str = Field(

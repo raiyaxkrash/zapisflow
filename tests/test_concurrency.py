@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -58,11 +59,17 @@ async def test_concurrent_booking_race_condition() -> None:
     service_a.appointment_repo.get_active_overlapping.return_value = []
     service_a.master_settings_repo = AsyncMock()
     service_a.master_settings_repo.get_value.return_value = 30
+    service_a.master_settings_repo.get_by_master_id.return_value = SimpleNamespace(
+        bank_name="Test Bank", bank_card_number="4111111111111111", bank_recipient_name="Test Owner"
+    )
 
     service_b.appointment_repo = AsyncMock()
     service_b.appointment_repo.get_active_overlapping.return_value = []
     service_b.master_settings_repo = AsyncMock()
     service_b.master_settings_repo.get_value.return_value = 30
+    service_b.master_settings_repo.get_by_master_id.return_value = SimpleNamespace(
+        bank_name="Test Bank", bank_card_number="4111111111111111", bank_recipient_name="Test Owner"
+    )
 
     from app.database.models.staff import StaffMember
     from unittest.mock import MagicMock

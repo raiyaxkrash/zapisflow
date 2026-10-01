@@ -3991,6 +3991,92 @@ async def cb_manager_schedule_dayoff(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
 
 
+@manager_router.callback_query(F.data.startswith("mgr:sch:workdate:"))
+async def cb_manager_schedule_workdate(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt to add a one-off working date overriding the weekly schedule."""
+    master_id = int(callback.data.split(":")[3])
+    await state.update_data(sch_master_id=master_id)
+    await state.set_state(ManagerScheduleStates.waiting_for_work_date)
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:schedule:{master_id}")]]
+    )
+    await callback.message.edit_text(
+        "➕ <b>Отдельный рабочий день</b>\n\n"
+        "Введите дату в формате ДД.ММ.ГГГГ (например: <code>10.10.2026</code>). "
+        "Этот день будет рабочим независимо от обычного графика.",
+        reply_markup=cancel_kb,
+    )
+    await callback.answer()
+
+
+@manager_router.message(ManagerScheduleStates.waiting_for_work_date)
+async def msg_manager_schedule_workdate(message: Message, state: FSMContext) -> None:
+    from datetime import date as dt_date, datetime as dt_datetime
+
+    raw = (message.text or "").strip()
+    try:
+        target_date = dt_datetime.strptime(raw, "%d.%m.%Y").date()
+        if target_date < dt_date.today():
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите сегодняшнюю или будущую дату в формате <code>ДД.ММ.ГГГГ</code>:")
+        return
+    await state.update_data(sch_work_date=target_date.isoformat())
+    await state.set_state(ManagerScheduleStates.waiting_for_work_hours)
+    await message.answer(
+        "Введите рабочий интервал, например <code>10:00-18:00</code>. "
+        "Интервал должен заканчиваться позже начала."
+    )
+
+
+@manager_router.message(ManagerScheduleStates.waiting_for_work_hours)
+async def msg_manager_schedule_work_hours(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    from datetime import date as dt_date, datetime as dt_datetime, time as dt_time
+
+    raw = (message.text or "").strip()
+    try:
+        start_raw, end_raw = raw.split("-", 1)
+        start_time = dt_time.fromisoformat(start_raw.strip())
+        end_time = dt_time.fromisoformat(end_raw.strip())
+        if end_time <= start_time:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите интервал в формате <code>10:00-18:00</code>:")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("sch_master_id")
+    date_raw = data.get("sch_work_date")
+    if not master_id or not date_raw:
+        await state.clear()
+        return
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        await message.answer("Ошибка: доступ запрещён.")
+        return
+
+    target_date = dt_date.fromisoformat(date_raw)
+    await ScheduleRepository(session).set_date_exception(
+        target_date=target_date,
+        is_day_off=False,
+        work_start=start_time,
+        work_end=end_time,
+        comment="Отдельный рабочий день",
+        master_id=master_id,
+    )
+    await state.clear()
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    await message.answer(
+        f"✅ <b>{target_date.strftime('%d.%m.%Y')}</b> добавлен как рабочий день: "
+        f"<b>{start_time.strftime('%H:%M')}–{end_time.strftime('%H:%M')}</b>.",
+        reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj),
+    )
+
+
 @manager_router.message(ManagerScheduleStates.waiting_for_day_off_date)
 async def msg_manager_schedule_dayoff(
     message: Message, state: FSMContext, session: AsyncSession
@@ -4070,6 +4156,13 @@ async def msg_manager_schedule_advance(
         await state.clear()
         return
 
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        await message.answer("Ошибка: доступ запрещён.")
+        return
+
     await MasterSettingsRepository(session).update_settings(master_id, min_advance_hours=hours)
     await state.clear()
     settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
@@ -4113,6 +4206,13 @@ async def msg_manager_schedule_horizon(
     master_id = data.get("sch_master_id")
     if not master_id:
         await state.clear()
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        await message.answer("Ошибка: доступ запрещён.")
         return
 
     await MasterSettingsRepository(session).update_settings(master_id, booking_horizon_days=days)
@@ -4297,15 +4397,133 @@ async def cb_manager_set_prepay(callback: CallbackQuery, session: AsyncSession) 
     settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
     hold_m = settings_obj.hold_duration_minutes if settings_obj else 30
     cancel_h = settings_obj.cancel_policy_hours if settings_obj else 24
+    bank = settings_obj.bank_name if settings_obj else None
+    card = settings_obj.bank_card_number if settings_obj else None
+    recipient = settings_obj.bank_recipient_name if settings_obj else None
+    requisites_ready = all(value and value.strip() for value in (bank, card, recipient))
 
     text = (
         "💳 <b>Правила предоплаты и удержания</b>\n\n"
         f"• <b>Время на оплату чека:</b> {hold_m} мин. (после этого бронь аннулируется)\n"
         f"• <b>Бесплатная отмена за:</b> {cancel_h} ч. до визита\n\n"
+        f"• <b>Реквизиты:</b> {'настроены' if requisites_ready else 'не настроены'}\n"
         "<i>Размер предоплаты (процент или фиксированная сумма) настраивается индивидуально в каждой услуге в разделе «Услуги и прайс».</i>"
     )
     await callback.message.edit_text(text, reply_markup=manager_prepayment_settings_keyboard(master_id, settings_obj))
     await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:prepay:hold:"))
+@manager_router.callback_query(F.data.startswith("mgr:prepay:cancel:"))
+@manager_router.callback_query(F.data.startswith("mgr:prepay:edit:"))
+async def cb_manager_prepay_edit(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+) -> None:
+    """Prompt for one tenant-scoped prepayment rule or payment requisite."""
+    parts = (callback.data or "").split(":")
+    action = parts[2]
+    if action == "edit":
+        if len(parts) != 5:
+            await callback.answer("Настройка недоступна.", show_alert=True)
+            return
+        field = parts[3]
+        master_id = int(parts[4])
+        allowed = {
+            "bank_name": "название банка",
+            "bank_card_number": "номер карты для предоплаты",
+            "bank_recipient_name": "имя получателя перевода",
+        }
+        if field not in allowed:
+            await callback.answer("Настройка недоступна.", show_alert=True)
+            return
+        prompt = f"Введите {allowed[field]}. Отправьте «-», чтобы очистить поле:"
+        data_field = field
+    else:
+        if len(parts) != 4:
+            await callback.answer("Настройка недоступна.", show_alert=True)
+            return
+        master_id = int(parts[3])
+        if action == "hold":
+            data_field = "hold_duration_minutes"
+            prompt = "Введите время удержания слота в минутах (от 5 до 1440):"
+        elif action == "cancel":
+            data_field = "cancel_policy_hours"
+            prompt = "Введите срок бесплатной отмены в часах (от 0 до 720):"
+        else:
+            await callback.answer("Настройка недоступна.", show_alert=True)
+            return
+
+    user = await _get_or_create_user(session, callback.from_user)
+    if not await MasterAuthorizationService(session).is_admin(master_id, user.id):
+        await callback.answer("У вас нет прав администратора.", show_alert=True)
+        return
+
+    await state.set_state(ManagerSettingsStates.waiting_for_prepay_value)
+    await state.update_data(prepay_master_id=master_id, prepay_field=data_field)
+    await callback.message.edit_text(
+        prompt,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"mgr:set:prepay:{master_id}",
+            )]]
+        ),
+    )
+    await callback.answer()
+
+
+@manager_router.message(ManagerSettingsStates.waiting_for_prepay_value, F.text)
+async def msg_manager_prepay_save(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+) -> None:
+    """Persist a single prepayment setting for the verified project owner/admin."""
+    data = await state.get_data()
+    master_id = data.get("prepay_master_id")
+    field = data.get("prepay_field")
+    if not isinstance(master_id, int) or field not in {
+        "bank_name", "bank_card_number", "bank_recipient_name",
+        "hold_duration_minutes", "cancel_policy_hours",
+    }:
+        await state.clear()
+        await message.answer("Сессия настройки истекла. Откройте раздел предоплаты заново.")
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    if not await MasterAuthorizationService(session).is_admin(master_id, user.id):
+        await state.clear()
+        await message.answer("У вас нет прав администратора для этого проекта.")
+        return
+
+    raw = (message.text or "").strip()
+    if field in {"hold_duration_minutes", "cancel_policy_hours"}:
+        try:
+            value = int(raw)
+        except ValueError:
+            await message.answer("Введите целое число в указанном диапазоне.")
+            return
+        lower, upper = (5, 1440) if field == "hold_duration_minutes" else (0, 720)
+        if not lower <= value <= upper:
+            await message.answer(f"Введите число от {lower} до {upper}.")
+            return
+    else:
+        value = None if raw == "-" else raw
+        limit = 64 if field == "bank_card_number" else 128
+        if value is not None and (not value or len(value) > limit):
+            await message.answer(f"Значение должно содержать от 1 до {limit} символов или «-» для очистки.")
+            return
+
+    await MasterSettingsRepository(session).update_settings(master_id, **{field: value})
+    await state.clear()
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    await message.answer(
+        "✅ Настройка сохранена.\n\n"
+        "Если услуга требует предоплату, новый клиентский hold будет доступен только после заполнения банка, карты и получателя.",
+        reply_markup=manager_prepayment_settings_keyboard(master_id, settings_obj),
+    )
 
 
 # ---------------------------------------------------------------------------

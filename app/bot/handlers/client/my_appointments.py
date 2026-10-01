@@ -99,17 +99,26 @@ async def cb_booking_detail(
 
     # If appointment is still waiting for payment, show requisites / pay button
     if appointment.status == AppointmentStatus.WAITING_PAYMENT:
-        bank_name = await settings_repo.get_value(master_id, "bank_name", settings.bank_name)
-        card_number = await settings_repo.get_value(master_id, "bank_card_number", settings.bank_card_number)
-        phone_req = await settings_repo.get_value(master_id, "default_phone_requisites", settings.default_phone_requisites)
-        recipient = await settings_repo.get_value(master_id, "bank_recipient_name", settings.bank_recipient_name)
-
-        card_text += (
-            f"\n\n<b>Реквизиты для предоплаты:</b>\n"
-            f"🏦 {bank_name} | 💳 <code>{card_number}</code>\n"
-            f"📱 СБП: <code>{phone_req}</code> ({recipient})"
-        )
-        markup = get_payment_screen_keyboard(appointment.id)
+        master_settings = await settings_repo.get_by_master_id(master_id)
+        if (
+            master_settings
+            and master_settings.bank_name and master_settings.bank_name.strip()
+            and master_settings.bank_card_number and master_settings.bank_card_number.strip()
+            and master_settings.bank_recipient_name and master_settings.bank_recipient_name.strip()
+        ):
+            card_text += (
+                "\n\n<b>Реквизиты для предоплаты:</b>\n"
+                f"🏦 {escape(master_settings.bank_name.strip())} | "
+                f"💳 <code>{escape(master_settings.bank_card_number.strip())}</code>\n"
+                f"👤 Получатель: {escape(master_settings.bank_recipient_name.strip())}"
+            )
+            markup = get_payment_screen_keyboard(appointment.id)
+        else:
+            card_text += (
+                "\n\n⚠️ Предоплата временно недоступна. "
+                "Свяжитесь с мастером, чтобы уточнить запись."
+            )
+            markup = None
     else:
         card_text += (
             "\n\nℹ️ <i>Для переноса времени или даты записи, пожалуйста, свяжитесь с мастером лично.</i>"

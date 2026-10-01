@@ -77,6 +77,8 @@ class ManagerScheduleStates(StatesGroup):
     waiting_for_hours = State()
     waiting_for_break = State()
     waiting_for_day_off_date = State()
+    waiting_for_work_date = State()
+    waiting_for_work_hours = State()
     waiting_for_horizon_days = State()
     waiting_for_advance_hours = State()
 
@@ -86,6 +88,7 @@ class ManagerSettingsStates(StatesGroup):
 
     waiting_for_name = State()
     waiting_for_description = State()
+    waiting_for_prepay_value = State()
 
 
 class ManagerStaffStates(StatesGroup):

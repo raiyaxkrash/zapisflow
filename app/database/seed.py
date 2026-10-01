@@ -37,9 +37,6 @@ async def seed_settings(session: AsyncSession) -> None:
     default_settings = [
         ("studio_address", "г. Москва, ул. Арбат, д. 15, студия 204", "Фактический адрес студии"),
         ("studio_phone", "+7 (999) 111-22-33", "Контактный телефон студии"),
-        ("bank_card_number", settings.bank_card_number, "Номер карты для предоплаты"),
-        ("bank_name", settings.bank_name, "Банк получателя"),
-        ("bank_recipient_name", settings.bank_recipient_name, "ФИО получателя перевода"),
         ("hold_duration_minutes", settings.hold_duration_minutes or 30, "Время удержания неоплаченного слота (мин)"),
         ("cancel_policy_hours", 24, "Срок бесплатной отмены (ч)"),
         ("timezone", settings.timezone or "Europe/Moscow", "Часовой пояс мастера"),

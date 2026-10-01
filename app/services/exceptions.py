@@ -68,6 +68,12 @@ class PaymentNotFoundError(AppException):
     pass
 
 
+class PaymentRequisitesMissingError(AppException):
+    """Raised when a deposit booking is requested without tenant payment details."""
+
+    pass
+
+
 class InvalidPaymentStatusError(AppException):
     """Raised when a payment decision violates the allowed state machine."""
 

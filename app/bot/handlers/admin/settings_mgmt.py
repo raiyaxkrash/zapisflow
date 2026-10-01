@@ -27,9 +27,9 @@ async def format_settings_text(session: AsyncSession, master_id: int) -> tuple[s
     """
     repo = MasterSettingsRepository(session)
 
-    card = await repo.get_value(master_id, "bank_card_number", settings.bank_card_number)
-    bank = await repo.get_value(master_id, "bank_name", settings.bank_name)
-    recipient = await repo.get_value(master_id, "bank_recipient_name", settings.bank_recipient_name)
+    card = await repo.get_value(master_id, "bank_card_number")
+    bank = await repo.get_value(master_id, "bank_name")
+    recipient = await repo.get_value(master_id, "bank_recipient_name")
     address = await repo.get_value(master_id, "studio_address")
     hold_min = await repo.get_value(master_id, "hold_duration_minutes", settings.hold_duration_minutes)
     cancel_hours = await repo.get_value(master_id, "cancel_policy_hours", 24)

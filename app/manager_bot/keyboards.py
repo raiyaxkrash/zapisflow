@@ -1128,6 +1128,9 @@ def manager_schedule_menu_keyboard(
                 InlineKeyboardButton(text="🏖 Добавить выходной / отпуск", callback_data=f"mgr:sch:dayoff:{master_id}"),
             ],
             [
+                InlineKeyboardButton(text="➕ Добавить отдельный рабочий день", callback_data=f"mgr:sch:workdate:{master_id}"),
+            ],
+            [
                 InlineKeyboardButton(text=f"⏱ Минимум за {adv_h} ч.", callback_data=f"mgr:sch:advance:{master_id}"),
                 InlineKeyboardButton(text=f"📆 Горизонт {horiz_d} дн.", callback_data=f"mgr:sch:horizon:{master_id}"),
             ],
@@ -1188,13 +1191,19 @@ def manager_notification_settings_keyboard(
 def manager_prepayment_settings_keyboard(
     master_id: int, settings_obj: Optional[MasterSettings] = None
 ) -> InlineKeyboardMarkup:
-    """Prepayment rules configuration."""
+    """Prepayment rules and tenant-owned payment requisites."""
     cancel_h = settings_obj.cancel_policy_hours if settings_obj else 24
     hold_m = settings_obj.hold_duration_minutes if settings_obj else 30
+    bank = bool(settings_obj and settings_obj.bank_name and settings_obj.bank_name.strip())
+    card = bool(settings_obj and settings_obj.bank_card_number and settings_obj.bank_card_number.strip())
+    recipient = bool(settings_obj and settings_obj.bank_recipient_name and settings_obj.bank_recipient_name.strip())
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"⏱ Время на оплату чека: {hold_m} мин", callback_data=f"mgr:prepay:hold:{master_id}")],
             [InlineKeyboardButton(text=f"🚫 Бесплатная отмена за: {cancel_h} ч", callback_data=f"mgr:prepay:cancel:{master_id}")],
+            [InlineKeyboardButton(text=f"🏦 Банк: {'✅' if bank else 'не задан'}", callback_data=f"mgr:prepay:edit:bank_name:{master_id}")],
+            [InlineKeyboardButton(text=f"💳 Карта: {'✅' if card else 'не задана'}", callback_data=f"mgr:prepay:edit:bank_card_number:{master_id}")],
+            [InlineKeyboardButton(text=f"👤 Получатель: {'✅' if recipient else 'не задан'}", callback_data=f"mgr:prepay:edit:bank_recipient_name:{master_id}")],
             [InlineKeyboardButton(text="💅 Настроить размер предоплаты в услугах", callback_data=f"mgr:services:{master_id}")],
             [InlineKeyboardButton(text="⬅️ Назад к настройкам", callback_data=f"mgr:settings:{master_id}")],
         ]

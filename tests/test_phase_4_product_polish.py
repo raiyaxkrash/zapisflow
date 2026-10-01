@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.handlers.client.about import cb_client_reviews
+from app.bot.handlers.client.booking import _show_policy_screen
 from app.bot.keyboards.client.menu import get_main_menu_keyboard
 from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterClient, MasterSettings, MasterStatus, SubscriptionStatus
@@ -40,14 +41,21 @@ from app.manager_bot.handlers import (
     msg_onboarding_address,
     msg_onboarding_phone,
     msg_manager_schedule_horizon,
+    cb_manager_schedule_workdate,
+    msg_manager_schedule_workdate,
+    msg_manager_schedule_work_hours,
+    msg_manager_prepay_save,
     msg_manager_service_add_duration,
 )
 from app.manager_bot.states import MasterOnboardingStates, ManagerScheduleStates
+from app.manager_bot.keyboards import manager_schedule_menu_keyboard
 from app.repositories.master_repository import MasterRepository
 from app.repositories.portfolio_repository import PortfolioRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.repositories.service_repository import ServiceRepository
 from app.services.crm_service import MasterCrmService
+from app.services.slot_engine import SlotEngine
+import pytz
 
 
 @pytest.fixture
@@ -206,10 +214,17 @@ async def test_onboarding_phone_persists_and_advances_to_service(
 async def test_manager_schedule_horizon_uses_settings_repository_api(
     pg_session: AsyncSession, master_with_owner
 ):
-    master, _owner = master_with_owner
+    master, owner = master_with_owner
     state = AsyncMock()
     state.get_data.return_value = {"sch_master_id": master.id}
-    message = SimpleNamespace(text="45", answer=AsyncMock())
+    message = SimpleNamespace(
+        text="45",
+        from_user=SimpleNamespace(
+            id=owner.telegram_id, first_name=owner.first_name,
+            last_name=owner.last_name, username=owner.username,
+        ),
+        answer=AsyncMock(),
+    )
 
     await msg_manager_schedule_horizon(message, state, pg_session)
 
@@ -218,6 +233,160 @@ async def test_manager_schedule_horizon_uses_settings_repository_api(
     state.clear.assert_awaited_once()
     message.answer.assert_awaited_once()
     assert "45 дней" in message.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_foreign_manager_cannot_change_booking_horizon(
+    pg_session: AsyncSession, master_with_owner, foreign_master
+):
+    master, _owner = master_with_owner
+    _foreign, stranger = foreign_master
+    state = AsyncMock()
+    state.get_data.return_value = {"sch_master_id": master.id}
+    message = SimpleNamespace(
+        text="14",
+        from_user=SimpleNamespace(
+            id=stranger.telegram_id, first_name=stranger.first_name,
+            last_name=stranger.last_name, username=stranger.username,
+        ),
+        answer=AsyncMock(),
+    )
+
+    await msg_manager_schedule_horizon(message, state, pg_session)
+    settings_obj = await pg_session.get(MasterSettings, master.id)
+    assert settings_obj.booking_horizon_days == 30
+    assert "доступ запрещён" in message.answer.call_args.args[0].lower()
+    state.clear.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manager_can_add_one_off_workday_over_weekly_day_off(
+    pg_session: AsyncSession, master_with_owner
+):
+    from app.database.models.schedule import ScheduleException
+
+    master, owner = master_with_owner
+    pg_session.add(ScheduleTemplate(
+        master_id=master.id, day_of_week=5, work_start=dt_time(10),
+        work_end=dt_time(18), is_day_off=True,
+    ))
+    await pg_session.flush()
+
+    keyboard = manager_schedule_menu_keyboard(master.id)
+    assert any(
+        button.callback_data == f"mgr:sch:workdate:{master.id}"
+        for row in keyboard.inline_keyboard for button in row
+    )
+
+    state = AsyncMock()
+    callback = SimpleNamespace(
+        data=f"mgr:sch:workdate:{master.id}",
+        message=SimpleNamespace(edit_text=AsyncMock()), answer=AsyncMock(),
+    )
+    await cb_manager_schedule_workdate(callback, state)
+    state.set_state.assert_awaited_with(ManagerScheduleStates.waiting_for_work_date)
+
+    state.get_data = AsyncMock(return_value={"sch_master_id": master.id})
+    date_message = SimpleNamespace(text="10.10.2026", answer=AsyncMock())
+    await msg_manager_schedule_workdate(date_message, state)
+    state.set_state.assert_awaited_with(ManagerScheduleStates.waiting_for_work_hours)
+
+    state.get_data = AsyncMock(return_value={
+        "sch_master_id": master.id, "sch_work_date": "2026-10-10"
+    })
+    hours_message = SimpleNamespace(
+        text="10:00-18:00",
+        from_user=SimpleNamespace(
+            id=owner.telegram_id, first_name=owner.first_name,
+            last_name=owner.last_name, username=owner.username,
+        ),
+        answer=AsyncMock(),
+    )
+    await msg_manager_schedule_work_hours(hours_message, state, pg_session)
+    saved = await pg_session.scalar(select(ScheduleException).where(
+        ScheduleException.master_id == master.id,
+        ScheduleException.date == date.fromisoformat("2026-10-10"),
+    ))
+    assert saved is not None and saved.is_day_off is False
+    assert saved.work_start == dt_time(10) and saved.work_end == dt_time(18)
+    assert "добавлен как рабочий день" in hours_message.answer.call_args.args[0]
+    window = await SlotEngine(pg_session)._get_working_window_and_breaks(
+        master.id, date.fromisoformat("2026-10-10"), pytz.timezone("Europe/Moscow")
+    )
+    assert window is not None
+    assert window[0].strftime("%H:%M") == "10:00"
+    assert window[1].strftime("%H:%M") == "18:00"
+
+    # A date-specific day off also overrides an otherwise open weekly day.
+    sunday = date.fromisoformat("2026-10-11")
+    pg_session.add(ScheduleTemplate(
+        master_id=master.id, day_of_week=sunday.weekday(), work_start=dt_time(10),
+        work_end=dt_time(18), is_day_off=False,
+    ))
+    await pg_session.flush()
+    await ScheduleRepository(pg_session).set_date_exception(
+        target_date=sunday, is_day_off=True, comment="Выходной", master_id=master.id
+    )
+    assert await SlotEngine(pg_session)._get_working_window_and_breaks(
+        master.id, sunday, pytz.timezone("Europe/Moscow")
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_manager_can_save_tenant_prepayment_requisites(
+    pg_session: AsyncSession, master_with_owner
+):
+    master, owner = master_with_owner
+    state = AsyncMock()
+    state.get_data.return_value = {
+        "prepay_master_id": master.id,
+        "prepay_field": "bank_name",
+    }
+    message = SimpleNamespace(
+        text="Тест-Банк",
+        from_user=SimpleNamespace(
+            id=owner.telegram_id, first_name=owner.first_name,
+            last_name=owner.last_name, username=owner.username,
+        ),
+        answer=AsyncMock(),
+    )
+
+    await msg_manager_prepay_save(message, state, pg_session)
+    settings_obj = await pg_session.get(MasterSettings, master.id)
+    assert settings_obj.bank_name == "Тест-Банк"
+    state.clear.assert_awaited_once()
+    assert "Настройка сохранена" in message.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_zero_deposit_policy_screen_does_not_claim_prepayment_is_required():
+    service = Service(
+        title="Стрижка",
+        price=Decimal("1500"),
+        duration_min=60,
+        deposit_type=DepositType.FIXED,
+        deposit_value=Decimal("0"),
+    )
+    callback = SimpleNamespace(
+        message=SimpleNamespace(edit_text=AsyncMock()), answer=AsyncMock()
+    )
+    state = AsyncMock()
+    session = AsyncMock()
+
+    with patch("app.bot.handlers.client.booking.MasterSettingsRepository") as settings_repo:
+        settings_repo.return_value.get_value = AsyncMock(return_value="Europe/Moscow")
+        await _show_policy_screen(
+            callback,
+            state,
+            service,
+            datetime(2026, 10, 10, 10, 0, tzinfo=timezone.utc),
+            session,
+            master_id=1,
+        )
+
+    text = callback.message.edit_text.call_args.kwargs["text"]
+    assert "Предоплата не требуется" in text
+    assert "требуется внесение предоплаты" not in text
 
 
 @pytest.mark.asyncio

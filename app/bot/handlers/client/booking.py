@@ -43,7 +43,11 @@ from app.services.telegram_outbox import (
     enqueue_telegram_edit,
     enqueue_telegram_message,
 )
-from app.services.exceptions import SlotAlreadyBookedError, SubscriptionExpiredError
+from app.services.exceptions import (
+    PaymentRequisitesMissingError,
+    SlotAlreadyBookedError,
+    SubscriptionExpiredError,
+)
 from app.services.slot_engine import SlotEngine
 from app.services.subscription_access_policy import SubscriptionAccessPolicy
 from app.utils.formatters import (
@@ -261,7 +265,7 @@ async def cb_service_selected(
     await state.set_state(ClientBookingSG.choosing_date)
 
     text = (
-        f"🌸 <b>Услуга:</b> {service.title}\n"
+        f"🌸 <b>Услуга:</b> {escape(service.title)}\n"
         f"⏳ <b>Длительность:</b> {format_duration(service.duration_min)}\n"
         f"💰 <b>Стоимость:</b> {format_rub(service.price)}\n\n"
         "Выберите удобную дату в календаре (доступные дни отмечены числами):"
@@ -320,7 +324,7 @@ async def cb_calendar_navigation(
         service = await service_repo.get_by_id(service_id, master_id=master_id)
 
         text = (
-            f"🌸 <b>Услуга:</b> {service.title}\n\n"
+            f"🌸 <b>Услуга:</b> {escape(service.title)}\n\n"
             "Выберите удобную дату в календаре:"
         )
 
@@ -348,7 +352,7 @@ async def cb_calendar_navigation(
             service_repo = ServiceRepository(session)
             service = await service_repo.get_by_id(service_id, master_id=master_id)
 
-            text = f"🌸 <b>Услуга:</b> {service.title}\n\nВыберите дату:"
+            text = f"🌸 <b>Услуга:</b> {escape(service.title)}\n\nВыберите дату:"
             if callback.message:
                 await callback.message.edit_text(
                     text=text,
@@ -447,18 +451,23 @@ async def _show_policy_screen(
     else:
         deposit_amount = service.deposit_value.quantize(Decimal("1.00"))
     dep_str = format_rub(deposit_amount)
-
-    text = (
-        "<b>📋 Проверьте данные вашей записи</b>\n\n"
-        f"🌸 <b>Услуга:</b> {service.title}\n"
-        f"🗓 <b>Дата и время:</b> {dt_str}\n"
-        f"⏳ <b>Длительность:</b> {dur_str}\n"
-        f"💰 <b>Стоимость услуги:</b> {price_str}\n"
-        f"💳 <b>Предоплата:</b> {dep_str}\n\n"
+    policy_text = (
         "⚠️ <b>ВАЖНОЕ ПРАВИЛО:</b>\n"
         "<i>Для подтверждения записи требуется внесение предоплаты. "
         "В случае отмены записи клиентом внесённая предоплата не возвращается.</i>\n\n"
         "Подтверждая запись, вы соглашаетесь с данным условием."
+        if deposit_amount > 0
+        else "Предоплата не требуется. Подтверждая запись, вы соглашаетесь с правилами отмены проекта."
+    )
+
+    text = (
+        "<b>📋 Проверьте данные вашей записи</b>\n\n"
+        f"🌸 <b>Услуга:</b> {escape(service.title)}\n"
+        f"🗓 <b>Дата и время:</b> {dt_str}\n"
+        f"⏳ <b>Длительность:</b> {dur_str}\n"
+        f"💰 <b>Стоимость услуги:</b> {price_str}\n"
+        f"💳 <b>Предоплата:</b> {dep_str}\n\n"
+        f"{policy_text}"
     )
 
     await state.set_state(ClientBookingSG.confirming_policy)
@@ -535,18 +544,23 @@ async def msg_receive_phone(
     else:
         deposit_amount = service.deposit_value.quantize(Decimal("1.00"))
     dep_str = format_rub(deposit_amount)
-
-    text = (
-        "<b>📋 Проверьте данные вашей записи</b>\n\n"
-        f"🌸 <b>Услуга:</b> {service.title}\n"
-        f"🗓 <b>Дата и время:</b> {dt_str}\n"
-        f"⏳ <b>Длительность:</b> {dur_str}\n"
-        f"💰 <b>Стоимость услуги:</b> {price_str}\n"
-        f"💳 <b>Предоплата:</b> {dep_str}\n\n"
+    policy_text = (
         "⚠️ <b>ВАЖНОЕ ПРАВИЛО:</b>\n"
         "<i>Для подтверждения записи требуется внесение предоплаты. "
         "В случае отмены записи клиентом внесённая предоплата не возвращается.</i>\n\n"
         "Подтверждая запись, вы соглашаетесь с данным условием."
+        if deposit_amount > 0
+        else "Предоплата не требуется. Подтверждая запись, вы соглашаетесь с правилами отмены проекта."
+    )
+
+    text = (
+        "<b>📋 Проверьте данные вашей записи</b>\n\n"
+        f"🌸 <b>Услуга:</b> {escape(service.title)}\n"
+        f"🗓 <b>Дата и время:</b> {dt_str}\n"
+        f"⏳ <b>Длительность:</b> {dur_str}\n"
+        f"💰 <b>Стоимость услуги:</b> {price_str}\n"
+        f"💳 <b>Предоплата:</b> {dep_str}\n\n"
+        f"{policy_text}"
     )
 
     await state.set_state(ClientBookingSG.confirming_policy)
@@ -610,6 +624,9 @@ async def cb_agree_policy(
             show_alert=True,
         )
         return
+    except PaymentRequisitesMissingError as exc:
+        await callback.answer(exc.message, show_alert=True)
+        return
     except SubscriptionExpiredError as exc:
         # The entitlement gate is an expected business rejection. Acknowledge
         # it only after the webhook transaction commits its completion marker,
@@ -622,15 +639,9 @@ async def cb_agree_policy(
 
     # Fetch requisites from settings
     settings_repo = MasterSettingsRepository(session)
-    bank_name = await settings_repo.get_value(master_id, "bank_name", settings.bank_name)
-    card_number = await settings_repo.get_value(master_id, "bank_card_number", settings.bank_card_number)
-    phone_req = await settings_repo.get_value(master_id, "default_phone_requisites", settings.default_phone_requisites)
-    recipient = await settings_repo.get_value(master_id, "bank_recipient_name", settings.bank_recipient_name)
-    hold_mins = int(await settings_repo.get_value(master_id, "hold_duration_minutes", settings.hold_duration_minutes))
-
+    master_payment_settings = await settings_repo.get_by_master_id(master_id)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
-    deposit_str = format_rub(appointment.snapshot_deposit_amount)
 
     staff_line = ""
     if appointment.staff_id:
@@ -638,9 +649,65 @@ async def cb_agree_policy(
         if staff_obj:
             staff_line = f"👩‍💼 <b>Специалист:</b> {escape(staff_obj.display_name)}\n"
 
+    bot_instance_id = bound_bot_instance_id(session, master_id)
+    if payment is None:
+        text = (
+            f"✅ <b>Запись подтверждена! (№{appointment.id})</b>\n\n"
+            f"🌸 <b>Услуга:</b> {escape(appointment.snapshot_service_title)}\n"
+            f"{staff_line}"
+            f"🗓 <b>Дата и время:</b> {dt_str}\n\n"
+            "Предоплата не требуется. До встречи!"
+        )
+        session.info.setdefault("post_commit", []).append(state.clear)
+        if callback.message:
+            await enqueue_telegram_edit(
+                session,
+                master_id=master_id,
+                bot_instance_id=bot_instance_id,
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                text=text,
+                reply_markup=get_main_menu_keyboard(is_admin=False),
+                idempotency_key=f"appointment:{appointment.id}:confirmation-screen",
+            )
+        else:
+            await enqueue_telegram_message(
+                session,
+                master_id=master_id,
+                bot_instance_id=bot_instance_id,
+                chat_id=callback.from_user.id,
+                text=text,
+                reply_markup=get_main_menu_keyboard(is_admin=False),
+                idempotency_key=f"appointment:{appointment.id}:confirmation-screen",
+            )
+        session.info.setdefault("post_commit", []).append(callback.answer)
+        return
+
+    if not master_payment_settings or not all(
+        value and value.strip()
+        for value in (
+            master_payment_settings.bank_name,
+            master_payment_settings.bank_card_number,
+            master_payment_settings.bank_recipient_name,
+        )
+    ):
+        # BookingService enforces this invariant before appointment insertion.
+        # Keep a visible, neutral fail-closed response if the settings row changes
+        # during this transaction or an unexpected legacy record is encountered.
+        await callback.answer(
+            "Предоплата временно недоступна. Свяжитесь с мастером.", show_alert=True
+        )
+        return
+
+    bank_name = escape(master_payment_settings.bank_name.strip())
+    card_number = escape(master_payment_settings.bank_card_number.strip())
+    recipient = escape(master_payment_settings.bank_recipient_name.strip())
+    hold_mins = int(await settings_repo.get_value(master_id, "hold_duration_minutes", settings.hold_duration_minutes))
+    deposit_str = format_rub(appointment.snapshot_deposit_amount)
+
     text = (
         f"🎉 <b>Слот успешно зарезервирован! (Запись #{appointment.id})</b>\n\n"
-        f"🌸 <b>Услуга:</b> {appointment.snapshot_service_title}\n"
+        f"🌸 <b>Услуга:</b> {escape(appointment.snapshot_service_title)}\n"
         f"{staff_line}"
         f"🗓 <b>Дата и время:</b> {dt_str}\n"
         f"💳 <b>Предоплата к переводу:</b> {deposit_str}\n\n"
@@ -648,7 +715,6 @@ async def cb_agree_policy(
         "<b>Реквизиты для перевода:</b>\n"
         f"🏦 <b>Банк:</b> {bank_name}\n"
         f"💳 <b>Номер карты:</b> <code>{card_number}</code>\n"
-        f"📱 <b>По номеру телефона (СБП):</b> <code>{phone_req}</code>\n"
         f"👤 <b>Получатель:</b> {recipient}\n\n"
         "После перевода нажмите <b>«Я оплатил(а)»</b> и отправьте фото чека или скриншот:"
     )
@@ -657,7 +723,6 @@ async def cb_agree_policy(
     # processed-update marker have committed together.
     session.info.setdefault("post_commit", []).append(state.clear)
 
-    bot_instance_id = bound_bot_instance_id(session, master_id)
     if callback.message:
         await enqueue_telegram_edit(
             session,

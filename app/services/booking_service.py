@@ -24,6 +24,7 @@ from app.repositories.user_repository import UserRepository
 from app.services.exceptions import (
     BookingNotFoundError,
     InvalidBookingStatusError,
+    PaymentRequisitesMissingError,
     ServiceNotFoundError,
     SlotAlreadyBookedError,
     SubscriptionExpiredError,
@@ -75,8 +76,8 @@ class BookingService:
         is_manual: bool = False,
         admin_notes: Optional[str] = None,
         staff_id: Optional[int] = None,
-    ) -> Tuple[Appointment, Payment]:
-        """Atomically reserve a slot, create immutable snapshot and pending deposit payment for a master."""
+    ) -> Tuple[Appointment, Optional[Payment]]:
+        """Create a booking and, only for a positive deposit, its pending payment."""
         # Serialize booking creation with suspend/renewal/expiration updates.
         # A previously read ACTIVE state must not outlive an admin suspension.
         if isinstance(self.session, AsyncSession):
@@ -147,6 +148,24 @@ class BookingService:
         else:
             deposit_amount = service.deposit_value.quantize(Decimal("1.00"))
 
+        # Do not create a client hold/payment with sample, shared, or incomplete
+        # payment details. Admin-created appointments do not collect a deposit.
+        if deposit_amount > 0 and not is_manual:
+            master_settings = await self.master_settings_repo.get_by_master_id(master_id)
+            has_requisites = bool(
+                master_settings
+                and master_settings.bank_name
+                and master_settings.bank_name.strip()
+                and master_settings.bank_card_number
+                and master_settings.bank_card_number.strip()
+                and master_settings.bank_recipient_name
+                and master_settings.bank_recipient_name.strip()
+            )
+            if not has_requisites:
+                raise PaymentRequisitesMissingError(
+                    "Предоплата временно недоступна: мастер ещё не настроил реквизиты."
+                )
+
         # 6. Determine hold deadline from master's settings
         hold_minutes = int(
             await self.master_settings_repo.get_value(
@@ -157,7 +176,12 @@ class BookingService:
         hold_until = now_utc + timedelta(minutes=hold_minutes)
 
         # Initial status
-        initial_status = AppointmentStatus.CONFIRMED if is_manual else AppointmentStatus.WAITING_PAYMENT
+        no_deposit_required = deposit_amount <= 0
+        initial_status = (
+            AppointmentStatus.CONFIRMED
+            if is_manual or no_deposit_required
+            else AppointmentStatus.WAITING_PAYMENT
+        )
 
         # Trial/paid_until can elapse while slot queries run. Administrative
         # status changes remain serialized by the Master row lock above.
@@ -174,7 +198,7 @@ class BookingService:
             start_time=start_time,
             end_time=end_time,
             end_time_with_buffer=end_time_with_buffer,
-            hold_until=None if is_manual else hold_until,
+            hold_until=None if is_manual or no_deposit_required else hold_until,
             cancel_policy_agreed=cancel_policy_agreed,
             snapshot_service_title=service.title,
             snapshot_service_price=service.price,
@@ -195,6 +219,10 @@ class BookingService:
             raise SlotAlreadyBookedError(
                 "Выбранный интервал только что был забронирован другим клиентом. Пожалуйста, выберите другое время."
             ) from exc
+
+        if no_deposit_required and not is_manual:
+            await self.session.refresh(appointment)
+            return appointment, None
 
         # 8. Create associated deposit payment strictly under master_id
         payment = await self.payment_repo.create_payment(

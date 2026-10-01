@@ -12,11 +12,13 @@ import logging
 import secrets
 from typing import Any, AsyncGenerator, Optional
 import uuid
+import re
 from urllib.parse import parse_qs
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -26,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.bot_instance import create_dispatcher
 from app.config.settings import settings
+from app.core.token_crypto import TokenCrypto
 from app.core.security import install_sensitive_logging
 from app.database.models.master import BotInstanceStatus
 from app.database.models.subscription import SubscriptionPayment
@@ -34,6 +37,7 @@ from app.manager_bot.dispatcher import create_manager_dispatcher
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.scheduler import MultiTenantScheduler
 from app.services.bot_registry import BotRegistry
+from app.services.bot_factory import BotFactory
 from app.services.billing.yookassa_checkout import YooKassaCheckoutService
 from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError
 from app.services.billing.checkout_session import CheckoutSessionNotFound, CheckoutSessionService
@@ -60,6 +64,76 @@ BILLING_PAGE_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
 }
+
+
+async def _notify_inactive_bot_update(
+    bot_instance: Any,
+    update: Update,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Tell users that an old/disabled bot is no longer the active project bot.
+
+    This path is intentionally outside BotRegistry: the instance is ineligible
+    for business handling, but its own Telegram token can safely answer the
+    update with a static, tenant-neutral notice. No update is sent to handlers.
+    """
+    if not bot_instance.encrypted_token or not bot_instance.telegram_bot_id:
+        logger.warning(
+            "Inactive bot update acknowledged without notification: bot_instance_id=%s",
+            bot_instance.id,
+        )
+        return
+
+    text = "Этот бот больше не активен. Откройте актуального бота проекта."
+    try:
+        async with session_factory() as session:
+            current = await BotInstanceRepository(session).get_current_for_master(
+                bot_instance.master_id
+            )
+        if current and current.telegram_username and re.fullmatch(
+            r"[A-Za-z0-9_]{5,32}", current.telegram_username
+        ):
+            text += f"\n\nАктуальный бот: @{current.telegram_username}"
+
+        token = TokenCrypto().decrypt(
+            bot_instance.encrypted_token,
+            associated_data=bot_instance.telegram_bot_id,
+        )
+        bot = BotFactory.create(token)
+        try:
+            if update.callback_query:
+                await bot.answer_callback_query(
+                    callback_query_id=update.callback_query.id,
+                    text=text,
+                    show_alert=True,
+                )
+            else:
+                message = update.message or update.edited_message
+                if message and message.chat.type == "private":
+                    await bot.send_message(message.chat.id, text)
+        finally:
+            await bot.session.close()
+    except TelegramBadRequest as exc:
+        lowered = str(exc).lower()
+        if "query is too old" in lowered or "query id is invalid" in lowered:
+            logger.debug(
+                "Could not answer stale callback for inactive bot_instance_id=%s",
+                bot_instance.id,
+            )
+        else:
+            logger.warning(
+                "Could not notify user about inactive bot_instance_id=%s error_type=%s",
+                bot_instance.id,
+                type(exc).__name__,
+            )
+    except Exception as exc:
+        # Never include exception text: Telegram transport exceptions may embed
+        # the bot token URL.
+        logger.warning(
+            "Could not notify user about inactive bot_instance_id=%s error_type=%s",
+            bot_instance.id,
+            type(exc).__name__,
+        )
 
 
 async def read_limited_request_body(request: Request, max_bytes: int) -> bytes:
@@ -483,27 +557,8 @@ def create_app(
                 detail="Forbidden: Invalid secret token",
             )
 
-        # 5. Check if BotInstance is in an inactive/forbidden status
-        if not bot_instance.is_current or bot_instance.status in (
-            BotInstanceStatus.DISABLED,
-            BotInstanceStatus.ERROR,
-            BotInstanceStatus.PROVISIONING,
-        ):
-            logger.warning(
-                "Bot instance #%s has inactive status %s, rejecting update",
-                bot_instance.id,
-                bot_instance.status,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"Bot instance is {bot_instance.status.value}"
-                    if bot_instance.status != BotInstanceStatus.ACTIVE
-                    else "Bot instance unavailable"
-                ),
-            )
-
-        # 6. Parse and validate Telegram Update payload
+        # 5. Parse and validate Telegram Update payload before lifecycle policy,
+        # so stale bots can acknowledge callbacks/messages with a clear notice.
         try:
             update_data = json.loads(raw_body.decode("utf-8"))
             update = Update.model_validate(update_data)
@@ -518,6 +573,50 @@ def create_app(
                 detail="Invalid update payload",
             )
 
+        if update.callback_query:
+            ingress_type = "callback_query"
+            ingress_action = (update.callback_query.data or "").split(":", 1)[0][:32]
+        elif update.message:
+            ingress_type = "message"
+            ingress_action = "-"
+        else:
+            ingress_type = "other"
+            ingress_action = "-"
+        logger.info(
+            "Telegram webhook received: update_id=%s bot_instance_id=%s master_id=%s "
+            "status=%s current=%s type=%s callback_prefix=%s",
+            update.update_id,
+            bot_instance.id,
+            bot_instance.master_id,
+            bot_instance.status,
+            bot_instance.is_current,
+            ingress_type,
+            ingress_action or "<empty>",
+        )
+
+        # 6. Never dispatch updates for a replaced or administratively stopped
+        # instance. Return 200 after a user-facing notice so Telegram does not
+        # retry the same stale update forever. A current PROVISIONING instance
+        # is transient, so Telegram may retry it briefly.
+        if not bot_instance.is_current or bot_instance.status in (
+            BotInstanceStatus.DISABLED,
+            BotInstanceStatus.ERROR,
+        ):
+            logger.warning(
+                "Bot instance #%s is inactive (status=%s current=%s); acknowledging without dispatch",
+                bot_instance.id,
+                bot_instance.status,
+                bot_instance.is_current,
+            )
+            await _notify_inactive_bot_update(
+                bot_instance,
+                update,
+                session_maker,
+            )
+            return {"ok": True, "status": "inactive_bot"}
+        if bot_instance.status == BotInstanceStatus.PROVISIONING:
+            raise HTTPException(status_code=503, detail="Bot is provisioning")
+
         # 7. Deduplication check in Redis
         deduplicator: UpdateDeduplicator = app.state.deduplicator
         try:
@@ -525,14 +624,43 @@ def create_app(
         except DedupUnavailableError:
             raise HTTPException(status_code=503, detail="Update deduplication unavailable")
         if acquired.state == DedupState.COMPLETED:
+            logger.info(
+                "Telegram webhook duplicate completed: update_id=%s bot_instance_id=%s master_id=%s",
+                update.update_id,
+                bot_instance.id,
+                bot_instance.master_id,
+            )
             return {"ok": True, "status": "duplicate"}
         if acquired.state == DedupState.PROCESSING:
             # Telegram must retry if the first replica crashes mid-handler.
+            logger.warning(
+                "Telegram webhook update already processing: update_id=%s bot_instance_id=%s master_id=%s",
+                update.update_id,
+                bot_instance.id,
+                bot_instance.master_id,
+            )
             raise HTTPException(status_code=503, detail="Update is still processing")
         claim = acquired.claim
         assert claim is not None
 
         try:
+            if update.callback_query:
+                update_type = "callback_query"
+                callback_prefix = (update.callback_query.data or "").split(":", 1)[0][:32]
+            elif update.message:
+                update_type = "message"
+                callback_prefix = "-"
+            else:
+                update_type = "other"
+                callback_prefix = "-"
+            logger.info(
+                "Dispatching Telegram update: update_id=%s bot_instance_id=%s master_id=%s type=%s callback_prefix=%s",
+                update.update_id,
+                bot_instance.id,
+                bot_instance.master_id,
+                update_type,
+                callback_prefix or "<empty>",
+            )
             # 8. Retrieve aiogram.Bot from BotRegistry
             registry: BotRegistry = app.state.registry
             async with session_maker() as session:

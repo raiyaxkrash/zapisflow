@@ -549,7 +549,7 @@ async def test_09_audit_log_records_bot_disabled(
 async def test_10_disabled_bot_rejects_incoming_customer_webhook_403(
     pg_session: AsyncSession, crypto: TokenCrypto, fake_redis: fakeredis.aioredis.FakeRedis
 ) -> None:
-    """Incoming customer webhook updates for a DISABLED bot return 403 Forbidden."""
+    """Disabled-bot updates are acknowledged without dispatch to stop Telegram retries."""
     owner = await _create_test_user(pg_session, 5012)
     master, bot_instance = await _create_test_master_with_bot(
         pg_session, owner, crypto, bot_status=BotInstanceStatus.DISABLED
@@ -580,13 +580,15 @@ async def test_10_disabled_bot_rejects_incoming_customer_webhook_403(
                 "text": "Привет",
             },
         }
-        resp = await client.post(
-            f"/telegram/webhook/{bot_instance.public_id}",
-            json=update_payload,
-            headers={"X-Telegram-Bot-Api-Secret-Token": bot_instance.webhook_secret},
-        )
-        assert resp.status_code == 403
-        assert "DISABLED" in resp.json()["detail"]
+        with patch("app.web.app._notify_inactive_bot_update", new_callable=AsyncMock) as notify:
+            resp = await client.post(
+                f"/telegram/webhook/{bot_instance.public_id}",
+                json=update_payload,
+                headers={"X-Telegram-Bot-Api-Secret-Token": bot_instance.webhook_secret},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "status": "inactive_bot"}
+        notify.assert_awaited_once()
 
 
 # ===========================================================================
