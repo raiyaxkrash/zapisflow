@@ -6,6 +6,7 @@ import hashlib
 import logging
 from typing import Any, Awaitable, Callable, Dict
 from aiogram import BaseMiddleware
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import TelegramObject, Update
 from sqlalchemy import text
 
@@ -48,7 +49,16 @@ class DbSessionMiddleware(BaseMiddleware):
                     if await session.get(ProcessedWebhookUpdate, (scope, update_id)):
                         return None
 
-                result = await handler(event, data)
+                try:
+                    result = await handler(event, data)
+                except TelegramBadRequest as exc:
+                    if "message is not modified" not in str(exc).lower():
+                        raise
+                    # A repeated callback may render the same view. Treat that
+                    # Telegram response as a successful no-op so the business
+                    # transaction and processed-update ledger can commit.
+                    logger.debug("Ignoring unchanged Telegram message for update scope=%s id=%s", scope, update_id)
+                    result = None
                 if scope is not None and update_id is not None:
                     session.add(ProcessedWebhookUpdate(scope=scope, update_id=update_id))
                 await session.commit()

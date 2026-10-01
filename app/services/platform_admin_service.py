@@ -371,14 +371,14 @@ class PlatformAdminService:
             if bot and self.registry:
                 await self.registry.invalidate_bot(bot.id, reason="project_suspended")
 
-        await self.session.commit()
+        await self.session.flush()
         await self.audit_service.log_event(
             action=action,
             actor_user_id=actor_user_id,
             master_id=master_id,
             payload_after={"status": master.status.value},
         )
-        await self.session.commit()
+        await self.session.flush()
         return True, msg
 
     async def list_bots(
@@ -564,7 +564,7 @@ class PlatformAdminService:
             return False, "Тариф не найден."
 
         plan.is_active = not plan.is_active
-        await self.session.commit()
+        await self.session.flush()
 
         status_str = "активирован" if plan.is_active else "деактивирован"
         await self.audit_service.log_event(
@@ -573,5 +573,5 @@ class PlatformAdminService:
             entity_id=plan.id,
             payload_after={"is_active": plan.is_active},
         )
-        await self.session.commit()
+        await self.session.flush()
         return True, f"Тариф «{plan.name}» {status_str}."

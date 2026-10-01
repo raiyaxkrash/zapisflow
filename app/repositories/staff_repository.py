@@ -85,18 +85,28 @@ class StaffRepository(BaseRepository[StaffMember]):
             staff = (await self.session.execute(fallback_q)).scalars().first()
         if not staff:
             # Auto-provision primary staff if none exists for this master
+            # Lock only on the creation path; ordinary availability reads
+            # should not serialize on the tenant row.
             from app.database.models.master import Master
-            m_res = await self.session.execute(select(Master).where(Master.id == master_id))
-            master_obj = m_res.scalars().first()
-            if master_obj:
-                staff = StaffMember(
-                    master_id=master_id,
-                    display_name=master_obj.display_name or "Основной мастер",
-                    is_active=True,
-                    sort_order=0,
-                )
-                self.session.add(staff)
-                await self.session.flush()
+
+            master_obj = await self.session.scalar(
+                select(Master).where(Master.id == master_id).with_for_update()
+            )
+            if master_obj is None:
+                return None
+            # Another session may have inserted the staff member while this
+            # session waited for the parent lock.
+            staff = (await self.session.execute(fallback_q)).scalars().first()
+            if staff is not None:
+                return staff
+            staff = StaffMember(
+                master_id=master_id,
+                display_name=master_obj.display_name or "Основной мастер",
+                is_active=True,
+                sort_order=0,
+            )
+            self.session.add(staff)
+            await self.session.flush()
         return staff
 
     async def create_staff(

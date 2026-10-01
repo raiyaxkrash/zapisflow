@@ -6,9 +6,9 @@
 [![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-blue.svg)](https://www.postgresql.org/)
 [![Redis 7](https://img.shields.io/badge/Redis-7-red.svg)](https://redis.io/)
 [![SQLAlchemy 2.0](https://img.shields.io/badge/SQLAlchemy-2.0-red.svg)](https://docs.sqlalchemy.org/)
-[![Alembic](https://img.shields.io/badge/Alembic-0021%20head-orange.svg)](https://alembic.sqlalchemy.org/)
+[![Alembic](https://img.shields.io/badge/Alembic-0022%20head-orange.svg)](https://alembic.sqlalchemy.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/tests-504%20passed-success.svg)](https://github.com/raiyaxkrash/zapisflow)
+[![Tests](https://img.shields.io/badge/tests-518%20passed-success.svg)](https://github.com/raiyaxkrash/zapisflow)
 
 **ZapisFlow** — это промышленная мультитенантная облачная B2B SaaS-платформа для автоматизации онлайн-записи, управления студиями красоты и работы частных мастеров (лэшмейкеры, бровисты, мастера маникюра, барберы, косметологи, визажисты) через персональных Telegram-ботов.
 
@@ -136,11 +136,7 @@
 - **Финансы и аналитика:** Выручка от услуг, удержанные предоплаты, валовый доход, средний чек, топ услуг за период.
 
 ### 💳 5. SaaS-монетизация и биллинг (YooKassa Web Checkout)
-- **Каталог официальных тарифов:**
-  - 1 месяц — **499 ₽** (`basic_monthly`)
-  - 3 месяца — **1 299 ₽** (`basic_3_months`, выгода ~13%)
-  - 6 месяцев — **2 390 ₽** (`basic_6_months`, выгода ~20%)
-  - 12 месяцев — **4 490 ₽** (`basic_yearly`, выгода ~25%)
+- **Активный тариф:** 30 дней — **499 ₽** (`basic_monthly`). Ранее созданные тарифы на 3, 6 и 12 месяцев сохранены в БД для истории, но отключены от продажи.
 - **Честный пробный период (Trial):**
   - 14 дней полного доступа без ввода банковской карты.
   - Защита от злоупотреблений: триал закреплён за аккаунтом пользователя `User` (`trial_claimed_at`). Удаление, повторное создание проекта или смена сотрудников не сбрасывают триал.

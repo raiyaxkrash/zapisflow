@@ -10,7 +10,7 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
@@ -2433,20 +2433,38 @@ async def cb_admin_payment_check(callback: CallbackQuery, session: AsyncSession)
     if not is_admin:
         return
 
-    payment_id = int(callback.data.split(":")[-1])
-    checkout_service = YooKassaCheckoutService(session=session)
+    payment_id_text = callback.data.rsplit(":", 1)[-1]
+    if not payment_id_text.isdecimal():
+        await callback.answer("Некорректный запрос.", show_alert=True)
+        return
+    payment_id = int(payment_id_text)
     payment = await session.get(SubscriptionPayment, payment_id)
-    if not payment:
+    if payment is None or payment.provider != "YOOKASSA":
         await callback.answer("Платёж не найден.", show_alert=True)
         return
 
     master = await session.get(Master, payment.master_id)
-    actor_id = master.owner_user_id if master else 0
+    if master is None:
+        await callback.answer("Проект платежа не найден.", show_alert=True)
+        return
 
-    result = await checkout_service.check_payment(payment_id=payment_id, actor_user_id=actor_id)
+    try:
+        shop_id, secret_key = settings.yookassa_credentials
+        checkout_service = YooKassaCheckoutService(
+            async_session_factory, YooKassaClient(shop_id, secret_key)
+        )
+        result = await checkout_service.check_payment(
+            payment_id=payment_id, actor_user_id=master.owner_user_id
+        )
+    except (SubscriptionError, YooKassaGatewayError, ValueError):
+        logger.warning("Platform payment reconciliation failed for payment_id=%s", payment_id)
+        await callback.answer("Не удалось проверить платёж. Повторите позже или обратитесь в поддержку.", show_alert=True)
+        return
+
     await callback.answer(f"Статус платежа: {result.status}", show_alert=True)
 
     # Refresh details
+    session.expire(payment)
     admin_svc = PlatformAdminService(session)
     p = await admin_svc.get_payment_details(payment_id)
     if p:
@@ -2458,7 +2476,7 @@ async def cb_admin_payment_check(callback: CallbackQuery, session: AsyncSession)
             f"Сумма: <b>{p['amount']} {p['currency']}</b>\n"
             f"Провайдер: <b>{p['provider']}</b>\n"
             f"Статус: <b>{p['status']}</b>\n"
-            f"ID в YooKassa: <code>{p['provider_payment_id']}</code>\n"
+            f"ID в YooKassa: <code>{escape(p['provider_payment_id'])}</code>\n"
             f"Создан: {p['created_at'].strftime('%d.%m.%Y %H:%M') if p['created_at'] else '-'}\n"
             f"Оплачен: {p['paid_at'].strftime('%d.%m.%Y %H:%M') if p['paid_at'] else '-'}\n"
         )
@@ -2487,7 +2505,7 @@ async def cb_admin_payment_detail(callback: CallbackQuery, session: AsyncSession
         f"Сумма: <b>{p['amount']} {p['currency']}</b>\n"
         f"Провайдер: <b>{p['provider']}</b>\n"
         f"Статус: <b>{p['status']}</b>\n"
-        f"ID в YooKassa: <code>{p['provider_payment_id']}</code>\n"
+        f"ID в YooKassa: <code>{escape(p['provider_payment_id'])}</code>\n"
         f"Период: {p['period_days']} дней\n"
         f"Создан: {p['created_at'].strftime('%d.%m.%Y %H:%M') if p['created_at'] else '-'}\n"
         f"Оплачен: {p['paid_at'].strftime('%d.%m.%Y %H:%M') if p['paid_at'] else '-'}\n"

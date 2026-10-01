@@ -71,27 +71,23 @@ async def test_01_basic_plan_configuration(pg_session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_02_multi_period_plans_in_db(pg_session: AsyncSession) -> None:
-    """2. Database architecture supports multi-period plans with dynamic prices."""
+    """2. Unapproved multi-period plans remain historical but cannot be purchased."""
     sub_service = SubscriptionService(pg_session)
     plans = await sub_service.list_active_plans()
     plan_codes = {p.code: p for p in plans}
 
     assert "basic_monthly" in plan_codes
-    assert "basic_3_months" in plan_codes
-    assert "basic_6_months" in plan_codes
-    assert "basic_yearly" in plan_codes
+    for code in ("basic_3_months", "basic_6_months", "basic_yearly"):
+        assert code not in plan_codes
+        historical_plan = await pg_session.scalar(
+            select(SubscriptionPlan).where(SubscriptionPlan.code == code)
+        )
+        assert historical_plan is not None
+        assert historical_plan.is_active is False
 
-    p3m = plan_codes["basic_3_months"]
-    assert p3m.duration_days == 90
-    assert p3m.price_rub == Decimal("1299.00")
-
-    p6m = plan_codes["basic_6_months"]
-    assert p6m.duration_days == 180
-    assert p6m.price_rub == Decimal("2390.00")
-
-    p1y = plan_codes["basic_yearly"]
-    assert p1y.duration_days == 365
-    assert p1y.price_rub == Decimal("4490.00")
+    for forged_code in ("basic_3_months", "unknown_plan", "BASIC"):
+        with pytest.raises(PlanNotFoundError):
+            await sub_service.get_active_plan(forged_code)
 
 
 @pytest.mark.asyncio

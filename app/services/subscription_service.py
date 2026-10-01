@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
 from app.database.models.audit import AuditLog
-from app.database.models.master import Master, SubscriptionStatus
+from app.database.models.master import Master, MasterStatus, SubscriptionStatus
 from app.database.models.subscription import (
     EffectiveSubscriptionStatus,
     SubscriptionPayment,
@@ -101,7 +101,9 @@ class SubscriptionService:
             paid_until = paid_until.replace(tzinfo=timezone.utc)
 
         # 1. Administrative suspension always supersedes timestamps
-        if stored == SubscriptionStatus.SUSPENDED:
+        if stored == SubscriptionStatus.SUSPENDED or master.status in (
+            MasterStatus.SUSPENDED, MasterStatus.ARCHIVED
+        ):
             return EffectiveSubscription(
                 master_id=master_id,
                 status=EffectiveSubscriptionStatus.SUSPENDED,
@@ -200,37 +202,13 @@ class SubscriptionService:
         )
 
     async def get_active_plan(self, plan_code: str = "basic_monthly") -> SubscriptionPlan:
-        """Fetch active subscription plan from DB with graceful fallback."""
+        """Fetch exactly the requested active plan; never substitute a forged code."""
         stmt = select(SubscriptionPlan).where(
             SubscriptionPlan.code == plan_code,
             SubscriptionPlan.is_active == True,  # noqa: E712
         )
         res = await self.session.execute(stmt)
         plan = res.scalars().first()
-        if not plan:
-            # Fallback between 'BASIC' and 'basic_monthly' for backward compatibility
-            fallback_code = (
-                "BASIC" if plan_code == "basic_monthly" else ("basic_monthly" if plan_code == "BASIC" else None)
-            )
-            if fallback_code:
-                fb_res = await self.session.execute(
-                    select(SubscriptionPlan).where(
-                        SubscriptionPlan.code == fallback_code,
-                        SubscriptionPlan.is_active == True,
-                    )
-                )
-                plan = fb_res.scalars().first()
-
-        if not plan:
-            # First active plan by sort_order
-            first_res = await self.session.execute(
-                select(SubscriptionPlan)
-                .where(SubscriptionPlan.is_active == True)
-                .order_by(SubscriptionPlan.sort_order.asc(), SubscriptionPlan.period_days.asc())
-                .limit(1)
-            )
-            plan = first_res.scalars().first()
-
         if not plan:
             raise PlanNotFoundError(f"Active subscription plan '{plan_code}' not found")
         return plan

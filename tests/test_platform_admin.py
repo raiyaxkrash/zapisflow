@@ -61,6 +61,7 @@ from app.services.audit_service import AuditEvent
 from app.services.bot_provisioning_service import BotProvisioningService
 from app.services.exceptions import AccessDeniedError
 from app.services.platform_admin_service import PlatformAdminService
+from app.services.subscription_access_policy import SubscriptionAccessPolicy
 from tests.conftest import requires_postgres
 
 
@@ -247,6 +248,7 @@ async def test_project_listing_and_suspension_toggle(pg_session: AsyncSession):
     assert "приостановлен" in msg.lower()
     await pg_session.refresh(master)
     assert master.status == MasterStatus.SUSPENDED
+    assert await SubscriptionAccessPolicy(pg_session).can_create_hold(master.id) is False
 
     # Unsuspend
     ok2, msg2 = await admin_svc.toggle_project_suspension(master.id, actor_user_id=owner.id)
