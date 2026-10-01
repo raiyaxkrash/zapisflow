@@ -5,6 +5,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -135,13 +136,18 @@ async def cb_projects(callback: CallbackQuery, state: FSMContext, session: Async
     master_repo = MasterRepository(session)
     masters = await master_repo.list_by_owner_id(user.id)
 
-    if not masters:
-        text = "У вас пока нет созданных проектов. Создайте свой первый проект:"
-        await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
-    else:
-        text = "📁 <b>Ваши проекты:</b>\nВыберите проект для управления или настройки бота:"
-        await callback.message.edit_text(text, reply_markup=project_list_keyboard(masters))
     await callback.answer()
+
+    try:
+        if not masters:
+            text = "У вас пока нет созданных проектов. Создайте свой первый проект:"
+            await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
+        else:
+            text = "📁 <b>Ваши проекты:</b>\nВыберите проект для управления или настройки бота:"
+            await callback.message.edit_text(text, reply_markup=project_list_keyboard(masters))
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 # ---------------------------------------------------------------------------

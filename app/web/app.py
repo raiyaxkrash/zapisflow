@@ -14,6 +14,8 @@ from typing import Any, AsyncGenerator, Optional
 import uuid
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -130,7 +132,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize Manager Bot if not explicitly injected and token configured
     if not hasattr(app.state, "manager_bot") or app.state.manager_bot is None:
         if settings.manager_bot_token:
-            app.state.manager_bot = Bot(token=settings.manager_bot_token)
+            app.state.manager_bot = Bot(
+                token=settings.manager_bot_token,
+                default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+            )
 
     # Initialize MultiTenantScheduler if enabled and not explicitly injected
     if not hasattr(app.state, "scheduler") or app.state.scheduler is None:
