@@ -8,6 +8,7 @@ from app.config.settings import settings
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterSettings
 from app.database.models.portfolio import PortfolioCategory, PortfolioItem
 from app.database.models.service import DepositType, Service
+from app.database.models.staff import StaffMember
 from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPlan
 
 
@@ -48,9 +49,27 @@ def project_card_keyboard(
     master: Master,
     bot_instance: Optional[BotInstance] = None,
     is_ready: bool = False,
+    is_staff_only: bool = False,
 ) -> InlineKeyboardMarkup:
     """Action buttons for a single Master project."""
     rows = []
+
+    if is_staff_only:
+        # Restricted view for regular specialists
+        rows.append([
+            InlineKeyboardButton(text="📅 Моё расписание", callback_data=f"mgr:schedule:{master.id}"),
+            InlineKeyboardButton(text="👥 Мои клиенты", callback_data=f"mgr:crm:{master.id}"),
+        ])
+        rows.append([
+            InlineKeyboardButton(text="💅 Услуги", callback_data=f"mgr:services:{master.id}"),
+            InlineKeyboardButton(text="⭐ Отзывы", callback_data=f"mgr:reviews:{master.id}"),
+        ])
+        rows.append([
+            InlineKeyboardButton(text="📊 Моя статистика", callback_data=f"mgr:stats:{master.id}"),
+            InlineKeyboardButton(text="🖼 Портфолио", callback_data=f"mgr:portfolio:{master.id}"),
+        ])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад к проектам", callback_data="mgr:projects")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     if bot_instance is None:
         # No bot connected yet
@@ -148,11 +167,12 @@ def project_card_keyboard(
         InlineKeyboardButton(text="💰 Финансы", callback_data=f"mgr:finances:{master.id}"),
     ])
     rows.append([
+        InlineKeyboardButton(text="👥 Сотрудники", callback_data=f"mgr:staff:{master.id}"),
         InlineKeyboardButton(text="💅 Услуги", callback_data=f"mgr:services:{master.id}"),
         InlineKeyboardButton(text="🖼 Портфолио", callback_data=f"mgr:portfolio:{master.id}"),
-        InlineKeyboardButton(text="⭐ Отзывы", callback_data=f"mgr:reviews:{master.id}"),
     ])
     rows.append([
+        InlineKeyboardButton(text="⭐ Отзывы", callback_data=f"mgr:reviews:{master.id}"),
         InlineKeyboardButton(text="📊 Статистика", callback_data=f"mgr:stats:{master.id}"),
         InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"mgr:settings:{master.id}"),
     ])
@@ -1180,3 +1200,104 @@ def manager_prepayment_settings_keyboard(
             [InlineKeyboardButton(text="⬅️ Назад к настройкам", callback_data=f"mgr:settings:{master_id}")],
         ]
     )
+
+
+def staff_list_keyboard(
+    master_id: int, staff_members: Sequence[StaffMember]
+) -> InlineKeyboardMarkup:
+    """List of specialists in a master studio."""
+    buttons = []
+    for s in staff_members:
+        status_icon = "🟢" if s.is_active else "⚪️"
+        spec_text = f" ({s.specialization})" if s.specialization else ""
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{status_icon} {s.display_name}{spec_text}",
+                callback_data=f"mgr:staff:card:{master_id}:{s.id}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="➕ Добавить сотрудника",
+            callback_data=f"mgr:staff:add:{master_id}",
+        )
+    ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад к проекту",
+            callback_data=f"mgr:master:{master_id}",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def staff_card_keyboard(
+    master_id: int, staff: StaffMember
+) -> InlineKeyboardMarkup:
+    """Detailed management card for an individual staff member."""
+    toggle_text = "⏸ Деактивировать" if staff.is_active else "▶️ Активировать"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✏️ Изменить имя",
+                    callback_data=f"mgr:staff:edit:name:{master_id}:{staff.id}",
+                ),
+                InlineKeyboardButton(
+                    text="✂️ Специализация",
+                    callback_data=f"mgr:staff:edit:spec:{master_id}:{staff.id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💅 Настроить услуги мастера",
+                    callback_data=f"mgr:staff:services:{master_id}:{staff.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔗 Ссылка-приглашение в Telegram",
+                    callback_data=f"mgr:staff:invite:{master_id}:{staff.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=toggle_text,
+                    callback_data=f"mgr:staff:toggle:{master_id}:{staff.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ К списку сотрудников",
+                    callback_data=f"mgr:staff:{master_id}",
+                )
+            ],
+        ]
+    )
+
+
+def staff_services_keyboard(
+    master_id: int,
+    staff_id: int,
+    all_services: Sequence[Service],
+    assigned_service_ids: Sequence[int],
+) -> InlineKeyboardMarkup:
+    """Toggle which services are provided by this staff member."""
+    assigned_set = set(assigned_service_ids)
+    buttons = []
+    for svc in all_services:
+        is_assigned = svc.id in assigned_set
+        icon = "✅" if is_assigned else "⬜️"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {svc.title} ({svc.price} ₽)",
+                callback_data=f"mgr:staff:svc_toggle:{master_id}:{staff_id}:{svc.id}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="💾 Готово",
+            callback_data=f"mgr:staff:card:{master_id}:{staff_id}",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

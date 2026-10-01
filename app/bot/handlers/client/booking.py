@@ -2,6 +2,7 @@
 Client online booking flow handlers (service -> calendar -> slots -> phone -> policy -> hold).
 """
 
+from html import escape
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
@@ -16,6 +17,7 @@ from app.bot.keyboards.client import (
     CalendarNavCallback,
     MenuCallback,
     ServiceCallback,
+    StaffChoiceCallback,
     TimeSlotCallback,
     build_inline_calendar,
     build_time_slots_keyboard,
@@ -24,6 +26,7 @@ from app.bot.keyboards.client import (
     get_phone_request_keyboard,
     get_policy_agreement_keyboard,
     get_services_list_keyboard,
+    get_staff_selection_keyboard,
 )
 from app.bot.states.client import ClientBookingSG
 from app.config.settings import settings
@@ -31,6 +34,7 @@ from app.database.models.master import BotInstance, BotInstanceStatus
 from app.database.models.user import User
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.service_repository import ServiceRepository
+from app.repositories.staff_repository import StaffRepository
 from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
 from app.services.telegram_outbox import (
@@ -61,8 +65,9 @@ async def cb_start_booking(
     is_admin: bool = False,
 ) -> None:
     """
-    Start booking flow: prompt client to choose a service.
-    Gates clients when bot is in SETUP_REQUIRED status.
+    Start booking flow.
+    If master studio has multiple active specialists -> prompt client to choose staff member.
+    If single active specialist -> skip staff selection and go directly to services list.
     """
     if bot_instance and bot_instance.status == BotInstanceStatus.SETUP_REQUIRED and not is_admin:
         await callback.answer(
@@ -84,8 +89,36 @@ async def cb_start_booking(
             return
 
     await state.clear()
+    staff_repo = StaffRepository(session)
+    active_staff = await staff_repo.list_active(master_id=master_id)
+
+    if not active_staff:
+        text = "К сожалению, в данный момент запись временно недоступна. Пожалуйста, свяжитесь с нами напрямую 🌸"
+        if callback.message:
+            await callback.message.edit_text(text=text)
+        await callback.answer()
+        return
+
+    # If studio has more than 1 specialist: show specialist choice step
+    if len(active_staff) > 1:
+        text = "<b>📅 Онлайн-запись</b>\n\nВыберите специалиста:"
+        await state.set_state(ClientBookingSG.choosing_staff)
+        if callback.message:
+            await callback.message.edit_text(
+                text=text,
+                reply_markup=get_staff_selection_keyboard(active_staff),
+            )
+        await callback.answer()
+        return
+
+    # Single specialist: seamlessly skip staff choice step (backward-compatible)
+    single_staff = active_staff[0]
+    await state.update_data(staff_id=single_staff.id)
+
+    staff_svc_ids = await staff_repo.list_services_for_staff(single_staff.id, master_id=master_id)
     service_repo = ServiceRepository(session)
-    services = await service_repo.list_active(master_id=master_id)
+    all_services = await service_repo.list_active(master_id=master_id)
+    services = [s for s in all_services if s.id in staff_svc_ids] or all_services
 
     if not services:
         text = "К сожалению, в данный момент онлайн-запись временно недоступна. Пожалуйста, свяжитесь с мастером напрямую 🌸"
@@ -97,6 +130,45 @@ async def cb_start_booking(
     text = "<b>📅 Онлайн-запись</b>\n\nВыберите услугу, на которую хотите записаться:"
     await state.set_state(ClientBookingSG.choosing_service)
 
+    if callback.message:
+        await callback.message.edit_text(
+            text=text,
+            reply_markup=get_services_list_keyboard(services, is_booking_flow=True),
+        )
+    await callback.answer()
+
+
+@router.callback_query(StaffChoiceCallback.filter(F.action == "select"))
+async def cb_staff_selected(
+    callback: CallbackQuery,
+    callback_data: StaffChoiceCallback,
+    state: FSMContext,
+    session: AsyncSession,
+    master_id: int,
+) -> None:
+    """Specialist selected: show services offered by this staff member."""
+    staff_id = callback_data.staff_id
+    staff_repo = StaffRepository(session)
+    staff = await staff_repo.get_by_id(staff_id, master_id=master_id)
+    if not staff or not staff.is_active:
+        await callback.answer("Специалист недоступен", show_alert=True)
+        return
+
+    await state.update_data(staff_id=staff_id)
+    staff_svc_ids = await staff_repo.list_services_for_staff(staff_id, master_id=master_id)
+    service_repo = ServiceRepository(session)
+    all_services = await service_repo.list_active(master_id=master_id)
+    services = [s for s in all_services if s.id in staff_svc_ids] or all_services
+
+    if not services:
+        text = f"У специалиста <b>{escape(staff.display_name)}</b> пока нет доступных услуг 🌸"
+        if callback.message:
+            await callback.message.edit_text(text=text)
+        await callback.answer()
+        return
+
+    text = f"<b>📅 Онлайн-запись к мастеру {escape(staff.display_name)}</b>\n\nВыберите услугу:"
+    await state.set_state(ClientBookingSG.choosing_service)
     if callback.message:
         await callback.message.edit_text(
             text=text,
@@ -124,6 +196,8 @@ async def cb_service_selected(
         return
 
     await state.update_data(service_id=service_id)
+    data = await state.get_data()
+    staff_id = data.get("staff_id")
 
     # Calculate available dates for the next 30 days
     slot_engine = SlotEngine(session)
@@ -133,7 +207,7 @@ async def cb_service_selected(
     today = datetime.now(tz).date()
 
     available_dates_list = await slot_engine.get_available_dates(
-        service_id=service_id, start_date=today, days_count=35, master_id=master_id
+        service_id=service_id, start_date=today, days_count=35, master_id=master_id, staff_id=staff_id
     )
     available_dates = set(available_dates_list)
 
@@ -177,6 +251,7 @@ async def cb_calendar_navigation(
 
     data = await state.get_data()
     service_id = data.get("service_id")
+    staff_id = data.get("staff_id")
     if not service_id:
         await callback.answer("Сессия устарела. Пожалуйста, начните заново.", show_alert=True)
         return
@@ -190,7 +265,7 @@ async def cb_calendar_navigation(
     if action in ["prev_month", "next_month"]:
         # Month switch
         available_dates_list = await slot_engine.get_available_dates(
-            service_id=service_id, start_date=today, days_count=45, master_id=master_id
+            service_id=service_id, start_date=today, days_count=45, master_id=master_id, staff_id=staff_id
         )
         available_dates = set(available_dates_list)
 
@@ -220,7 +295,7 @@ async def cb_calendar_navigation(
         if callback_data.day == 0:
             # Re-render calendar
             available_dates_list = await slot_engine.get_available_dates(
-                service_id=service_id, start_date=today, days_count=35, master_id=master_id
+                service_id=service_id, start_date=today, days_count=35, master_id=master_id, staff_id=staff_id
             )
             available_dates = set(available_dates_list)
             service_repo = ServiceRepository(session)
@@ -243,7 +318,7 @@ async def cb_calendar_navigation(
 
         # Day chosen! Calculate available slots
         chosen_date = date(callback_data.year, callback_data.month, callback_data.day)
-        slots = await slot_engine.get_available_slots(service_id, chosen_date, master_id=master_id)
+        slots = await slot_engine.get_available_slots(service_id, chosen_date, master_id=master_id, staff_id=staff_id)
 
         await state.update_data(chosen_date_iso=chosen_date.isoformat())
         await state.set_state(ClientBookingSG.choosing_time)
@@ -471,6 +546,7 @@ async def cb_agree_policy(
 
     slot_dt = datetime.fromtimestamp(slot_ts, pytz.UTC)
     booking_service = BookingService(session)
+    staff_id = data.get("staff_id")
 
     try:
         appointment, payment = await booking_service.create_hold_booking(
@@ -479,6 +555,7 @@ async def cb_agree_policy(
             service_id=service_id,
             start_time=slot_dt,
             cancel_policy_agreed=True,
+            staff_id=staff_id,
         )
     except SlotAlreadyBookedError:
         await callback.answer(
@@ -499,9 +576,16 @@ async def cb_agree_policy(
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
     deposit_str = format_rub(appointment.snapshot_deposit_amount)
 
+    staff_line = ""
+    if appointment.staff_id:
+        staff_obj = await StaffRepository(session).get_by_id(appointment.staff_id, master_id)
+        if staff_obj:
+            staff_line = f"👩‍💼 <b>Специалист:</b> {escape(staff_obj.display_name)}\n"
+
     text = (
         f"🎉 <b>Слот успешно зарезервирован! (Запись #{appointment.id})</b>\n\n"
         f"🌸 <b>Услуга:</b> {appointment.snapshot_service_title}\n"
+        f"{staff_line}"
         f"🗓 <b>Дата и время:</b> {dt_str}\n"
         f"💳 <b>Предоплата к переводу:</b> {deposit_str}\n\n"
         f"⏳ <i>У вас есть {hold_mins} минут для внесения предоплаты. По истечении этого времени бронь аннулируется.</i>\n\n"

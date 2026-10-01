@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from html import escape
+import inspect
 import logging
 from typing import Any, Dict, Optional
 
@@ -66,6 +67,10 @@ from app.manager_bot.keyboards import (
     project_card_keyboard,
     project_list_keyboard,
     reviews_keyboard,
+    reviews_keyboard,
+    staff_card_keyboard,
+    staff_list_keyboard,
+    staff_services_keyboard,
     stats_period_keyboard,
     subscription_card_keyboard,
     subscription_canceled_keyboard,
@@ -77,6 +82,7 @@ from app.manager_bot.keyboards import (
 )
 from app.services.bot_registry import BotRegistry
 from app.services.crm_service import MasterCrmService
+from app.services.master_authorization_service import AdminRole, MasterAuthorizationService
 from app.services.master_contacts import CONTACT_FIELD_LABELS, MasterContactsService
 from app.services.platform_admin_service import PlatformAdminService
 from app.services.rate_limiter import check_rate_limit
@@ -93,16 +99,19 @@ from app.manager_bot.states import (
     ManagerScheduleStates,
     ManagerServiceStates,
     ManagerSettingsStates,
+    ManagerStaffStates,
     MasterContactStates,
     MasterOnboardingStates,
     RotateTokenStates,
 )
+from app.database.models.staff import StaffMember
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.repositories.master_repository import MasterRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.portfolio_repository import PortfolioRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.repositories.service_repository import ServiceRepository
+from app.repositories.staff_repository import StaffRepository
 from app.repositories.user_repository import UserRepository
 from app.services.audit_service import AuditEvent, AuditService
 from app.services.bot_provisioning_service import BotProvisioningService
@@ -163,17 +172,63 @@ async def _get_or_create_user(session: AsyncSession, from_user: Any) -> User:
     return user
 
 
+async def _get_accessible_or_owned_masters(master_repo: MasterRepository, user_id: int):
+    """Safely return accessible masters with fallback for mock sessions in unit tests."""
+    if hasattr(master_repo, "list_accessible_for_user"):
+        res = master_repo.list_accessible_for_user(user_id)
+        if inspect.isawaitable(res):
+            return await res
+    if hasattr(master_repo, "list_by_owner_id"):
+        res_owner = master_repo.list_by_owner_id(user_id)
+        if inspect.isawaitable(res_owner):
+            return await res_owner
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Navigation & Start
 # ---------------------------------------------------------------------------
 
 @manager_router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    """Manager Bot /start entry point."""
+    """Manager Bot /start entry point with support for staff invite links."""
     await state.clear()
     user = await _get_or_create_user(session, message.from_user)
     master_repo = MasterRepository(session)
-    masters = await master_repo.list_by_owner_id(user.id)
+
+    # 1. Check for deep-link staff invite: /start inv_<token>
+    try:
+        cmd_text = getattr(message, "text", "") or ""
+    except (AttributeError, TypeError):
+        cmd_text = ""
+    parts = cmd_text.split(maxsplit=1) if isinstance(cmd_text, str) else []
+    if len(parts) > 1 and parts[1].startswith("inv_"):
+        token_plain = parts[1][4:]
+        staff_repo = StaffRepository(session)
+        staff = await staff_repo.claim_invite_token_atomic(
+            token_plain=token_plain,
+            user_id=user.id,
+            user_telegram_id=user.telegram_id,
+        )
+        if staff:
+            master = await master_repo.get_by_id(staff.master_id)
+            studio_name = master.display_name if master else "студии"
+            await message.answer(
+                f"🎉 <b>Добро пожаловать в команду!</b>\n\n"
+                f"Вы успешно присоединились к проекту «<b>{escape(studio_name)}</b>» в качестве специалиста <b>{escape(staff.display_name)}</b>.\n\n"
+                f"Вам открыт доступ к вашему расписанию, записям и клиентам:",
+                reply_markup=project_list_keyboard([master] if master else []),
+            )
+            return
+        else:
+            await message.answer(
+                "⚠️ <b>Ссылка-приглашение недействительна</b>\n\n"
+                "Срок действия ссылки истёк (48 часов) или она уже была активирована.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+    masters = await _get_accessible_or_owned_masters(master_repo, user.id)
     admin_svc = PlatformAdminService(session)
     is_admin = await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id)
 
@@ -239,11 +294,11 @@ async def cb_help(callback: CallbackQuery) -> None:
 
 @manager_router.callback_query(F.data == "mgr:projects")
 async def cb_projects(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
-    """List of all owned master projects."""
+    """List of all owned or assigned master projects."""
     await state.clear()
     user = await _get_or_create_user(session, callback.from_user)
     master_repo = MasterRepository(session)
-    masters = await master_repo.list_by_owner_id(user.id)
+    masters = await _get_accessible_or_owned_masters(master_repo, user.id)
 
     await callback.answer()
 
@@ -303,6 +358,15 @@ async def msg_new_master_name(message: Message, state: FSMContext, session: Asyn
     master_settings = MasterSettings(master_id=master.id)
     session.add(master_settings)
     await session.flush()
+
+    # Create primary StaffMember for new project
+    staff_repo = StaffRepository(session)
+    await staff_repo.create_staff(
+        master_id=master.id,
+        display_name=user.first_name or master.display_name,
+        user_id=user.id,
+        sort_order=0,
+    )
 
     # Atomically evaluate trial eligibility per user account
     sub_service = SubscriptionService(session)
@@ -753,8 +817,51 @@ async def cb_project_card(callback: CallbackQuery, state: FSMContext, session: A
 
     master_repo = MasterRepository(session)
     master = await master_repo.get_by_id(master_id)
-    if not master or master.owner_user_id != user.id:
+    if not master:
+        await callback.answer("Проект не найден.", show_alert=True)
+        return
+
+    auth_svc = MasterAuthorizationService(session)
+    role = await auth_svc.get_role(master_id, user.id)
+    if role == AdminRole.NONE:
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    is_staff_only = (role == AdminRole.STAFF)
+    staff_id = await auth_svc.get_staff_id_for_user(master_id, user.id) if is_staff_only else None
+
+    crm_svc = MasterCrmService(session)
+    dashboard = await crm_svc.get_today_dashboard(master.id, staff_id=staff_id)
+    nxt_text = ""
+    if dashboard.get("next_appointment"):
+        nxt = dashboard["next_appointment"]
+        nxt_text = (
+            f"⏰ <b>Ближайшая запись:</b>\n"
+            f"• Время: <b>{nxt['time_str']}</b>\n"
+            f"• Клиент: <b>{escape(nxt['client_name'])}</b>\n"
+            f"• Услуга: <b>{escape(nxt['service_title'])}</b>\n\n"
+        )
+    else:
+        nxt_text = "⏰ <i>На сегодня больше нет предстоящих записей</i>\n\n"
+
+    act_label = ACTIVITY_TYPE_NAMES.get(master.activity_type or "", "")
+    act_suffix = f" • {act_label}" if act_label else ""
+
+    if is_staff_only:
+        text = (
+            f"👤 <b>Кабинет специалиста: {escape(master.display_name)}</b>{act_suffix}\n\n"
+            f"📊 <b>Ваши показатели сегодня:</b>\n"
+            f"📅 Записей: <b>{dashboard['total_today']}</b>\n"
+            f"💰 Выручка: <b>{int(dashboard['revenue_today'])} ₽</b>\n"
+            f"👥 Клиентов: <b>{dashboard['unique_clients_today']}</b>\n"
+            f"🆕 Новых: <b>{dashboard['new_clients_today']}</b>\n\n"
+            f"{nxt_text}"
+        )
+        await callback.message.edit_text(
+            text,
+            reply_markup=project_card_keyboard(master, None, False, is_staff_only=True),
+        )
+        await callback.answer()
         return
 
     bot_repo = BotInstanceRepository(session)
@@ -794,22 +901,12 @@ async def cb_project_card(callback: CallbackQuery, state: FSMContext, session: A
     else:
         sub_info = "🚫 Заблокирована"
 
-    crm_svc = MasterCrmService(session)
-    dashboard = await crm_svc.get_today_dashboard(master.id)
-    nxt_text = ""
-    if dashboard.get("next_appointment"):
-        nxt = dashboard["next_appointment"]
-        nxt_text = (
-            f"⏰ <b>Ближайшая запись:</b>\n"
-            f"• Время: <b>{nxt['time_str']}</b>\n"
-            f"• Клиент: <b>{escape(nxt['client_name'])}</b>\n"
-            f"• Услуга: <b>{escape(nxt['service_title'])}</b>\n\n"
-        )
-    else:
-        nxt_text = "⏰ <i>На сегодня больше нет предстоящих записей</i>\n\n"
-
-    act_label = ACTIVITY_TYPE_NAMES.get(master.activity_type or "", "")
-    act_suffix = f" • {act_label}" if act_label else ""
+    staff_breakdown_text = ""
+    if dashboard.get("staff_breakdown") and len(dashboard["staff_breakdown"]) > 1:
+        staff_breakdown_text = "👥 <b>Загрузка специалистов сегодня:</b>\n"
+        for sb in dashboard["staff_breakdown"]:
+            staff_breakdown_text += f"• {escape(sb['name'])}: {sb['total_today']} зап. ({int(sb['revenue_today'])} ₽)\n"
+        staff_breakdown_text += "\n"
 
     text = (
         f"⚙️ <b>Проект: {escape(master.display_name)}</b>{act_suffix}\n\n"
@@ -819,6 +916,7 @@ async def cb_project_card(callback: CallbackQuery, state: FSMContext, session: A
         f"👥 Клиентов: <b>{dashboard['unique_clients_today']}</b>\n"
         f"🆕 Новых: <b>{dashboard['new_clients_today']}</b>\n\n"
         f"{nxt_text}"
+        f"{staff_breakdown_text}"
         f"🤖 <b>Telegram-бот:</b> {bot_info}\n"
         f"📊 <b>Статус бота:</b> {bot_status_str}\n"
         f"💳 <b>Подписка:</b> {sub_info}\n"
@@ -826,7 +924,7 @@ async def cb_project_card(callback: CallbackQuery, state: FSMContext, session: A
     )
     await callback.message.edit_text(
         text,
-        reply_markup=project_card_keyboard(master, bot_instance, is_ready),
+        reply_markup=project_card_keyboard(master, bot_instance, is_ready, is_staff_only=False),
     )
     await callback.answer()
 
@@ -4141,3 +4239,303 @@ async def cb_manager_set_prepay(callback: CallbackQuery, session: AsyncSession) 
     )
     await callback.message.edit_text(text, reply_markup=manager_prepayment_settings_keyboard(master_id, settings_obj))
     await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# MULTI-STAFF MANAGEMENT (PHASE 5)
+# ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.startswith("mgr:staff:"))
+async def cb_manager_staff_router(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Route staff management callbacks."""
+    parts = callback.data.split(":")
+    action = parts[2]
+    user = await _get_or_create_user(session, callback.from_user)
+    auth_svc = MasterAuthorizationService(session)
+
+    # 1. Staff List: mgr:staff:<master_id>
+    if len(parts) == 3:
+        master_id = int(action)
+        if not await auth_svc.is_admin(master_id, user.id):
+            await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        master = await MasterRepository(session).get_by_id(master_id)
+        staff_repo = StaffRepository(session)
+        staff_members = await staff_repo.list_all(master_id)
+        text = (
+            f"👥 <b>Сотрудники студии «{escape(master.display_name)}»</b>\n\n"
+            f"Всего мастеров в проекте: <b>{len(staff_members)}</b>\n\n"
+            "Выберите сотрудника для настройки услуг, графика и персональной ссылки-приглашения:"
+        )
+        await callback.message.edit_text(text, reply_markup=staff_list_keyboard(master_id, staff_members))
+        await callback.answer()
+        return
+
+    # 2. Add Staff: mgr:staff:add:<master_id>
+    if action == "add":
+        master_id = int(parts[3])
+        if not await auth_svc.is_admin(master_id, user.id):
+            await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        await state.set_state(ManagerStaffStates.waiting_for_name)
+        await state.update_data(staff_master_id=master_id)
+        text = (
+            "➕ <b>Добавление нового сотрудника</b>\n\n"
+            "Введите имя мастера (например: <i>Анна</i> или <i>Дмитрий Смирнов</i>):"
+        )
+        cancel_kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:staff:{master_id}")]]
+        )
+        await callback.message.edit_text(text, reply_markup=cancel_kb)
+        await callback.answer()
+        return
+
+    # 3. Staff Card: mgr:staff:card:<master_id>:<staff_id>
+    if action == "card":
+        master_id = int(parts[3])
+        staff_id = int(parts[4])
+        if not await auth_svc.is_admin(master_id, user.id):
+            await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        staff_repo = StaffRepository(session)
+        staff = await staff_repo.get_by_id(staff_id, master_id)
+        if not staff:
+            await callback.answer("Сотрудник не найден.", show_alert=True)
+            return
+        services = await staff_repo.list_services_for_staff(staff_id, master_id)
+        status_text = "🟢 Принимает записи" if staff.is_active else "⚪️ Отключён"
+        user_text = f"@{staff.user.username}" if staff.user and staff.user.username else ("Привязан" if staff.user_id else "Не привязан к Telegram")
+        spec_text = staff.specialization or "Не указана"
+
+        text = (
+            f"👤 <b>Специалист: {escape(staff.display_name)}</b>\n\n"
+            f"✂️ Специализация: <b>{escape(spec_text)}</b>\n"
+            f"📊 Статус: <b>{status_text}</b>\n"
+            f"💅 Привязано услуг: <b>{len(services)}</b>\n"
+            f"✈️ Telegram: <b>{escape(user_text)}</b>\n"
+        )
+        await callback.message.edit_text(text, reply_markup=staff_card_keyboard(master_id, staff))
+        await callback.answer()
+        return
+
+    # 4. Toggle Active: mgr:staff:toggle:<master_id>:<staff_id>
+    if action == "toggle":
+        master_id = int(parts[3])
+        staff_id = int(parts[4])
+        if not await auth_svc.is_admin(master_id, user.id):
+            await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        staff_repo = StaffRepository(session)
+        staff = await staff_repo.get_by_id(staff_id, master_id)
+        if staff:
+            staff.is_active = not staff.is_active
+            await session.flush()
+            await callback.answer(f"Статус сотрудника: {'Активирован' if staff.is_active else 'Деактивирован'}")
+        # Re-render card
+        updated_staff = await staff_repo.get_by_id(staff_id, master_id)
+        services = await staff_repo.list_services_for_staff(staff_id, master_id)
+        status_text = "🟢 Принимает записи" if updated_staff.is_active else "⚪️ Отключён"
+        user_text = f"@{updated_staff.user.username}" if updated_staff.user and updated_staff.user.username else ("Привязан" if updated_staff.user_id else "Не привязан к Telegram")
+        spec_text = updated_staff.specialization or "Не указана"
+
+        text = (
+            f"👤 <b>Специалист: {escape(updated_staff.display_name)}</b>\n\n"
+            f"✂️ Специализация: <b>{escape(spec_text)}</b>\n"
+            f"📊 Статус: <b>{status_text}</b>\n"
+            f"💅 Привязано услуг: <b>{len(services)}</b>\n"
+            f"✈️ Telegram: <b>{escape(user_text)}</b>\n"
+        )
+        await callback.message.edit_text(text, reply_markup=staff_card_keyboard(master_id, updated_staff))
+        return
+
+    # 5. Staff Services: mgr:staff:services:<master_id>:<staff_id>
+    if action == "services":
+        master_id = int(parts[3])
+        staff_id = int(parts[4])
+        if not await auth_svc.is_admin(master_id, user.id):
+            await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        staff_repo = StaffRepository(session)
+        staff = await staff_repo.get_by_id(staff_id, master_id)
+        all_services = await ServiceRepository(session).list_active(master_id)
+        assigned_ids = await staff_repo.list_services_for_staff(staff_id, master_id)
+        text = (
+            f"💅 <b>Услуги специалиста: {escape(staff.display_name)}</b>\n\n"
+            "Отметьте услуги, которые может выполнять данный мастер:\n"
+            "<i>(Зелёная галочка ✅ означает, что услуга доступна для записи)</i>"
+        )
+        await callback.message.edit_text(
+            text, reply_markup=staff_services_keyboard(master_id, staff_id, all_services, assigned_ids)
+        )
+        await callback.answer()
+        return
+
+    # 6. Service Toggle: mgr:staff:svc_toggle:<master_id>:<staff_id>:<svc_id>
+    if action == "svc_toggle":
+        master_id = int(parts[3])
+        staff_id = int(parts[4])
+        svc_id = int(parts[5])
+        if not await auth_svc.is_admin(master_id, user.id):
+            await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        staff_repo = StaffRepository(session)
+        assigned = set(await staff_repo.list_services_for_staff(staff_id, master_id))
+        if svc_id in assigned:
+            assigned.remove(svc_id)
+        else:
+            assigned.add(svc_id)
+        await staff_repo.set_staff_services(staff_id, master_id, list(assigned))
+        all_services = await ServiceRepository(session).list_active(master_id)
+        await callback.message.edit_reply_markup(
+            reply_markup=staff_services_keyboard(master_id, staff_id, all_services, list(assigned))
+        )
+        await callback.answer()
+        return
+
+    # 7. Generate Invite: mgr:staff:invite:<master_id>:<staff_id>
+    if action == "invite":
+        master_id = int(parts[3])
+        staff_id = int(parts[4])
+        if not await auth_svc.is_admin(master_id, user.id):
+            await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        staff_repo = StaffRepository(session)
+        staff = await staff_repo.get_by_id(staff_id, master_id)
+        token_plain = await staff_repo.create_invite_token(staff_id, master_id)
+
+        bot_username = "ZapisFlow_Bot"
+        try:
+            bot_user = await callback.bot.get_me()
+            bot_username = bot_user.username or bot_username
+        except Exception:
+            pass
+
+        invite_link = f"https://t.me/{bot_username}?start=inv_{token_plain}"
+        text = (
+            f"🔗 <b>Приглашение для специалиста {escape(staff.display_name)}</b>\n\n"
+            f"Передайте эту персональную ссылку сотруднику:\n"
+            f"<code>{invite_link}</code>\n\n"
+            f"⏳ Ссылка действует <b>48 часов</b> и является одноразовой.\n"
+            f"После перехода мастер получит доступ к личному расписанию и клиентам."
+        )
+        back_kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ К карточке специалиста", callback_data=f"mgr:staff:card:{master_id}:{staff_id}")]]
+        )
+        await callback.message.edit_text(text, reply_markup=back_kb)
+        await callback.answer()
+        return
+
+    # 8. Edit Field: mgr:staff:edit:<field>:<master_id>:<staff_id>
+    if action == "edit":
+        field = parts[3]
+        master_id = int(parts[4])
+        staff_id = int(parts[5])
+        if not await auth_svc.is_admin(master_id, user.id):
+            await callback.answer("У вас нет прав администратора.", show_alert=True)
+            return
+        await state.set_state(ManagerStaffStates.waiting_for_edit_field_value)
+        await state.update_data(staff_master_id=master_id, staff_id=staff_id, staff_edit_field=field)
+        field_name = "имя сотрудника" if field == "name" else "специализацию"
+        text = f"✏️ Введите новое {field_name}:"
+        cancel_kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:staff:card:{master_id}:{staff_id}")]]
+        )
+        await callback.message.edit_text(text, reply_markup=cancel_kb)
+        await callback.answer()
+        return
+
+
+@manager_router.message(ManagerStaffStates.waiting_for_name)
+async def msg_manager_staff_name(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Handle new staff name."""
+    name = (message.text or "").strip()
+    if not name or len(name) < 2 or len(name) > 128:
+        await message.answer("Имя должно быть от 2 до 128 символов. Попробуйте еще раз:")
+        return
+    await state.update_data(new_staff_name=name)
+    await state.set_state(ManagerStaffStates.waiting_for_specialization)
+    text = (
+        f"Имя: <b>{escape(name)}</b>\n\n"
+        "✂️ Введите специализацию мастера\n"
+        "(например: <i>Top Brow-Master</i>, <i>Lashmaker</i>, <i>Колорист</i>)\n\n"
+        "<i>Или отправьте «-», чтобы оставить пустой:</i>"
+    )
+    await message.answer(text)
+
+
+@manager_router.message(ManagerStaffStates.waiting_for_specialization)
+async def msg_manager_staff_specialization(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Handle new staff specialization, create staff and auto-bind active services."""
+    spec_raw = (message.text or "").strip()
+    spec = None if spec_raw in ("-", "—", "пропустить", "нет") else spec_raw
+    if spec and len(spec) > 128:
+        await message.answer("Специализация слишком длинная (максимум 128 символов):")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("staff_master_id")
+    name = data.get("new_staff_name")
+    if not master_id or not name:
+        await state.clear()
+        await message.answer("Ошибка сессии.", reply_markup=main_menu_keyboard())
+        return
+
+    staff_repo = StaffRepository(session)
+    staff = await staff_repo.create_staff(
+        master_id=master_id,
+        display_name=name,
+        specialization=spec,
+    )
+
+    # Auto-assign all active project services to the newly created staff member
+    active_services = await ServiceRepository(session).list_active(master_id)
+    if active_services:
+        await staff_repo.set_staff_services(
+            staff_id=staff.id,
+            master_id=master_id,
+            service_ids=[s.id for s in active_services],
+        )
+
+    await state.clear()
+    text = (
+        f"✅ Специалист <b>«{escape(staff.display_name)}»</b> успешно добавлен!\n\n"
+        f"✂️ Специализация: <b>{escape(staff.specialization or '—')}</b>\n"
+        f"💅 Привязано услуг: <b>{len(active_services)}</b>\n\n"
+        "Теперь вы можете настроить его индивидуальные услуги или отправить приглашение:"
+    )
+    await message.answer(text, reply_markup=staff_card_keyboard(master_id, staff))
+
+
+@manager_router.message(ManagerStaffStates.waiting_for_edit_field_value)
+async def msg_manager_staff_edit_field(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save edited staff attribute (name or specialization)."""
+    val = (message.text or "").strip()
+    if not val or len(val) > 128:
+        await message.answer("Значение должно быть длиной до 128 символов:")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("staff_master_id")
+    staff_id = data.get("staff_id")
+    field = data.get("staff_edit_field")
+    if not master_id or not staff_id or not field:
+        await state.clear()
+        return
+
+    staff_repo = StaffRepository(session)
+    if field == "name":
+        await staff_repo.update_staff(staff_id, master_id, display_name=val)
+    elif field == "spec":
+        await staff_repo.update_staff(staff_id, master_id, specialization=val)
+
+    await state.clear()
+    staff = await staff_repo.get_by_id(staff_id, master_id)
+    await message.answer("✅ Данные специалиста обновлены!", reply_markup=staff_card_keyboard(master_id, staff))

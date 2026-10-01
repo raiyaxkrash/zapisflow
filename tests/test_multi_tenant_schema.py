@@ -520,7 +520,7 @@ async def test_14_schedule_independence_between_master_a_and_master_b(pg_session
         pg_session.add(st_a_duplicate)
         with pytest.raises(IntegrityError) as exc_info:
             await pg_session.flush()
-        assert "uq_master_weekday" in str(exc_info.value)
+        assert "uq_master_weekday" in str(exc_info.value) or "uq_staff_weekday" in str(exc_info.value)
 
 
 @requires_postgres

@@ -64,6 +64,20 @@ async def test_concurrent_booking_race_condition() -> None:
     service_b.master_settings_repo = AsyncMock()
     service_b.master_settings_repo.get_value.return_value = 30
 
+    from app.database.models.staff import StaffMember
+    from unittest.mock import MagicMock
+    staff = StaffMember(id=1, master_id=1, display_name="Мастер", is_active=True)
+    service_a.staff_repo = AsyncMock()
+    service_a.staff_repo.get_primary_or_default.return_value = staff
+    service_a.staff_repo.list_services_for_staff.return_value = [5]
+
+    service_b.staff_repo = AsyncMock()
+    service_b.staff_repo.get_primary_or_default.return_value = staff
+    service_b.staff_repo.list_services_for_staff.return_value = [5]
+
+    first_session.add = MagicMock()
+    second_session.add = MagicMock()
+
     # First session flush succeeds
     first_session.flush = AsyncMock()
     # Second session flush fails with PostgreSQL exclusion violation

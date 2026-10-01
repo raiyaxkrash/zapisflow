@@ -16,6 +16,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,6 +37,7 @@ class Service(Base, TimestampMixin):
     """
     __tablename__ = "services"
     __table_args__ = (
+        UniqueConstraint("master_id", "id", name="uq_services_master_id_id"),
         CheckConstraint("price >= 0", name="chk_services_price_positive"),
         CheckConstraint("deposit_value >= 0", name="chk_services_deposit_positive"),
         CheckConstraint("duration_min > 0", name="chk_services_duration_positive"),
@@ -67,5 +69,8 @@ class Service(Base, TimestampMixin):
 
     # Relationships
     appointments: Mapped[List["Appointment"]] = relationship(
-        "Appointment", back_populates="service"
+        "Appointment",
+        back_populates="service",
+        primaryjoin="and_(Service.master_id == Appointment.master_id, Service.id == Appointment.service_id)",
+        foreign_keys="[Appointment.master_id, Appointment.service_id]",
     )

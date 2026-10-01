@@ -44,6 +44,7 @@ async def test_booking_service_validates_user_and_service() -> None:
 async def test_booking_service_catches_postgres_exclusion_violation() -> None:
     """When PostgreSQL raises an exclusion violation (code 23P01), BookingService maps it to SlotAlreadyBookedError."""
     session = AsyncMock()
+    session.add = MagicMock()
     service = BookingService(session)
 
     service.user_repo = AsyncMock()
@@ -68,6 +69,12 @@ async def test_booking_service_catches_postgres_exclusion_violation() -> None:
     service.master_settings_repo.get_value.return_value = 30
 
     start = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+
+    # Mock staff repository
+    from app.database.models.staff import StaffMember
+    service.staff_repo = AsyncMock()
+    service.staff_repo.get_primary_or_default.return_value = StaffMember(id=1, master_id=1, display_name="Анна Мастер", is_active=True)
+    service.staff_repo.list_services_for_staff.return_value = [10]
 
     # Mock appointment repository
     service.appointment_repo = AsyncMock()

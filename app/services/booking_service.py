@@ -19,6 +19,7 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.repositories.staff_repository import StaffRepository
 from app.repositories.user_repository import UserRepository
 from app.services.exceptions import (
     BookingNotFoundError,
@@ -44,6 +45,7 @@ class BookingService:
         self.session = session
         self.appointment_repo = AppointmentRepository(session)
         self.service_repo = ServiceRepository(session)
+        self.staff_repo = StaffRepository(session)
         self.payment_repo = PaymentRepository(session)
         self.user_repo = UserRepository(session)
         self.master_settings_repo = MasterSettingsRepository(session)
@@ -72,6 +74,7 @@ class BookingService:
         cancel_policy_agreed: bool = True,
         is_manual: bool = False,
         admin_notes: Optional[str] = None,
+        staff_id: Optional[int] = None,
     ) -> Tuple[Appointment, Payment]:
         """Atomically reserve a slot, create immutable snapshot and pending deposit payment for a master."""
         # Serialize booking creation with suspend/renewal/expiration updates.
@@ -99,23 +102,39 @@ class BookingService:
         if not service or not service.is_active or service.is_archived:
             raise ServiceNotFoundError(f"Service ID {service_id} not available for master {master_id}")
 
+        # 2.1 Validate or resolve staff member
+        if staff_id is None:
+            staff = await self.staff_repo.get_primary_or_default(master_id)
+            if not staff:
+                raise ValueError("В проекте нет доступных специалистов для записи")
+            staff_id = staff.id
+        else:
+            staff = await self.staff_repo.get_by_id(staff_id, master_id=master_id)
+            if not staff or not staff.is_active:
+                raise ValueError("Выбранный специалист не найден или недоступен")
+            # Verify that this staff member actually provides this service
+            staff_services = await self.staff_repo.list_services_for_staff(staff_id, master_id=master_id)
+            if service_id not in staff_services:
+                raise ValueError(f"Специалист {staff.display_name} не оказывает данную услугу")
+
         # 3. Calculate time intervals using service parameters
         duration = timedelta(minutes=service.duration_min)
         buffer = timedelta(minutes=service.buffer_min)
         end_time = start_time + duration
         end_time_with_buffer = end_time + buffer
 
-        # Validate slot availability against master's schedule and existing active bookings
+        # Validate slot availability against staff schedule and existing active bookings
         if start_time.tzinfo is None or not await SlotEngine(self.session).is_slot_available(
-            service_id, start_time, master_id=master_id
+            service_id, start_time, master_id=master_id, staff_id=staff.id
         ):
             raise SlotAlreadyBookedError("Выбранное время больше недоступно. Пожалуйста, выберите другой слот.")
 
-        # Check for existing active overlaps before insert within master_id
+        # Check for existing active overlaps before insert within master_id and specific staff
         overlaps = await self.appointment_repo.get_active_overlapping(
             master_id=master_id,
             start_time=start_time,
             end_time_with_buffer=end_time_with_buffer,
+            staff_id=staff.id,
         )
         if overlaps:
             raise SlotAlreadyBookedError("Выбранное время уже занято или удерживается другим клиентом.")
@@ -148,6 +167,7 @@ class BookingService:
         # 7. Create appointment with immutable snapshot
         appointment = Appointment(
             master_id=master_id,
+            staff_id=staff.id,
             user_id=user_id,
             service_id=service_id,
             status=initial_status,
@@ -249,6 +269,7 @@ class BookingService:
         appointment_id: int,
         new_start_time: datetime,
         admin_id: int,
+        new_staff_id: Optional[int] = None,
     ) -> Appointment:
         """Reschedule an appointment to a new date/time by master, strictly within master_id."""
         appointment = await self.appointment_repo.get_by_id_with_relations(
@@ -268,6 +289,13 @@ class BookingService:
         if appointment_start_utc <= datetime.now(pytz.UTC):
             raise InvalidBookingStatusError("Нельзя перенести запись, время которой уже наступило")
 
+        target_staff_id = appointment.staff_id
+        if new_staff_id is not None:
+            staff = await self.staff_repo.get_by_id(new_staff_id, master_id=master_id)
+            if not staff or not staff.is_active:
+                raise ValueError("Специалист не найден или недоступен")
+            target_staff_id = new_staff_id
+
         duration = timedelta(minutes=appointment.snapshot_service_duration_min)
         buffer = timedelta(minutes=appointment.snapshot_buffer_duration_min)
         new_end_time = new_start_time + duration
@@ -277,6 +305,7 @@ class BookingService:
             appointment.service_id,
             new_start_time,
             master_id=master_id,
+            staff_id=target_staff_id,
             duration_min=appointment.snapshot_service_duration_min,
             buffer_min=appointment.snapshot_buffer_duration_min,
             exclude_appointment_id=appointment.id,
@@ -287,6 +316,8 @@ class BookingService:
         appointment.start_time = new_start_time
         appointment.end_time = new_end_time
         appointment.end_time_with_buffer = new_end_time_with_buffer
+        if new_staff_id is not None:
+            appointment.staff_id = new_staff_id
 
         # Recalculate and reset pending/stale notifications for the new appointment time
         await NotificationRepository(self.session).handle_appointment_rescheduled(

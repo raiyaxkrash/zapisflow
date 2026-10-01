@@ -5,6 +5,7 @@ Client keyboards package export.
 from app.bot.keyboards.client.callbacks import (
     MenuCallback,
     ServiceCallback,
+    StaffChoiceCallback,
     CalendarNavCallback,
     TimeSlotCallback,
     BookingActionCallback,
@@ -21,6 +22,7 @@ from app.bot.keyboards.client.services import (
 from app.bot.keyboards.client.calendar import build_inline_calendar
 from app.bot.keyboards.client.slots import build_time_slots_keyboard
 from app.bot.keyboards.client.booking import (
+    get_staff_selection_keyboard,
     get_phone_request_keyboard,
     get_policy_agreement_keyboard,
     get_payment_screen_keyboard,

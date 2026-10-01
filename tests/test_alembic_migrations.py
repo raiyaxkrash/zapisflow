@@ -51,8 +51,9 @@ def test_alembic_revision_graph_consistency() -> None:
     assert "2026_10_01_0017" in rev_ids
     assert "2026_10_01_0018" in rev_ids
     assert "2026_10_01_0019" in rev_ids
-    # 0019 is head, 0001 is base
-    assert rev_ids[0] == "2026_10_01_0019"
+    assert "2026_10_01_0020" in rev_ids
+    # 0020 is head, 0001 is base
+    assert rev_ids[0] == "2026_10_01_0020"
     assert rev_ids[-1] == "2026_09_30_0001"
 
 

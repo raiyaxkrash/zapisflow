@@ -14,6 +14,7 @@ from app.config.settings import settings
 from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.master import Master, MasterClient
 from app.database.models.review import Review
+from app.database.models.staff import StaffMember
 from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.master_client_repository import MasterClientRepository
@@ -387,7 +388,9 @@ class MasterCrmService:
     # -------------------------------------------------------------------------
     # 5. MASTER STATISTICS (OPERATIONAL)
     # -------------------------------------------------------------------------
-    async def get_master_statistics(self, master_id: int, period: str = "month") -> Dict[str, Any]:
+    async def get_master_statistics(
+        self, master_id: int, period: str = "month", staff_id: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Aggregate operational metrics (bookings, statuses, occupancy, new vs returning)."""
         tz = await self._get_timezone(master_id)
         now_local = datetime.now(tz)
@@ -417,16 +420,22 @@ class MasterCrmService:
             period_title = f"Текущий месяц ({today.strftime('%m.%Y')})"
 
         # Base metrics from AnalyticsService
-        metrics = await self.analytics_service.get_metrics_for_range(master_id, start_dt, end_dt)
+        metrics = await self.analytics_service.get_metrics_for_range(
+            master_id, start_dt, end_dt, staff_id=staff_id
+        )
 
         # Calculate new vs returning clients in this period
-        # A client is "new" if their very first appointment with this master occurred in this period
+        # A client is "new" if their very first appointment with this master (or staff) occurred in this period
+        subq_conditions = [Appointment.master_id == master_id]
+        if staff_id is not None:
+            subq_conditions.append(Appointment.staff_id == staff_id)
+
         first_app_subq = (
             select(
                 Appointment.user_id,
                 func.min(Appointment.start_time).label("first_time"),
             )
-            .where(Appointment.master_id == master_id)
+            .where(*subq_conditions)
             .group_by(Appointment.user_id)
             .subquery()
         )
@@ -434,7 +443,7 @@ class MasterCrmService:
         new_clients_query = (
             select(func.count(distinct(Appointment.user_id)))
             .join(first_app_subq, Appointment.user_id == first_app_subq.c.user_id)
-            .where(Appointment.master_id == master_id)
+            .where(*subq_conditions)
         )
         if start_dt:
             new_clients_query = new_clients_query.where(
@@ -475,7 +484,9 @@ class MasterCrmService:
     # -------------------------------------------------------------------------
     # 6. MASTER FINANCES (BUSINESS REVENUE)
     # -------------------------------------------------------------------------
-    async def get_master_finances(self, master_id: int, period: str = "month") -> Dict[str, Any]:
+    async def get_master_finances(
+        self, master_id: int, period: str = "month", staff_id: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Aggregate master service revenue from client bookings (strictly isolated from SaaS billing)."""
         tz = await self._get_timezone(master_id)
         now_local = datetime.now(tz)
@@ -504,7 +515,9 @@ class MasterCrmService:
             end_dt = tz.localize(datetime.combine(last_day, time.max))
             period_title = f"Текущий месяц ({today.strftime('%m.%Y')})"
 
-        metrics = await self.analytics_service.get_metrics_for_range(master_id, start_dt, end_dt)
+        metrics = await self.analytics_service.get_metrics_for_range(
+            master_id, start_dt, end_dt, staff_id=staff_id
+        )
 
         return {
             "period": p,
@@ -520,7 +533,9 @@ class MasterCrmService:
     # -------------------------------------------------------------------------
     # 7. DASHBOARD «СЕГОДНЯ»
     # -------------------------------------------------------------------------
-    async def get_today_dashboard(self, master_id: int) -> Dict[str, Any]:
+    async def get_today_dashboard(
+        self, master_id: int, staff_id: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Aggregate today's summary metrics and next upcoming appointment for master dashboard."""
         tz = await self._get_timezone(master_id)
         now_local = datetime.now(tz)
@@ -530,6 +545,19 @@ class MasterCrmService:
         now_utc = datetime.now(timezone.utc)
 
         # 1. Today's aggregate counts
+        stmt_conditions = [
+            Appointment.master_id == master_id,
+            Appointment.start_time >= start_dt,
+            Appointment.start_time <= end_dt,
+            ~Appointment.status.in_([
+                AppointmentStatus.CANCELLED_BY_CLIENT,
+                AppointmentStatus.CANCELLED_BY_ADMIN,
+                AppointmentStatus.EXPIRED,
+            ]),
+        ]
+        if staff_id is not None:
+            stmt_conditions.append(Appointment.staff_id == staff_id)
+
         stmt = (
             select(
                 func.count(Appointment.id).label("total_today"),
@@ -540,16 +568,7 @@ class MasterCrmService:
                 ).label("revenue_today"),
                 func.count(distinct(Appointment.user_id)).label("unique_clients_today"),
             )
-            .where(
-                Appointment.master_id == master_id,
-                Appointment.start_time >= start_dt,
-                Appointment.start_time <= end_dt,
-                ~Appointment.status.in_([
-                    AppointmentStatus.CANCELLED_BY_CLIENT,
-                    AppointmentStatus.CANCELLED_BY_ADMIN,
-                    AppointmentStatus.EXPIRED,
-                ]),
-            )
+            .where(*stmt_conditions)
         )
         res = await self.session.execute(stmt)
         row = res.one()
@@ -561,31 +580,35 @@ class MasterCrmService:
         # New clients today: users whose earliest appointment for this master is today
         new_clients_count = 0
         if unique_clients_today > 0:
+            today_users_conditions = [
+                Appointment.master_id == master_id,
+                Appointment.start_time >= start_dt,
+                Appointment.start_time <= end_dt,
+            ]
+            if staff_id is not None:
+                today_users_conditions.append(Appointment.staff_id == staff_id)
+
             today_users_subq = (
                 select(distinct(Appointment.user_id))
-                .where(
-                    Appointment.master_id == master_id,
-                    Appointment.start_time >= start_dt,
-                    Appointment.start_time <= end_dt,
-                )
+                .where(*today_users_conditions)
                 .scalar_subquery()
             )
+            prior_conditions = [
+                Appointment.master_id == master_id,
+                Appointment.user_id.in_(today_users_subq),
+                Appointment.start_time < start_dt,
+            ]
+            if staff_id is not None:
+                prior_conditions.append(Appointment.staff_id == staff_id)
+
             prior_app_exists = (
                 select(distinct(Appointment.user_id))
-                .where(
-                    Appointment.master_id == master_id,
-                    Appointment.user_id.in_(today_users_subq),
-                    Appointment.start_time < start_dt,
-                )
+                .where(*prior_conditions)
             )
             prior_users = set((await self.session.scalars(prior_app_exists)).all())
             all_today_users = set((await self.session.scalars(
                 select(distinct(Appointment.user_id))
-                .where(
-                    Appointment.master_id == master_id,
-                    Appointment.start_time >= start_dt,
-                    Appointment.start_time <= end_dt,
-                )
+                .where(*today_users_conditions)
             )).all())
             new_clients_count = len(all_today_users - prior_users)
 
@@ -598,6 +621,12 @@ class MasterCrmService:
                 Appointment.start_time <= end_dt,
                 Appointment.status.in_([AppointmentStatus.CONFIRMED, AppointmentStatus.COMPLETED]),
             )
+        )
+        if staff_id is not None:
+            next_stmt = next_stmt.where(Appointment.staff_id == staff_id)
+
+        next_stmt = (
+            next_stmt
             .options(selectinload(Appointment.user), selectinload(Appointment.service))
             .order_by(Appointment.start_time.asc())
             .limit(1)
@@ -614,19 +643,64 @@ class MasterCrmService:
                 "service_title": s_title,
             }
 
+        # 3. Staff breakdown if no specific staff_id requested
+        staff_breakdown = []
+        if staff_id is None:
+            staff_stmt = (
+                select(
+                    StaffMember.id,
+                    StaffMember.display_name,
+                    func.count(Appointment.id).label("total_today"),
+                    func.count().filter(Appointment.status == AppointmentStatus.COMPLETED).label("completed_today"),
+                    func.coalesce(
+                        func.sum(case((Appointment.status == AppointmentStatus.COMPLETED, Appointment.snapshot_service_price), else_=0)),
+                        0
+                    ).label("revenue_today"),
+                )
+                .outerjoin(
+                    Appointment,
+                    (Appointment.staff_id == StaffMember.id)
+                    & (Appointment.master_id == master_id)
+                    & (Appointment.start_time >= start_dt)
+                    & (Appointment.start_time <= end_dt)
+                    & (~Appointment.status.in_([
+                        AppointmentStatus.CANCELLED_BY_CLIENT,
+                        AppointmentStatus.CANCELLED_BY_ADMIN,
+                        AppointmentStatus.EXPIRED,
+                    ]))
+                )
+                .where(StaffMember.master_id == master_id, StaffMember.is_active.is_(True))
+                .group_by(StaffMember.id, StaffMember.display_name)
+                .order_by(StaffMember.sort_order.asc(), StaffMember.id.asc())
+            )
+            staff_rows = (await self.session.execute(staff_stmt)).all()
+            for s_id, s_name, s_tot, s_comp, s_rev in staff_rows:
+                staff_breakdown.append({
+                    "id": s_id,
+                    "name": s_name,
+                    "total_today": s_tot or 0,
+                    "completed_today": s_comp or 0,
+                    "revenue_today": Decimal(s_rev or 0),
+                })
+
         return {
             "total_today": total_today,
             "revenue_today": revenue_today,
             "unique_clients_today": unique_clients_today,
             "new_clients_today": new_clients_count,
             "next_appointment": next_info,
+            "staff_breakdown": staff_breakdown,
         }
 
     # -------------------------------------------------------------------------
     # 8. CSV EXPORT (TENANT-SCOPED)
     # -------------------------------------------------------------------------
-    async def export_clients_csv(self, master_id: int) -> str:
+    async def export_clients_csv(self, master_id: int, staff_id: Optional[int] = None) -> str:
         """Export all clients of a master to CSV with UTF-8 BOM strictly isolated to master_id."""
+        app_subq_conditions = [Appointment.master_id == master_id]
+        if staff_id is not None:
+            app_subq_conditions.append(Appointment.staff_id == staff_id)
+
         app_subq = (
             select(
                 Appointment.user_id.label("uid"),
@@ -639,7 +713,7 @@ class MasterCrmService:
                 func.min(Appointment.start_time).label("first_visit"),
                 func.max(Appointment.start_time).label("last_visit"),
             )
-            .where(Appointment.master_id == master_id)
+            .where(*app_subq_conditions)
             .group_by(Appointment.user_id)
             .subquery()
         )
@@ -657,8 +731,11 @@ class MasterCrmService:
             .join(User, MasterClient.user_id == User.id)
             .outerjoin(app_subq, MasterClient.user_id == app_subq.c.uid)
             .where(MasterClient.master_id == master_id)
-            .order_by(MasterClient.created_at.desc())
         )
+        if staff_id is not None:
+            query = query.where(func.coalesce(app_subq.c.total_cnt, 0) > 0)
+
+        query = query.order_by(MasterClient.created_at.desc())
         res = await self.session.execute(query)
         rows = res.all()
 

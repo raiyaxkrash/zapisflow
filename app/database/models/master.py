@@ -27,6 +27,7 @@ from app.database.models.base import Base
 if TYPE_CHECKING:
     from app.database.models.subscription import SubscriptionPayment, SubscriptionPeriod
     from app.database.models.user import User
+    from app.database.models.staff import StaffMember
 
 
 class MasterStatus(str, enum.Enum):
@@ -54,6 +55,7 @@ class BotInstanceStatus(str, enum.Enum):
 class MasterAdminRole(str, enum.Enum):
     OWNER = "OWNER"
     ADMIN = "ADMIN"
+    STAFF = "STAFF"
 
 
 class Master(Base):
@@ -102,6 +104,9 @@ class Master(Base):
     )
     admins: Mapped[List["MasterAdmin"]] = relationship(
         "MasterAdmin", back_populates="master", cascade="all, delete-orphan"
+    )
+    staff_members: Mapped[List["StaffMember"]] = relationship(
+        "StaffMember", back_populates="master", cascade="all, delete-orphan"
     )
     subscription_periods: Mapped[List["SubscriptionPeriod"]] = relationship(
         "SubscriptionPeriod", back_populates="master", cascade="all, delete-orphan"
@@ -243,6 +248,9 @@ class MasterAdmin(Base):
         default=MasterAdminRole.ADMIN,
         nullable=False,
     )
+    staff_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("staff_members.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -251,3 +259,4 @@ class MasterAdmin(Base):
     # Relationships
     master: Mapped["Master"] = relationship("Master", back_populates="admins")
     user: Mapped["User"] = relationship("User")
+    staff: Mapped[Optional["StaffMember"]] = relationship("StaffMember")

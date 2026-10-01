@@ -50,6 +50,7 @@ from app.database.models.subscription import (
     PromoCode,
 )
 from app.database.models.review import Review
+from app.database.models.staff import StaffMember, StaffService
 
 __all__ = [
     "Base",
@@ -99,4 +100,6 @@ __all__ = [
     "SubscriptionPayment",
     "PromoCode",
     "Review",
+    "StaffMember",
+    "StaffService",
 ]

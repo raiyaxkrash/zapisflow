@@ -86,3 +86,12 @@ class ManagerSettingsStates(StatesGroup):
 
     waiting_for_name = State()
     waiting_for_description = State()
+
+
+class ManagerStaffStates(StatesGroup):
+    """FSM states for managing studio staff members in Manager Bot."""
+
+    waiting_for_name = State()
+    waiting_for_specialization = State()
+    waiting_for_description = State()
+    waiting_for_edit_field_value = State()

@@ -14,6 +14,11 @@ class ServiceCallback(CallbackData, prefix="svc"):
     service_id: int
 
 
+class StaffChoiceCallback(CallbackData, prefix="stf"):
+    action: str  # "select", "any"
+    staff_id: int = 0
+
+
 class CalendarNavCallback(CallbackData, prefix="cal"):
     action: str  # "prev_month", "next_month", "select_day", "ignore"
     year: int

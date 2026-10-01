@@ -9,6 +9,7 @@ class ClientBookingSG(StatesGroup):
     """
     States for client appointment reservation and proof upload.
     """
+    choosing_staff = State()        # Choosing specialist if multiple staff members exist
     choosing_service = State()      # Browsing and selecting service
     choosing_date = State()         # Calendar date selection
     choosing_time = State()         # Time slot selection

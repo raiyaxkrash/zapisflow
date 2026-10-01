@@ -90,6 +90,12 @@ async def test_slot_engine_calculation_with_active_booking():
     # Mock settings
     engine.master_settings_repo.get_value = AsyncMock(side_effect=lambda master_id, key, default: default)
 
+    # Mock staff repo
+    from app.database.models.staff import StaffMember
+    engine.staff_repo = AsyncMock()
+    engine.staff_repo.list_staff_for_service.return_value = []
+    engine.staff_repo.get_primary_or_default.return_value = StaffMember(id=1, master_id=1, display_name="Мастер", is_active=True)
+
     # 1. First scenario: No appointments -> Slots from 10:00 to 14:00 (since 14:00 + 90m = 15:30 <= 16:00)
     engine._collect_busy_intervals = AsyncMock(return_value=[])
 
