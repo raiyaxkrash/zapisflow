@@ -9,19 +9,21 @@ from app.database.models.master import BotInstance, BotInstanceStatus, Master
 from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPlan
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def main_menu_keyboard(is_platform_admin: bool = False) -> InlineKeyboardMarkup:
     """Main menu of Manager Bot."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🏠 Мои проекты", callback_data="mgr:projects")],
-            [InlineKeyboardButton(text="➕ Создать проект", callback_data="mgr:master:new")],
-            [
-                InlineKeyboardButton(text="💳 Подписка", callback_data="mgr:sub:menu"),
-                InlineKeyboardButton(text="🆘 Поддержка", url=settings.support_url),
-            ],
-            [InlineKeyboardButton(text="❓ Помощь", callback_data="mgr:help")],
-        ]
-    )
+    buttons = []
+    if is_platform_admin:
+        buttons.append([InlineKeyboardButton(text="👑 ZapisFlow Admin", callback_data="mgr:admin:menu")])
+    buttons.extend([
+        [InlineKeyboardButton(text="🏠 Мои проекты", callback_data="mgr:projects")],
+        [InlineKeyboardButton(text="➕ Создать проект", callback_data="mgr:master:new")],
+        [
+            InlineKeyboardButton(text="💳 Подписка", callback_data="mgr:sub:menu"),
+            InlineKeyboardButton(text="🆘 Поддержка", url=settings.support_url),
+        ],
+        [InlineKeyboardButton(text="❓ Помощь", callback_data="mgr:help")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def project_list_keyboard(masters: Sequence[Master]) -> InlineKeyboardMarkup:
@@ -144,6 +146,14 @@ def project_card_keyboard(
             callback_data=f"mgr:sub:{master.id}",
         )
     ])
+
+    if bot_instance is not None:
+        rows.append([
+            InlineKeyboardButton(
+                text="🗑 Удалить бота",
+                callback_data=f"mgr:bot:delete:{master.id}",
+            )
+        ])
 
     rows.append([InlineKeyboardButton(text="⬅️ Назад к проектам", callback_data="mgr:projects")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -334,6 +344,282 @@ def confirm_disable_bot_keyboard(master_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"mgr:master:{master_id}",
                 )
             ],
+        ]
+    )
+
+
+def bot_delete_confirm_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Confirmation before unlinking and logically deleting a bot."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:master:{master_id}"),
+                InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"mgr:bot:delete:confirm:{master_id}"),
+            ]
+        ]
+    )
+
+
+def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    """Platform Admin main navigation."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Dashboard", callback_data="mgr:admin:dashboard")],
+            [
+                InlineKeyboardButton(text="👥 Пользователи", callback_data="mgr:admin:users"),
+                InlineKeyboardButton(text="🏢 Проекты", callback_data="mgr:admin:projects"),
+            ],
+            [
+                InlineKeyboardButton(text="🤖 Боты", callback_data="mgr:admin:bots"),
+                InlineKeyboardButton(text="💳 Подписки", callback_data="mgr:admin:subscriptions"),
+            ],
+            [
+                InlineKeyboardButton(text="💰 Платежи", callback_data="mgr:admin:payments"),
+                InlineKeyboardButton(text="📦 Тарифы", callback_data="mgr:admin:plans"),
+            ],
+            [InlineKeyboardButton(text="📈 SaaS Аналитика", callback_data="mgr:admin:metrics")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")],
+        ]
+    )
+
+
+def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
+    """Platform Admin dashboard navigation."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="mgr:admin:dashboard")],
+            [
+                InlineKeyboardButton(text="👥 Пользователи", callback_data="mgr:admin:users"),
+                InlineKeyboardButton(text="🏢 Проекты", callback_data="mgr:admin:projects"),
+            ],
+            [
+                InlineKeyboardButton(text="🤖 Боты", callback_data="mgr:admin:bots"),
+                InlineKeyboardButton(text="💳 Подписки", callback_data="mgr:admin:subscriptions"),
+            ],
+            [
+                InlineKeyboardButton(text="💰 Платежи", callback_data="mgr:admin:payments"),
+                InlineKeyboardButton(text="📦 Тарифы", callback_data="mgr:admin:plans"),
+            ],
+            [InlineKeyboardButton(text="📈 SaaS Аналитика", callback_data="mgr:admin:metrics")],
+            [InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")],
+        ]
+    )
+
+
+def admin_users_keyboard(
+    users: Sequence[dict], page: int, total_pages: int
+) -> InlineKeyboardMarkup:
+    """Paginated user list for Platform Admin."""
+    buttons = []
+    for u in users:
+        label = f"{u['first_name']} (@{u['username']})" if u.get("username") else f"{u['first_name']} (id: {u['id']})"
+        buttons.append([
+            InlineKeyboardButton(text=label, callback_data=f"mgr:admin:user:{u['id']}")
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Пред", callback_data=f"mgr:admin:users:p:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"Стр {page}/{total_pages}", callback_data=f"mgr:admin:users:p:{page}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="След ➡️", callback_data=f"mgr:admin:users:p:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_user_detail_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """User detail view actions."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К списку пользователей", callback_data="mgr:admin:users")]
+        ]
+    )
+
+
+def admin_projects_keyboard(
+    projects: Sequence[dict], page: int, total_pages: int
+) -> InlineKeyboardMarkup:
+    """Paginated project list for Platform Admin."""
+    buttons = []
+    for p in projects:
+        icon = "🟢" if p["status"] == "ACTIVE" else "🟡"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {p['display_name']}",
+                callback_data=f"mgr:admin:project:{p['id']}",
+            )
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Пред", callback_data=f"mgr:admin:projects:p:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"Стр {page}/{total_pages}", callback_data=f"mgr:admin:projects:p:{page}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="След ➡️", callback_data=f"mgr:admin:projects:p:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_project_detail_keyboard(master_id: int, is_suspended: bool) -> InlineKeyboardMarkup:
+    """Project detail action buttons."""
+    action_text = "▶️ Активировать проект" if is_suspended else "⏸ Приостановить проект"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=action_text, callback_data=f"mgr:admin:project:suspend:{master_id}")],
+            [InlineKeyboardButton(text="⬅️ К списку проектов", callback_data="mgr:admin:projects")],
+        ]
+    )
+
+
+def admin_bots_keyboard(
+    bots: Sequence[dict], page: int, total_pages: int
+) -> InlineKeyboardMarkup:
+    """Paginated bot list for Platform Admin."""
+    buttons = []
+    for b in bots:
+        icon = "🟢" if b["status"] == "ACTIVE" else "🔴"
+        name = f"@{b['telegram_username']}" if b.get("telegram_username") else f"Bot #{b['id']}"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {name} ({b['master_name']})",
+                callback_data=f"mgr:admin:bot:{b['id']}",
+            )
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Пред", callback_data=f"mgr:admin:bots:p:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"Стр {page}/{total_pages}", callback_data=f"mgr:admin:bots:p:{page}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="След ➡️", callback_data=f"mgr:admin:bots:p:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_bot_detail_keyboard(bot_id: int, is_active: bool) -> InlineKeyboardMarkup:
+    """Bot instance detail actions."""
+    toggle_text = "⏸ Отключить бота" if is_active else "▶️ Включить бота"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Проверить webhook", callback_data=f"mgr:admin:bot:webhook:{bot_id}")],
+            [InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:admin:bot:toggle:{bot_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить бота", callback_data=f"mgr:admin:bot:delete:{bot_id}")],
+            [InlineKeyboardButton(text="⬅️ К списку ботов", callback_data="mgr:admin:bots")],
+        ]
+    )
+
+
+def admin_subscriptions_keyboard(
+    subscriptions: Sequence[dict], page: int, total_pages: int
+) -> InlineKeyboardMarkup:
+    """Subscriptions list for Platform Admin."""
+    buttons = []
+    for s in subscriptions:
+        icon = "🟢" if s["subscription_status"] == "ACTIVE" else ("🟡" if s["subscription_status"] == "TRIAL" else "🔴")
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {s['project_name']} ({s['subscription_status']})",
+                callback_data=f"mgr:admin:project:{s['master_id']}",
+            )
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Пред", callback_data=f"mgr:admin:sub:p:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"Стр {page}/{total_pages}", callback_data=f"mgr:admin:sub:p:{page}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="След ➡️", callback_data=f"mgr:admin:sub:p:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_payments_keyboard(
+    payments: Sequence[dict], page: int, total_pages: int
+) -> InlineKeyboardMarkup:
+    """Paginated payments list for Platform Admin."""
+    buttons = []
+    for p in payments:
+        icon = "🟢" if p["status"] == "SUCCEEDED" else ("🟡" if p["status"] == "PENDING" else "🔴")
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {p['amount']} {p['currency']} - {p['project_name']}",
+                callback_data=f"mgr:admin:payment:{p['id']}",
+            )
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Пред", callback_data=f"mgr:admin:payments:p:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"Стр {page}/{total_pages}", callback_data=f"mgr:admin:payments:p:{page}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="След ➡️", callback_data=f"mgr:admin:payments:p:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_payment_detail_keyboard(
+    payment_id: int, provider: str, status: str
+) -> InlineKeyboardMarkup:
+    """Payment detail actions."""
+    rows = []
+    if status == "PENDING" and provider == "YOOKASSA":
+        rows.append([
+            InlineKeyboardButton(
+                text="🔄 Проверить в YooKassa",
+                callback_data=f"mgr:admin:payment:check:{payment_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ К платежам", callback_data="mgr:admin:payments")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_plans_keyboard(plans: Sequence[SubscriptionPlan]) -> InlineKeyboardMarkup:
+    """Catalog of subscription plans."""
+    buttons = []
+    for p in plans:
+        icon = "🟢" if p.is_active else "🔴"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {p.name} ({p.price_rub} ₽ / {p.duration_days} дн.)",
+                callback_data=f"mgr:admin:plan:{p.id}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_plan_detail_keyboard(plan_id: int, is_active: bool) -> InlineKeyboardMarkup:
+    """Plan detail action buttons."""
+    toggle_text = "🔴 Деактивировать тариф" if is_active else "🟢 Активировать тариф"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:admin:plan:toggle:{plan_id}")],
+            [InlineKeyboardButton(text="⬅️ К тарифам", callback_data="mgr:admin:plans")],
+        ]
+    )
+
+
+def admin_metrics_keyboard() -> InlineKeyboardMarkup:
+    """Metrics view actions."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить метрики", callback_data="mgr:admin:metrics")],
+            [InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")],
         ]
     )
 

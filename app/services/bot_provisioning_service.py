@@ -521,3 +521,60 @@ class BotProvisioningService:
         )
         await self.session.flush()
         return True, []
+
+    async def delete_bot(
+        self,
+        bot_instance_id: int,
+        actor_user_id: int,
+        is_platform_admin: bool = False,
+    ) -> BotInstance:
+        """Logically delete / unlink a customer bot instance and revoke its webhook."""
+        if is_platform_admin:
+            bot_instance = await self.bot_repo.get_by_id(bot_instance_id)
+        else:
+            bot_instance = await self.bot_repo.get_by_id_and_owner(bot_instance_id, actor_user_id)
+
+        if not bot_instance:
+            raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
+
+        # 1. Best-effort deleteWebhook in Telegram
+        if bot_instance.encrypted_token and bot_instance.telegram_bot_id:
+            try:
+                raw_token = self.crypto.decrypt(
+                    bot_instance.encrypted_token,
+                    associated_data=bot_instance.telegram_bot_id,
+                )
+                await self.gateway.delete_webhook(raw_token)
+            except Exception as exc:
+                logger.warning(
+                    "deleteWebhook failed during delete_bot for bot #%s (continuing): %s",
+                    bot_instance.id,
+                    exc,
+                )
+
+        # 2. Update status and unlink: mark disabled and not current
+        bot_instance.status = BotInstanceStatus.DISABLED
+        bot_instance.is_current = False
+        bot_instance.last_error = "Бот отключён и удалён из проекта."
+
+        # If master status was ACTIVE, switch to SETUP_REQUIRED since no active bot remains
+        master = await self.master_repo.get_by_id(bot_instance.master_id)
+        if master and master.status == MasterStatus.ACTIVE:
+            master.status = MasterStatus.SETUP_REQUIRED
+
+        await self.session.commit()
+
+        # 3. Invalidate BotRegistry runtime pool & redis bus
+        if self.registry:
+            await self.registry.invalidate_bot(bot_instance.id, reason="bot_deleted")
+
+        # 4. Audit log
+        await self.audit_service.log_event(
+            action=AuditEvent.BOT_DELETED,
+            actor_user_id=actor_user_id,
+            master_id=bot_instance.master_id,
+            entity_id=bot_instance.id,
+            payload_after={"status": "DISABLED", "is_current": False},
+        )
+        await self.session.commit()
+        return bot_instance

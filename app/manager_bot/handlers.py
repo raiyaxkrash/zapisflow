@@ -19,6 +19,21 @@ from app.database.models.master import BotInstanceStatus, Master, MasterSettings
 from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPayment, SubscriptionPlan
 from app.database.models.user import User
 from app.manager_bot.keyboards import (
+    admin_bot_detail_keyboard,
+    admin_bots_keyboard,
+    admin_dashboard_keyboard,
+    admin_menu_keyboard,
+    admin_metrics_keyboard,
+    admin_payment_detail_keyboard,
+    admin_payments_keyboard,
+    admin_plan_detail_keyboard,
+    admin_plans_keyboard,
+    admin_project_detail_keyboard,
+    admin_projects_keyboard,
+    admin_subscriptions_keyboard,
+    admin_user_detail_keyboard,
+    admin_users_keyboard,
+    bot_delete_confirm_keyboard,
     cancel_keyboard,
     confirm_connect_keyboard,
     confirm_disable_bot_keyboard,
@@ -34,6 +49,7 @@ from app.manager_bot.keyboards import (
     subscription_success_keyboard,
 )
 from app.services.bot_registry import BotRegistry
+from app.services.platform_admin_service import PlatformAdminService
 from app.services.rate_limiter import check_rate_limit
 from app.services.subscription_service import SubscriptionService
 from app.database.session import async_session_factory
@@ -91,6 +107,8 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession) 
     user = await _get_or_create_user(session, message.from_user)
     master_repo = MasterRepository(session)
     masters = await master_repo.list_by_owner_id(user.id)
+    admin_svc = PlatformAdminService(session)
+    is_admin = await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id)
 
     if not masters:
         text = (
@@ -99,7 +117,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession) 
             "для автоматической записи клиентов в вашу студию красоты.\n\n"
             "Нажмите кнопку ниже, чтобы создать свой первый проект:"
         )
-        await message.answer(text, reply_markup=main_menu_keyboard())
+        await message.answer(text, reply_markup=main_menu_keyboard(is_platform_admin=is_admin))
     else:
         text = (
             f"👋 Здравствуйте, <b>{escape(user.first_name)}</b>!\n\n"
@@ -109,10 +127,13 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession) 
 
 
 @manager_router.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext) -> None:
+async def cmd_cancel(message: Message, state: FSMContext, session: AsyncSession) -> None:
     """Manager Bot /cancel command to clear active FSM state."""
     await state.clear()
-    await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session)
+    is_admin = await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id)
+    await message.answer("Действие отменено.", reply_markup=main_menu_keyboard(is_platform_admin=is_admin))
 
 
 @manager_router.callback_query(F.data == "mgr:menu")
@@ -120,10 +141,12 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext, session: Asyn
     """Return to main menu."""
     await state.clear()
     user = await _get_or_create_user(session, callback.from_user)
+    admin_svc = PlatformAdminService(session)
+    is_admin = await admin_svc.is_platform_admin(telegram_id=callback.from_user.id, user_id=user.id)
     text = f"<b>Beauty Bot Manager</b> — панель управления проектами ({escape(user.first_name)}):"
     await callback.answer()
     try:
-        await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
+        await callback.message.edit_text(text, reply_markup=main_menu_keyboard(is_platform_admin=is_admin))
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc).lower():
             raise
@@ -1282,3 +1305,662 @@ async def cb_subscription_check(callback: CallbackQuery, session: AsyncSession) 
         reply_markup=subscription_pending_keyboard(master_id, payment_id, result.confirmation_url),
     )
     await callback.answer("Сервис оплаты временно недоступен. Попробуйте позже.", show_alert=True)
+
+
+# ---------------------------------------------------------------------------
+# Platform Admin & Owner Bot Deletion Handlers (Phase 2)
+# ---------------------------------------------------------------------------
+
+async def _ensure_platform_admin(
+    session: AsyncSession, callback: CallbackQuery
+) -> tuple[bool, Optional[User]]:
+    """Helper to guard platform admin callbacks and prevent unauthorized access."""
+    user = await _get_or_create_user(session, callback.from_user)
+    admin_svc = PlatformAdminService(session)
+    is_admin = await admin_svc.is_platform_admin(telegram_id=callback.from_user.id, user_id=user.id)
+    if not is_admin:
+        await callback.answer("⛔ Доступ запрещён. Требуются права Platform Admin.", show_alert=True)
+        return False, user
+    return True, user
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:bot:delete:confirm:(\d+)$"))
+async def cb_bot_delete_confirm(
+    callback: CallbackQuery, session: AsyncSession, bot_registry: Optional[BotRegistry] = None
+) -> None:
+    """Execute logical unlinking and webhook revocation of customer bot."""
+    master_id = int(callback.data.split(":")[-1])
+    user = await _get_or_create_user(session, callback.from_user)
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("У вас нет прав на управление данным проектом.", show_alert=True)
+        return
+
+    bot_repo = BotInstanceRepository(session)
+    bot = await bot_repo.get_current_for_master(master_id)
+    if not bot:
+        await callback.answer("У проекта нет подключённого бота.", show_alert=True)
+        return
+
+    bot_svc = BotProvisioningService(session, registry=bot_registry)
+    try:
+        await bot_svc.delete_bot(bot.id, actor_user_id=user.id)
+    except Exception as exc:
+        logger.exception("Error deleting bot: %s", exc)
+        await callback.answer("Не удалось удалить бота. Попробуйте позже.", show_alert=True)
+        return
+
+    await callback.answer("✅ Бот успешно отключён и удалён из проекта.", show_alert=True)
+    master = await master_repo.get_by_id(master_id)
+    text = (
+        f"🏢 Проект: <b>{escape(master.display_name)}</b>\n\n"
+        f"Статус: 🟡 Требуется настройка\n\n"
+        "Telegram-бот не подключён. Нажмите кнопку ниже для подключения."
+    )
+    await callback.message.edit_text(text, reply_markup=project_card_keyboard(master, None))
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:bot:delete:(\d+)$"))
+async def cb_bot_delete_prompt(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    """Prompt owner before unlinking / deleting a bot from project."""
+    master_id = int(callback.data.split(":")[-1])
+    user = await _get_or_create_user(session, callback.from_user)
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("У вас нет прав на управление данным проектом.", show_alert=True)
+        return
+
+    text = (
+        f"⚠️ <b>Удаление бота из проекта «{escape(master.display_name)}»</b>\n\n"
+        "Вы действительно хотите удалить этого бота?\n\n"
+        "• Это отключит Telegram-бота и отзовёт webhook.\n"
+        "• Все данные проекта (клиенты, записи, история, финансы) <b>будут сохранены</b>.\n"
+        "• Вы сможете подключить нового бота в любой момент."
+    )
+    await callback.message.edit_text(text, reply_markup=bot_delete_confirm_keyboard(master_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data == "mgr:admin:menu")
+async def cb_admin_menu(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin main navigation."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    text = (
+        "👑 <b>ZapisFlow Platform Admin</b>\n\n"
+        "Централизованная панель мониторинга и администрирования платформы ZapisFlow.\n\n"
+        "Выберите раздел:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data == "mgr:admin:dashboard")
+async def cb_admin_dashboard(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin dashboard metrics."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    admin_svc = PlatformAdminService(session)
+    stats = await admin_svc.get_dashboard_stats()
+    text = (
+        "📊 <b>ZapisFlow Dashboard</b>\n\n"
+        f"👥 <b>Пользователей:</b> {stats['total_users']}\n"
+        f"🏢 <b>Проектов:</b> {stats['total_masters']}\n"
+        f"🤖 <b>Активных ботов:</b> {stats['active_bots']}\n"
+        f"🎁 <b>Trial:</b> {stats['trial_masters']}\n"
+        f"💳 <b>Paid:</b> {stats['paid_masters']}\n"
+        f"🔴 <b>Expired:</b> {stats['expired_masters']}\n"
+        f"💰 <b>MRR:</b> {stats['mrr']:,.2f} ₽\n"
+        f"📈 <b>Новых за 7 дней:</b> {stats['new_users_7d']}\n"
+        f"📊 <b>Конверсия Trial → Paid:</b> {stats['conversion_rate']}%\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_dashboard_keyboard())
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data == "mgr:admin:metrics")
+async def cb_admin_metrics(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin SaaS metrics."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    admin_svc = PlatformAdminService(session)
+    m = await admin_svc.get_saas_metrics()
+    text = (
+        "📈 <b>ZapisFlow SaaS Metrics</b>\n\n"
+        f"💰 <b>MRR:</b> {m['mrr']:,.2f} ₽\n"
+        f"📈 <b>ARR:</b> {m['arr']:,.2f} ₽\n"
+        f"💳 <b>Активных платных:</b> {m['paid_masters']}\n"
+        f"🎁 <b>В триале:</b> {m['trial_masters']}\n"
+        f"🔴 <b>Истекших:</b> {m['expired_masters']}\n"
+        f"📊 <b>ARPU:</b> {m['arpu']:,.2f} ₽\n"
+        f"💵 <b>Общая выручка:</b> {m['total_revenue']:,.2f} ₽ ({m['total_successful_payments']} платежей)\n\n"
+        f"👥 <b>Новые пользователи:</b> 7д: +{m['new_users_7d']} | 30д: +{m['new_users_30d']}\n"
+        f"🏢 <b>Новые проекты:</b> 7д: +{m['new_projects_7d']} | 30д: +{m['new_projects_30d']}\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_metrics_keyboard())
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:users"))
+async def cb_admin_users(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin users list."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    page = 1
+    if callback.data.startswith("mgr:admin:users:p:"):
+        try:
+            page = max(1, int(callback.data.split(":")[-1]))
+        except ValueError:
+            page = 1
+
+    admin_svc = PlatformAdminService(session)
+    users, total, total_pages = await admin_svc.list_users(page=page)
+
+    text = (
+        f"👥 <b>Пользователи платформы</b> (Всего: {total})\n\n"
+        f"Страница {page} из {total_pages}. Выберите пользователя для просмотра деталей:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_users_keyboard(users, page, total_pages))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:user:"))
+async def cb_admin_user_detail(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin user detail view."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    user_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    u = await admin_svc.get_user_details(user_id)
+    if not u:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+
+    projects_text = ""
+    if u["projects"]:
+        for p in u["projects"]:
+            bot_info = f" (@{p['bot_username']})" if p['bot_username'] else " (без бота)"
+            projects_text += f"\n  • <b>{escape(p['display_name'])}</b>: {p['status']}{bot_info}"
+    else:
+        projects_text = "\n  <i>Нет созданных проектов</i>"
+
+    admin_badge = "👑 Platform Admin" if u["is_platform_admin"] else "Обычный пользователь"
+
+    text = (
+        f"👤 <b>Пользователь #{u['id']}</b>\n\n"
+        f"Имя: <b>{escape(u['first_name'])} {escape(u['last_name'] or '')}</b>\n"
+        f"Username: @{u['username'] if u['username'] else '-'}\n"
+        f"Telegram ID: <code>{u['telegram_id']}</code>\n"
+        f"Телефон: {u['phone'] or 'Не указан'}\n"
+        f"Роль: <b>{admin_badge}</b>\n"
+        f"Регистрация: {u['first_seen_at'].strftime('%d.%m.%Y %H:%M') if u['first_seen_at'] else '-'}\n"
+        f"Активность: {u['last_activity_at'].strftime('%d.%m.%Y %H:%M') if u['last_activity_at'] else '-'}\n\n"
+        f"🏢 <b>Проекты ({len(u['projects'])}):</b>{projects_text}"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_user_detail_keyboard(u["id"]))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:projects"))
+async def cb_admin_projects(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin projects list."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    page = 1
+    if callback.data.startswith("mgr:admin:projects:p:"):
+        try:
+            page = max(1, int(callback.data.split(":")[-1]))
+        except ValueError:
+            page = 1
+
+    admin_svc = PlatformAdminService(session)
+    projects, total, total_pages = await admin_svc.list_projects(page=page)
+
+    text = (
+        f"🏢 <b>Проекты мастеров</b> (Всего: {total})\n\n"
+        f"Страница {page} из {total_pages}. Выберите проект для просмотра:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_projects_keyboard(projects, page, total_pages))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:project:suspend:"))
+async def cb_admin_project_suspend(
+    callback: CallbackQuery, session: AsyncSession, bot_registry: Optional[BotRegistry] = None
+) -> None:
+    """Toggle master project suspension."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    master_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session, registry=bot_registry)
+    ok, msg = await admin_svc.toggle_project_suspension(master_id, actor_user_id=user.id)
+    await callback.answer(msg, show_alert=True)
+
+    # Refresh details
+    p = await admin_svc.get_project_details(master_id)
+    if not p:
+        return
+    is_suspended = p["status"] == "SUSPENDED"
+    bot_info = f"@{p['bot']['username']} ({p['bot']['status']})" if p['bot']['username'] else "Не подключён"
+
+    text = (
+        f"🏢 <b>Проект #{p['id']}: {escape(p['display_name'])}</b>\n\n"
+        f"Владелец: <b>{escape(p['owner']['first_name'] or '')}</b> (@{p['owner']['username'] or '-'})\n"
+        f"Статус проекта: <b>{p['status']}</b>\n"
+        f"Подписка: <b>{p['subscription_status']}</b>\n"
+        f"Бот: <b>{bot_info}</b>\n"
+        f"Клиентов: <b>{p['clients_count']}</b> | Записей: <b>{p['appointments_count']}</b>\n"
+        f"Создан: {p['created_at'].strftime('%d.%m.%Y %H:%M') if p['created_at'] else '-'}\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_project_detail_keyboard(master_id, is_suspended))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:project:"))
+async def cb_admin_project_detail(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin project detail view."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    master_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_project_details(master_id)
+    if not p:
+        await callback.answer("Проект не найден.", show_alert=True)
+        return
+
+    is_suspended = p["status"] == "SUSPENDED"
+    bot_info = f"@{p['bot']['username']} ({p['bot']['status']})" if p['bot']['username'] else "Не подключён"
+
+    sub_end_text = "-"
+    if p["paid_until"]:
+        sub_end_text = f"Оплачен до {p['paid_until'].strftime('%d.%m.%Y')}"
+    elif p["trial_ends_at"]:
+        sub_end_text = f"Триал до {p['trial_ends_at'].strftime('%d.%m.%Y')}"
+
+    text = (
+        f"🏢 <b>Проект #{p['id']}: {escape(p['display_name'])}</b>\n\n"
+        f"Владелец: <b>{escape(p['owner']['first_name'] or '')}</b> (@{p['owner']['username'] or '-'})\n"
+        f"Telegram ID владельца: <code>{p['owner']['telegram_id']}</code>\n"
+        f"Статус проекта: <b>{p['status']}</b>\n"
+        f"Подписка: <b>{p['subscription_status']}</b> ({sub_end_text})\n"
+        f"Бот: <b>{bot_info}</b>\n"
+        f"Часовой пояс: {p['timezone']}\n"
+        f"Клиентов: <b>{p['clients_count']}</b> | Записей: <b>{p['appointments_count']}</b>\n"
+        f"Создан: {p['created_at'].strftime('%d.%m.%Y %H:%M') if p['created_at'] else '-'}\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_project_detail_keyboard(master_id, is_suspended))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:bots"))
+async def cb_admin_bots(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin bots list."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    page = 1
+    if callback.data.startswith("mgr:admin:bots:p:"):
+        try:
+            page = max(1, int(callback.data.split(":")[-1]))
+        except ValueError:
+            page = 1
+
+    admin_svc = PlatformAdminService(session)
+    bots, total, total_pages = await admin_svc.list_bots(page=page)
+
+    text = (
+        f"🤖 <b>Боты платформы</b> (Всего: {total})\n\n"
+        f"Страница {page} из {total_pages}. Выберите бота для просмотра:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_bots_keyboard(bots, page, total_pages))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:bot:webhook:"))
+async def cb_admin_bot_webhook(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Inspect live webhook info in Telegram."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    bot_id = int(callback.data.split(":")[-1])
+    bot_repo = BotInstanceRepository(session)
+    bot = await bot_repo.get_by_id(bot_id)
+    if not bot or not bot.encrypted_token or not bot.telegram_bot_id:
+        await callback.answer("Токен бота не настроен.", show_alert=True)
+        return
+
+    crypto = TokenCrypto()
+    gateway = TelegramProvisioningGateway()
+    try:
+        raw_token = crypto.decrypt(bot.encrypted_token, associated_data=bot.telegram_bot_id)
+        info = await gateway.get_webhook_info(raw_token)
+        pending = getattr(info, "pending_update_count", 0)
+        last_error = getattr(info, "last_error_message", None)
+        msg = f"Вебхук активен.\nОчередь: {pending} апдейтов.\nОшибка TG: {last_error or 'Нет'}"
+    except Exception as exc:
+        msg = f"Ошибка получения статуса: {str(exc)[:150]}"
+
+    await callback.answer(msg, show_alert=True)
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:bot:toggle:"))
+async def cb_admin_bot_toggle(
+    callback: CallbackQuery, session: AsyncSession, bot_registry: Optional[BotRegistry] = None
+) -> None:
+    """Toggle bot disabled/enabled status."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    bot_id = int(callback.data.split(":")[-1])
+    bot_svc = BotProvisioningService(session, registry=bot_registry)
+    bot_repo = BotInstanceRepository(session)
+    bot = await bot_repo.get_by_id(bot_id)
+    if not bot:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(bot.master_id)
+    actor_id = master.owner_user_id if master else user.id
+
+    try:
+        if bot.status == BotInstanceStatus.DISABLED:
+            await bot_svc.enable_bot(bot.id, actor_user_id=actor_id)
+            await callback.answer("Бот успешно включён.", show_alert=True)
+        else:
+            await bot_svc.disable_bot(bot.id, actor_user_id=actor_id)
+            await callback.answer("Бот успешно отключён.", show_alert=True)
+    except Exception as exc:
+        logger.exception("Error toggling bot status: %s", exc)
+        await callback.answer(f"Ошибка: {str(exc)[:150]}", show_alert=True)
+
+    # Refresh
+    admin_svc = PlatformAdminService(session)
+    b = await admin_svc.get_bot_details(bot_id)
+    if b:
+        is_active = b["status"] == "ACTIVE"
+        text = (
+            f"🤖 <b>Бот #{b['id']}</b>\n\n"
+            f"Username: @{b['telegram_username'] or '-'}\n"
+            f"Имя: {escape(b['telegram_first_name'] or '-')}\n"
+            f"Статус: <b>{b['status']}</b>\n"
+            f"Проект: <b>{escape(b['master_name'])}</b>\n"
+            f"Версия токена: v{b['token_version']}\n"
+            f"Ошибка: {b['last_error'] or 'Нет'}\n"
+        )
+        await callback.message.edit_text(text, reply_markup=admin_bot_detail_keyboard(bot_id, is_active))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:bot:delete:"))
+async def cb_admin_bot_delete(
+    callback: CallbackQuery, session: AsyncSession, bot_registry: Optional[BotRegistry] = None
+) -> None:
+    """Platform Admin logical bot deletion."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    bot_id = int(callback.data.split(":")[-1])
+    bot_svc = BotProvisioningService(session, registry=bot_registry)
+    try:
+        await bot_svc.delete_bot(bot_id, actor_user_id=user.id, is_platform_admin=True)
+        await callback.answer("Бот успешно удалён из платформы.", show_alert=True)
+    except Exception as exc:
+        logger.exception("Error deleting bot: %s", exc)
+        await callback.answer("Не удалось удалить бота.", show_alert=True)
+        return
+
+    # Return to bots list
+    admin_svc = PlatformAdminService(session)
+    bots, total, total_pages = await admin_svc.list_bots(page=1)
+    text = (
+        f"🤖 <b>Боты платформы</b> (Всего: {total})\n\n"
+        f"Страница 1 из {total_pages}. Выберите бота для просмотра:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_bots_keyboard(bots, 1, total_pages))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:bot:"))
+async def cb_admin_bot_detail(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin bot detail view."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    bot_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    b = await admin_svc.get_bot_details(bot_id)
+    if not b:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+
+    is_active = b["status"] == "ACTIVE"
+    text = (
+        f"🤖 <b>Бот #{b['id']}</b>\n\n"
+        f"Username: @{b['telegram_username'] or '-'}\n"
+        f"Имя: {escape(b['telegram_first_name'] or '-')}\n"
+        f"Telegram Bot ID: <code>{b['telegram_bot_id'] or '-'}</code>\n"
+        f"Статус: <b>{b['status']}</b>\n"
+        f"Проект: <b>{escape(b['master_name'])}</b>\n"
+        f"Владелец: @{b['owner_username'] or '-'}\n"
+        f"Версия токена: v{b['token_version']}\n"
+        f"Активен: {'Да' if b['is_current'] else 'Нет'}\n"
+        f"Ошибка: {b['last_error'] or 'Нет'}\n"
+        f"Подключён: {b['created_at'].strftime('%d.%m.%Y %H:%M') if b['created_at'] else '-'}\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_bot_detail_keyboard(bot_id, is_active))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:subscriptions"))
+async def cb_admin_subscriptions(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin subscriptions list."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    page = 1
+    if callback.data.startswith("mgr:admin:sub:p:"):
+        try:
+            page = max(1, int(callback.data.split(":")[-1]))
+        except ValueError:
+            page = 1
+
+    admin_svc = PlatformAdminService(session)
+    subs, total, total_pages = await admin_svc.list_subscriptions(page=page)
+
+    text = (
+        f"💳 <b>Подписки проектов</b> (Всего: {total})\n\n"
+        f"Страница {page} из {total_pages}. Выберите проект для деталей:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_subscriptions_keyboard(subs, page, total_pages))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:payments"))
+async def cb_admin_payments(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin payments list."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    page = 1
+    if callback.data.startswith("mgr:admin:payments:p:"):
+        try:
+            page = max(1, int(callback.data.split(":")[-1]))
+        except ValueError:
+            page = 1
+
+    admin_svc = PlatformAdminService(session)
+    payments, total, total_pages = await admin_svc.list_payments(page=page)
+
+    text = (
+        f"💰 <b>Платежи платформы</b> (Всего: {total})\n\n"
+        f"Страница {page} из {total_pages}. Выберите платёж для просмотра:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_payments_keyboard(payments, page, total_pages))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:payment:check:"))
+async def cb_admin_payment_check(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Reconcile pending payment status from YooKassa."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    payment_id = int(callback.data.split(":")[-1])
+    checkout_service = YooKassaCheckoutService(session=session)
+    payment = await session.get(SubscriptionPayment, payment_id)
+    if not payment:
+        await callback.answer("Платёж не найден.", show_alert=True)
+        return
+
+    master = await session.get(Master, payment.master_id)
+    actor_id = master.owner_user_id if master else 0
+
+    result = await checkout_service.check_payment(payment_id=payment_id, actor_user_id=actor_id)
+    await callback.answer(f"Статус платежа: {result.status}", show_alert=True)
+
+    # Refresh details
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_payment_details(payment_id)
+    if p:
+        text = (
+            f"💰 <b>Платёж #{p['id']}</b>\n\n"
+            f"Проект: <b>{escape(p['project_name'])}</b>\n"
+            f"Владелец: <b>{escape(p['owner_name'])}</b>\n"
+            f"Тариф: <b>{escape(p['plan_name'])}</b>\n"
+            f"Сумма: <b>{p['amount']} {p['currency']}</b>\n"
+            f"Провайдер: <b>{p['provider']}</b>\n"
+            f"Статус: <b>{p['status']}</b>\n"
+            f"ID в YooKassa: <code>{p['provider_payment_id']}</code>\n"
+            f"Создан: {p['created_at'].strftime('%d.%m.%Y %H:%M') if p['created_at'] else '-'}\n"
+            f"Оплачен: {p['paid_at'].strftime('%d.%m.%Y %H:%M') if p['paid_at'] else '-'}\n"
+        )
+        await callback.message.edit_text(text, reply_markup=admin_payment_detail_keyboard(p["id"], p["provider"], p["status"]))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:payment:"))
+async def cb_admin_payment_detail(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin payment detail view."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    payment_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_payment_details(payment_id)
+    if not p:
+        await callback.answer("Платёж не найден.", show_alert=True)
+        return
+
+    text = (
+        f"💰 <b>Платёж #{p['id']}</b>\n\n"
+        f"Проект: <b>{escape(p['project_name'])}</b>\n"
+        f"Владелец: <b>{escape(p['owner_name'])}</b>\n"
+        f"Тариф: <b>{escape(p['plan_name'])}</b>\n"
+        f"Сумма: <b>{p['amount']} {p['currency']}</b>\n"
+        f"Провайдер: <b>{p['provider']}</b>\n"
+        f"Статус: <b>{p['status']}</b>\n"
+        f"ID в YooKassa: <code>{p['provider_payment_id']}</code>\n"
+        f"Период: {p['period_days']} дней\n"
+        f"Создан: {p['created_at'].strftime('%d.%m.%Y %H:%M') if p['created_at'] else '-'}\n"
+        f"Оплачен: {p['paid_at'].strftime('%d.%m.%Y %H:%M') if p['paid_at'] else '-'}\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_payment_detail_keyboard(p["id"], p["provider"], p["status"]))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data == "mgr:admin:plans")
+async def cb_admin_plans(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin subscription plans catalog."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    admin_svc = PlatformAdminService(session)
+    plans = await admin_svc.list_plans()
+
+    text = (
+        "📦 <b>Каталог тарифов платформы</b>\n\n"
+        "Выберите тариф для просмотра или переключения активности:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_plans_keyboard(plans))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:plan:toggle:"))
+async def cb_admin_plan_toggle(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Toggle active status for a plan."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    plan_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    ok, msg = await admin_svc.toggle_plan_active(plan_id, actor_user_id=user.id)
+    await callback.answer(msg, show_alert=True)
+
+    # Refresh
+    p = await admin_svc.get_plan_details(plan_id)
+    if p:
+        text = (
+            f"📦 <b>Тариф «{escape(p.name)}»</b>\n\n"
+            f"Код: <code>{p.code}</code>\n"
+            f"Цена: <b>{p.price_rub} {p.currency}</b>\n"
+            f"Период: <b>{p.duration_days} дней</b>\n"
+            f"Статус: <b>{'🟢 Активен' if p.is_active else '🔴 Неактивен'}</b>\n"
+            f"Порядок: {p.sort_order}\n"
+            f"Описание: {escape(p.description or 'Нет описания')}\n"
+        )
+        await callback.message.edit_text(text, reply_markup=admin_plan_detail_keyboard(p.id, p.is_active))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:plan:"))
+async def cb_admin_plan_detail(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin plan detail view."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    plan_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_plan_details(plan_id)
+    if not p:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    text = (
+        f"📦 <b>Тариф «{escape(p.name)}»</b>\n\n"
+        f"Код: <code>{p.code}</code>\n"
+        f"Цена: <b>{p.price_rub} {p.currency}</b>\n"
+        f"Период: <b>{p.duration_days} дней</b>\n"
+        f"Статус: <b>{'🟢 Активен' if p.is_active else '🔴 Неактивен'}</b>\n"
+        f"Порядок: {p.sort_order}\n"
+        f"Описание: {escape(p.description or 'Нет описания')}\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_plan_detail_keyboard(p.id, p.is_active))
+    await callback.answer()
