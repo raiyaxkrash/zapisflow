@@ -204,7 +204,9 @@ class Settings(BaseSettings):
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             errors.append("BILLING_RETURN_URL must be an HTTPS URL without credentials")
         else:
-            if parsed.path not in {"/billing/success", "/billing/yookassa/return"} or parsed.query or parsed.fragment:
+            main_site_return = parsed.netloc == "zapisflow.su" and parsed.path in {"", "/"}
+            billing_return = parsed.path in {"/billing/success", "/billing/yookassa/return"}
+            if not (main_site_return or billing_return) or parsed.query or parsed.fragment:
                 errors.append("BILLING_RETURN_URL must point to a supported billing return path")
         if self.yookassa_fiscal_mode not in {"self_employed", "merchant_receipt"}:
             errors.append("YOOKASSA_FISCAL_MODE must be self_employed or merchant_receipt")

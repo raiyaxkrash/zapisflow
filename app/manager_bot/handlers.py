@@ -1045,7 +1045,7 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
             f"Тариф: <b>{escape(order.plan_name)}</b>\n"
             f"Стоимость: {amount} ₽ / {order.period_days} дней\n\n"
             "Нажмите кнопку, чтобы открыть страницу оплаты ЮKassa. "
-            "Статус обновится после подтверждения платежа.\n"
+            "После оплаты вернитесь в бот и обновите статус подписки.\n"
             f"📞 Поддержка: {settings.support_tag}"
         )
         await callback.message.edit_text(

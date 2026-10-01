@@ -217,7 +217,7 @@ def test_billing_host_is_separate_from_existing_website() -> None:
     caddy = (ROOT / "deploy/caddy/Caddyfile").read_text(encoding="utf-8")
 
     assert "BILLING_DOMAIN=pay.zapisflow.su" in example
-    assert "BILLING_RETURN_URL=https://api.zapisflow.su/billing/yookassa/return" in example
+    assert "BILLING_RETURN_URL=https://zapisflow.su/" in example
     assert "${BILLING_DOMAIN:-pay.zapisflow.su}" in compose
     assert "{$BILLING_DOMAIN:pay.zapisflow.su}" in caddy
     assert "{$BILLING_DOMAIN:zapisflow.su}" not in caddy
@@ -235,11 +235,23 @@ def test_self_employed_yookassa_works_without_fiscal_receipt_fields() -> None:
         YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS=[2147176678],
         YOOKASSA_TEST_SHOP_ID="test-shop",
         YOOKASSA_TEST_SECRET_KEY="test-secret",
-        BILLING_RETURN_URL="https://api.zapisflow.su/billing/yookassa/return",
+        BILLING_RETURN_URL="https://zapisflow.su/",
         YOOKASSA_FISCAL_MODE="self_employed",
     )
     configured.validate_payment_configuration()
     assert configured.yookassa_fiscal_mode == "self_employed"
+
+
+def test_main_site_return_url_must_be_exact_https_origin() -> None:
+    base = dict(
+        _env_file=None, PAYMENT_PROVIDER="yookassa_web", YOOKASSA_MODE="test",
+        YOOKASSA_TEST_SHOP_ID="test-shop", YOOKASSA_TEST_SECRET_KEY="test-secret",
+        YOOKASSA_FISCAL_MODE="self_employed",
+    )
+    Settings(**base, BILLING_RETURN_URL="https://zapisflow.su/").validate_payment_configuration()
+    for url in ("http://zapisflow.su/", "https://zapisflow.su/evil", "https://zapisflow.su:8443/"):
+        with pytest.raises(ValueError, match="BILLING_RETURN_URL"):
+            Settings(**base, BILLING_RETURN_URL=url).validate_payment_configuration()
 
 
 def test_unknown_fiscal_mode_fails_closed() -> None:

@@ -18,7 +18,10 @@ Concurrent callbacks may issue the same POST key, but cannot create another
 local payment for that project and plan. No Telegram or browser parameter
 sets the amount.
 
-`https://api.zapisflow.su/billing/yookassa/return` is informational. Only
+The current `return_url` is `https://zapisflow.su/`, the independently hosted
+main site. It is a browser destination after payment, not checkout or proof of
+payment. The API's `/billing/yookassa/return` remains informational but is not
+used while some external routes to the VPS reset connections. Only
 `POST /billing/yookassa/webhook` and the reconciliation job can process a
 successful payment after an authenticated GET to YooKassa verifies provider ID,
 reference, amount, currency and metadata. The existing subscription service
@@ -33,7 +36,7 @@ Keep credentials in the VPS `.env`, never in Git or logs:
 * `YOOKASSA_ALLOW_TEST_IN_PRODUCTION=true` only for a controlled test
 * `YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS=[...]` for test owners
 * `PAYMENT_CURRENCY=RUB`
-* `BILLING_RETURN_URL=https://api.zapisflow.su/billing/yookassa/return`
+* `BILLING_RETURN_URL=https://zapisflow.su/`
 * `YOOKASSA_FISCAL_MODE=self_employed`
 
 The existing live mode selects a separate credential pair. The production test
