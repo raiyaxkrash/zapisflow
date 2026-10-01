@@ -44,6 +44,7 @@ from app.database.models.subscription import (
     SubscriptionPlan,
     SubscriptionPeriod,
     SubscriptionPayment,
+    PromoCode,
 )
 
 __all__ = [
@@ -89,4 +90,5 @@ __all__ = [
     "SubscriptionPlan",
     "SubscriptionPeriod",
     "SubscriptionPayment",
+    "PromoCode",
 ]

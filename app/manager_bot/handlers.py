@@ -25,6 +25,7 @@ from app.manager_bot.keyboards import (
     project_list_keyboard,
     subscription_card_keyboard,
     subscription_payment_keyboard,
+    subscription_projects_keyboard,
 )
 from app.services.bot_registry import BotRegistry
 from app.services.subscription_service import SubscriptionService
@@ -485,7 +486,7 @@ async def cb_confirm_bot_connection(
     except ProvisioningWebhookError as exc:
         await callback.message.edit_text(
             f"⚠️ <b>Бот сохранён, но Telegram не удалось подключить вебхук:</b>\n{exc.message}\n\n"
-            "Вы можете повторить подключение из карточки проекта.",
+            f"Вы можете повторить подключение из карточки проекта. При затруднениях напишите в поддержку: {settings.support_tag} ({settings.support_url})",
             reply_markup=main_menu_keyboard(),
         )
         await callback.answer()
@@ -493,7 +494,7 @@ async def cb_confirm_bot_connection(
     except Exception as exc:
         logger.error("Provisioning failed: %s", exc)
         await callback.message.edit_text(
-            "❌ Не удалось подключить бота. Попробуйте еще раз.",
+            f"❌ Не удалось подключить бота. Попробуйте еще раз или обратитесь в поддержку: {settings.support_tag} ({settings.support_url})",
             reply_markup=main_menu_keyboard(),
         )
         await callback.answer()
@@ -632,10 +633,11 @@ async def cb_retry_provisioning(callback: CallbackQuery, session: AsyncSession) 
         )
     except Exception as exc:
         await callback.message.edit_text(
-            f"❌ <b>Повторное подключение не удалось:</b>\n{str(exc)[:200]}",
+            f"❌ <b>Повторное подключение не удалось:</b>\n{str(exc)[:200]}\n\n"
+            f"Служба поддержки: {settings.support_tag} ({settings.support_url})",
             reply_markup=main_menu_keyboard(),
         )
-    await callback.answer()
+        await callback.answer()
 
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:disable:"))
@@ -833,6 +835,100 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 # Subscription Management
 # ---------------------------------------------------------------------------
 
+async def _show_subscription_screen(callback: CallbackQuery, master: Master, session: AsyncSession) -> None:
+    """Render subscription management screen with dynamically resolved plan prices and support links."""
+    sub_service = SubscriptionService(session)
+    eff_sub = await sub_service.get_effective_status(master.id)
+    plans = await sub_service.list_active_plans()
+    if not plans:
+        primary_plan = await sub_service.get_active_plan()
+        plans = [primary_plan]
+    else:
+        primary_plan = plans[0]
+
+    plan_name = primary_plan.name
+    price_fmt = f"{int(primary_plan.price):,} ₽".replace(",", " ")
+
+    if eff_sub.status == EffectiveSubscriptionStatus.TRIAL_ACTIVE:
+        date_str = eff_sub.expires_at.strftime("%d.%m.%Y") if eff_sub.expires_at else "—"
+        status_line = (
+            f"🟡 <b>Пробный период</b>\n"
+            f"Осталось: <b>{eff_sub.days_remaining} дн.</b> (действует до {date_str})\n\n"
+            f"После окончания пробного периода действует основной тариф <b>{plan_name}</b> ({price_fmt}/мес).\n"
+            f"Вы можете оплатить подписку заранее — оставшиеся дни триала сохранятся!"
+        )
+    elif eff_sub.status == EffectiveSubscriptionStatus.PAID_ACTIVE:
+        date_str = eff_sub.expires_at.strftime("%d.%m.%Y") if eff_sub.expires_at else "—"
+        status_line = (
+            f"🟢 <b>Подписка активна</b>\n"
+            f"Текущий тариф: <b>{plan_name}</b> ({price_fmt}/мес)\n"
+            f"Оплачено до: <b>{date_str}</b> (осталось {eff_sub.days_remaining} дн.)\n\n"
+            f"При продлении новый срок суммируется с текущей датой окончания."
+        )
+    elif eff_sub.status == EffectiveSubscriptionStatus.EXPIRED:
+        status_line = (
+            f"🔴 <b>Подписка истекла</b>\n\n"
+            f"⚠️ <b>Внимание:</b> приём новых записей клиентами временно приостановлен.\n"
+            f"Все ваши данные, клиенты, расписание и настройки <b>сохранены</b>.\n\n"
+            f"Стоимость восстановления доступа: <b>{price_fmt}</b> ({plan_name})."
+        )
+    else:
+        status_line = (
+            f"🚫 <b>Подписка заблокирована</b> администратором платформы.\n\n"
+            f"Для выяснения деталей и разблокировки напишите в поддержку: "
+            f"{settings.support_tag} ({settings.support_url})."
+        )
+
+    text = (
+        f"💳 <b>Управление подпиской: {master.display_name}</b>\n\n"
+        f"📊 <b>Текущий статус:</b>\n{status_line}\n\n"
+        "Выберите тариф для оплаты:"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=subscription_card_keyboard(master.id, plans, eff_sub.status),
+    )
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data == "mgr:sub:menu")
+async def cb_subscription_menu(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Subscription section from main menu."""
+    await state.clear()
+    user = await _get_or_create_user(session, callback.from_user)
+    master_repo = MasterRepository(session)
+    masters = await master_repo.list_by_owner_id(user.id)
+
+    if not masters:
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Создать проект", callback_data="mgr:master:new")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")],
+            ]
+        )
+        await callback.message.edit_text(
+            "💳 <b>Раздел подписки ZapisFlow</b>\n\n"
+            "У вас пока нет созданных проектов.\n"
+            "Создайте проект прямо сейчас и получите <b>14 дней бесплатного пробного периода</b> со всеми функциями!",
+            reply_markup=kb,
+        )
+        await callback.answer()
+        return
+
+    if len(masters) == 1:
+        await _show_subscription_screen(callback, masters[0], session)
+        return
+
+    await callback.message.edit_text(
+        "💳 <b>Управление подпиской</b>\n\n"
+        "Выберите проект для настройки или продления тарифа:",
+        reply_markup=subscription_projects_keyboard(masters),
+    )
+    await callback.answer()
+
+
 @manager_router.callback_query(F.data.regexp(r"^mgr:sub:(\d+)$"))
 async def cb_subscription_screen(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     """Detailed subscription management screen with IDOR verification."""
@@ -845,33 +941,7 @@ async def cb_subscription_screen(callback: CallbackQuery, state: FSMContext, ses
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
         return
 
-    sub_service = SubscriptionService(session)
-    eff_sub = await sub_service.get_effective_status(master.id)
-    plans = await sub_service.list_active_plans()
-
-    if eff_sub.status == EffectiveSubscriptionStatus.TRIAL_ACTIVE:
-        date_str = eff_sub.expires_at.strftime("%d.%m.%Y %H:%M UTC") if eff_sub.expires_at else "—"
-        status_line = f"🟡 <b>Пробный период</b>\n<i>(осталось {eff_sub.days_remaining} дн., действует до {date_str})</i>"
-    elif eff_sub.status == EffectiveSubscriptionStatus.PAID_ACTIVE:
-        date_str = eff_sub.expires_at.strftime("%d.%m.%Y %H:%M UTC") if eff_sub.expires_at else "—"
-        status_line = f"🟢 <b>Активна</b>\n<i>(оплачено до {date_str}, осталось {eff_sub.days_remaining} дн.)</i>"
-    elif eff_sub.status == EffectiveSubscriptionStatus.EXPIRED:
-        status_line = "🔴 <b>Истекла</b>\n<i>(доступ клиентов к записи ограничен, все ваши данные сохранены)</i>"
-    else:
-        status_line = "🚫 <b>Заблокирована</b> администратором платформы"
-
-    text = (
-        f"💳 <b>Управление подпиской: {master.display_name}</b>\n\n"
-        f"📊 <b>Текущий статус:</b>\n{status_line}\n\n"
-        "Продлите подписку для бесперебойного приёма онлайн-записей ваших клиентов.\n"
-        "Выберите желаемый период продления:"
-    )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=subscription_card_keyboard(master.id, plans),
-    )
-    await callback.answer()
+    await _show_subscription_screen(callback, master, session)
 
 
 @manager_router.callback_query(F.data.startswith("mgr:sub:pay:"))
@@ -897,7 +967,10 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
         await session.commit()
     except Exception as exc:
         logger.exception("Failed to create subscription payment: %s", exc)
-        await callback.answer(f"Ошибка создания платежа: {str(exc)[:100]}", show_alert=True)
+        await callback.answer(
+            f"Ошибка создания платежа: {str(exc)[:60]}.\nСлужба поддержки: {settings.support_tag}",
+            show_alert=True,
+        )
         return
 
     plan = await sub_service.get_active_plan(plan_code)
@@ -905,8 +978,9 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
 
     if settings.is_production:
         note = (
-            "<i>Автоматический платёжный шлюз находится на этапе подключения. "
-            "Для активации коммерческого тарифа в пилотном режиме обратитесь к платформенному администратору.</i>"
+            f"<i>Автоматический платёжный шлюз находится на этапе подключения. "
+            f"Для активации коммерческого тарифа в пилотном режиме обратитесь в службу поддержки: "
+            f"{settings.support_tag} ({settings.support_url}).</i>"
         )
     else:
         note = "<i>Для тестирования и ручной активации в текущей среде нажмите кнопку подтверждения:</i>"
@@ -959,7 +1033,10 @@ async def cb_subscription_confirm(callback: CallbackQuery, session: AsyncSession
         await session.commit()
     except Exception as exc:
         logger.exception("Failed to process payment #%s: %s", payment_id, exc)
-        await callback.answer(f"Ошибка обработки: {str(exc)[:100]}", show_alert=True)
+        await callback.answer(
+            f"Ошибка обработки: {str(exc)[:60]}.\nСлужба поддержки: {settings.support_tag}",
+            show_alert=True,
+        )
         return
 
     eff_sub = await sub_service.get_effective_status(master.id)

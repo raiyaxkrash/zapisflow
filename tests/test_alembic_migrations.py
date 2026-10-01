@@ -38,9 +38,57 @@ def test_alembic_revision_graph_consistency() -> None:
     assert "2026_10_01_0007" in rev_ids
     assert "2026_10_01_0008" in rev_ids
     assert "2026_10_01_0009" in rev_ids
-    # 0009 is head, 0001 is base
-    assert rev_ids[0] == "2026_10_01_0009"
+    assert "2026_10_01_0010" in rev_ids
+    # 0010 is head, 0001 is base
+    assert rev_ids[0] == "2026_10_01_0010"
     assert rev_ids[-1] == "2026_09_30_0001"
+
+
+@requires_postgres
+def test_alembic_stepwise_upgrade_and_downgrade_0010() -> None:
+    """Explicitly verify 0009 -> 0010 upgrade and 0010 -> 0009 downgrade."""
+    env = os.environ.copy()
+    env["DATABASE_URL"] = TEST_DATABASE_URL
+
+    # Downgrade to 0009
+    res_down_0009 = subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "2026_10_01_0009"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res_down_0009.returncode == 0, f"Downgrade to 0009 failed: {res_down_0009.stderr}"
+
+    # Upgrade to 0010
+    res_up_0010 = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "2026_10_01_0010"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res_up_0010.returncode == 0, f"Upgrade 0009 -> 0010 failed: {res_up_0010.stderr}"
+
+    # Downgrade back to 0009 to test reverse migration
+    res_down_back = subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "2026_10_01_0009"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res_down_back.returncode == 0, f"Downgrade 0010 -> 0009 failed: {res_down_back.stderr}"
+
+    # Restore to head
+    res_head = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res_head.returncode == 0, f"Restore to head failed: {res_head.stderr}"
 
 
 @requires_postgres

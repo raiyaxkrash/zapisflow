@@ -198,8 +198,8 @@ class SubscriptionService:
             days_remaining=0,
         )
 
-    async def get_active_plan(self, plan_code: str = "BASIC") -> SubscriptionPlan:
-        """Fetch active subscription plan from DB."""
+    async def get_active_plan(self, plan_code: str = "basic_monthly") -> SubscriptionPlan:
+        """Fetch active subscription plan from DB with graceful fallback."""
         stmt = select(SubscriptionPlan).where(
             SubscriptionPlan.code == plan_code,
             SubscriptionPlan.is_active == True,  # noqa: E712
@@ -207,15 +207,39 @@ class SubscriptionService:
         res = await self.session.execute(stmt)
         plan = res.scalars().first()
         if not plan:
+            # Fallback between 'BASIC' and 'basic_monthly' for backward compatibility
+            fallback_code = (
+                "BASIC" if plan_code == "basic_monthly" else ("basic_monthly" if plan_code == "BASIC" else None)
+            )
+            if fallback_code:
+                fb_res = await self.session.execute(
+                    select(SubscriptionPlan).where(
+                        SubscriptionPlan.code == fallback_code,
+                        SubscriptionPlan.is_active == True,
+                    )
+                )
+                plan = fb_res.scalars().first()
+
+        if not plan:
+            # First active plan by sort_order
+            first_res = await self.session.execute(
+                select(SubscriptionPlan)
+                .where(SubscriptionPlan.is_active == True)
+                .order_by(SubscriptionPlan.sort_order.asc(), SubscriptionPlan.period_days.asc())
+                .limit(1)
+            )
+            plan = first_res.scalars().first()
+
+        if not plan:
             raise PlanNotFoundError(f"Active subscription plan '{plan_code}' not found")
         return plan
 
     async def list_active_plans(self) -> List[SubscriptionPlan]:
-        """Fetch all active subscription plans ordered by period length."""
+        """Fetch all active subscription plans ordered by sort_order and period length."""
         stmt = (
             select(SubscriptionPlan)
             .where(SubscriptionPlan.is_active == True)  # noqa: E712
-            .order_by(SubscriptionPlan.period_days.asc())
+            .order_by(SubscriptionPlan.sort_order.asc(), SubscriptionPlan.period_days.asc())
         )
         res = await self.session.execute(stmt)
         return list(res.scalars().all())
@@ -224,7 +248,7 @@ class SubscriptionService:
         self,
         master_id: int,
         actor_user_id: int,
-        plan_code: str = "BASIC",
+        plan_code: str = "basic_monthly",
         provider: Optional[BillingProvider] = None,
         return_url: Optional[str] = None,
     ) -> Tuple[SubscriptionPayment, PaymentIntent]:

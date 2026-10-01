@@ -6,7 +6,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config.settings import settings
 from app.database.models.master import BotInstance, BotInstanceStatus, Master
-from app.database.models.subscription import SubscriptionPlan
+from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPlan
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -15,6 +15,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🏠 Мои проекты", callback_data="mgr:projects")],
             [InlineKeyboardButton(text="➕ Создать проект", callback_data="mgr:master:new")],
+            [
+                InlineKeyboardButton(text="💳 Подписка", callback_data="mgr:sub:menu"),
+                InlineKeyboardButton(text="🆘 Поддержка", url=settings.support_url),
+            ],
             [InlineKeyboardButton(text="❓ Помощь", callback_data="mgr:help")],
         ]
     )
@@ -145,21 +149,57 @@ def project_card_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def subscription_projects_keyboard(masters: Sequence[Master]) -> InlineKeyboardMarkup:
+    """List of user's projects for subscription selection."""
+    buttons = []
+    for master in masters:
+        status_icon = "🟢" if master.subscription_status.value == "ACTIVE" else ("🟡" if master.subscription_status.value == "TRIAL" else "🔴")
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{status_icon} {master.display_name}",
+                callback_data=f"mgr:sub:{master.id}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def subscription_card_keyboard(
     master_id: int,
     plans: Sequence[SubscriptionPlan],
+    status: Optional[EffectiveSubscriptionStatus] = None,
 ) -> InlineKeyboardMarkup:
     """Action buttons for subscription management screen."""
     rows = []
     for plan in plans:
         price_int = int(plan.price)
+        price_fmt = f"{price_int:,} ₽".replace(",", " ")
+        if status == EffectiveSubscriptionStatus.EXPIRED:
+            btn_text = f"💳 Оплатить {price_fmt} ({plan.name})"
+        elif status == EffectiveSubscriptionStatus.PAID_ACTIVE:
+            btn_text = f"💳 Продлить: {plan.name} — {price_fmt}"
+        elif status == EffectiveSubscriptionStatus.TRIAL_ACTIVE:
+            btn_text = f"💳 Оформить: {plan.name} — {price_fmt}"
+        else:
+            btn_text = f"💳 {plan.name} — {price_fmt}"
+
         rows.append([
             InlineKeyboardButton(
-                text=f"💳 {plan.name} — {price_int:,} ₽".replace(",", " "),
+                text=btn_text,
                 callback_data=f"mgr:sub:pay:{master_id}:{plan.code}",
             )
         ])
+
+    if status == EffectiveSubscriptionStatus.SUSPENDED:
+        rows.append([
+            InlineKeyboardButton(
+                text="🆘 Написать в поддержку",
+                url=settings.support_url,
+            )
+        ])
+
     rows.append([InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

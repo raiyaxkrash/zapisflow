@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     manager_bot_token: str = Field(default="", alias="MANAGER_BOT_TOKEN")
     manager_webhook_secret: str = Field(default="", alias="MANAGER_WEBHOOK_SECRET")
     trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
+    support_telegram_username: str = Field(default="zapisflow", alias="SUPPORT_TELEGRAM_USERNAME")
 
     # Phase 8: Multi-Replica Multi-Tenant Scheduler & Reliable Background Jobs
     scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
@@ -93,6 +94,18 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         """Returns True if the application is running in production mode."""
         return self.app_env.strip().lower() in ("production", "prod")
+
+    @property
+    def support_url(self) -> str:
+        """Direct link to support chat in Telegram."""
+        username = self.support_telegram_username.strip().lstrip("@")
+        return f"https://t.me/{username}"
+
+    @property
+    def support_tag(self) -> str:
+        """Formatted @username handle for support."""
+        username = self.support_telegram_username.strip().lstrip("@")
+        return f"@{username}"
 
     def validate_production_configuration(self) -> None:
         """

@@ -51,6 +51,7 @@ class SubscriptionPlan(Base):
     currency: Mapped[str] = mapped_column(String(3), default="RUB", nullable=False)
     period_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -60,6 +61,16 @@ class SubscriptionPlan(Base):
 
     periods: Mapped[List["SubscriptionPeriod"]] = relationship("SubscriptionPeriod", back_populates="plan")
     payments: Mapped[List["SubscriptionPayment"]] = relationship("SubscriptionPayment", back_populates="plan")
+
+    @property
+    def price_rub(self) -> Decimal:
+        """Alias for price in Russian Rubles."""
+        return self.price
+
+    @property
+    def duration_days(self) -> int:
+        """Alias for period_days."""
+        return self.period_days
 
 
 class SubscriptionPeriod(Base):
@@ -133,3 +144,28 @@ class SubscriptionPayment(Base):
 
     master: Mapped["Master"] = relationship("Master", back_populates="subscription_payments")
     plan: Mapped[Optional["SubscriptionPlan"]] = relationship("SubscriptionPlan", back_populates="payments")
+
+
+class PromoCode(Base):
+    """
+    Promotional code architecture for future discounts and marketing campaigns.
+    """
+
+    __tablename__ = "promo_codes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
+    discount_type: Mapped[str] = mapped_column(String(16), default="PERCENT", nullable=False)  # PERCENT, FIXED
+    discount_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    max_uses: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    used_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
