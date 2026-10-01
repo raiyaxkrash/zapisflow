@@ -52,12 +52,17 @@ class DbSessionMiddleware(BaseMiddleware):
                 try:
                     result = await handler(event, data)
                 except TelegramBadRequest as exc:
-                    if "message is not modified" not in str(exc).lower():
+                    message = str(exc).lower()
+                    benign_response = (
+                        "message is not modified" in message
+                        or "query is too old" in message
+                        or "query id is invalid" in message
+                    )
+                    if not benign_response:
                         raise
-                    # A repeated callback may render the same view. Treat that
-                    # Telegram response as a successful no-op so the business
-                    # transaction and processed-update ledger can commit.
-                    logger.debug("Ignoring unchanged Telegram message for update scope=%s id=%s", scope, update_id)
+                    # Telegram can reject an old callback acknowledgement after
+                    # business work succeeded. It must not roll back that work.
+                    logger.debug("Ignoring stale or unchanged Telegram response for update scope=%s id=%s", scope, update_id)
                     result = None
                 if scope is not None and update_id is not None:
                     session.add(ProcessedWebhookUpdate(scope=scope, update_id=update_id))
