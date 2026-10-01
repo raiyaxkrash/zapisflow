@@ -218,3 +218,5 @@ def test_billing_host_is_separate_from_existing_website() -> None:
     assert "${BILLING_DOMAIN:-pay.zapisflow.su}" in compose
     assert "{$BILLING_DOMAIN:pay.zapisflow.su}" in caddy
     assert "{$BILLING_DOMAIN:zapisflow.su}" not in caddy
+    assert "request>headers>X-Telegram-Bot-Api-Secret-Token delete" in caddy
+    assert "log_skip @telegram_webhooks" in caddy
