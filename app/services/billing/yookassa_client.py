@@ -98,15 +98,26 @@ class YooKassaClient:
     ) -> YooKassaPayment:
         headers = {"Idempotence-Key": idempotency_key} if idempotency_key else {}
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=10.0, follow_redirects=False, trust_env=False)
+        client = self._client or httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, connect=3.0), follow_redirects=False, trust_env=False
+        )
         try:
-            response = await client.request(
-                method,
-                API_BASE_URL + path,
-                auth=(self._shop_id, self._secret_key),
-                headers=headers,
-                json=body,
-            )
+            # Retry connection failures with the same Idempotence-Key. No HTTP
+            # request is accepted on a failed connect/TLS handshake, and the
+            # stable key also protects an uncertain provider-side outcome.
+            for attempt in range(3):
+                try:
+                    response = await client.request(
+                        method,
+                        API_BASE_URL + path,
+                        auth=(self._shop_id, self._secret_key),
+                        headers=headers,
+                        json=body,
+                    )
+                    break
+                except (httpx.ConnectTimeout, httpx.ConnectError):
+                    if attempt == 2:
+                        raise
             if response.status_code < 200 or response.status_code >= 300:
                 raise YooKassaGatewayError(
                     f"Запрос ЮKassa не выполнен (HTTP {response.status_code})"

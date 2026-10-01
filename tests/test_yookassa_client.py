@@ -62,6 +62,31 @@ async def test_yookassa_errors_do_not_include_credentials() -> None:
 
 
 @pytest.mark.asyncio
+async def test_yookassa_connect_retry_preserves_payment_idempotency_key() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) < 3:
+            raise httpx.ConnectTimeout("temporary TLS timeout", request=request)
+        return httpx.Response(200, json={
+            "id": "provider-123", "status": "pending", "paid": False,
+            "amount": {"value": "499.00", "currency": "RUB"},
+            "metadata": {"checkout_ref": "opaque-ref"},
+            "confirmation": {"confirmation_url": "https://yoomoney.ru/checkout/123"},
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        payment = await YooKassaClient("shop", "secret", client=http).create_payment(
+            checkout_ref="opaque-ref", amount=Decimal("499.00"), currency="RUB",
+            description="ZapisFlow Basic", return_url="https://pay.zapisflow.su/billing/success",
+        )
+    assert payment.id == "provider-123"
+    assert len(requests) == 3
+    assert all(request.headers["Idempotence-Key"] == "opaque-ref" for request in requests)
+
+
+@pytest.mark.asyncio
 async def test_yookassa_rejects_unsafe_confirmation_url() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
         200, json={
