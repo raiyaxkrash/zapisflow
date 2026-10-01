@@ -9,6 +9,8 @@
         format json
         level INFO
     }
+    # Checkout URL path contains a bearer capability; never write it to access logs.
+    log_skip /billing/checkout/*
 
     # Strict Request Body Limit (Telegram updates are typically < 64KB, max 2MB)
     request_body {
@@ -39,5 +41,33 @@
             write_timeout 30s
             keepalive_idle_conns 100
         }
+    }
+}
+
+# The independent ZapisFlow website hosts only the SaaS billing routes here.
+{$BILLING_DOMAIN:zapisflow.su} {
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+    log_skip /billing/checkout/*
+    request_body {
+        max_size 16KB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Cache-Control "no-store"
+        -Server
+    }
+    @billing path /billing/checkout/* /billing/success /billing/cancel
+    handle @billing {
+        reverse_proxy http://backend:8000
+    }
+    handle {
+        respond "Not found" 404
     }
 }

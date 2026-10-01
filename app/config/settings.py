@@ -3,6 +3,7 @@ Configuration settings for the application using Pydantic Settings v2.
 """
 
 from pathlib import Path
+from decimal import Decimal
 from typing import List
 import re
 from urllib.parse import quote, urlsplit
@@ -89,6 +90,9 @@ class Settings(BaseSettings):
     yookassa_test_shop_id: str = Field(default="", alias="YOOKASSA_TEST_SHOP_ID")
     yookassa_test_secret_key: SecretStr = Field(default=SecretStr(""), alias="YOOKASSA_TEST_SECRET_KEY")
     billing_return_url: str = Field(default="", alias="BILLING_RETURN_URL")
+    yookassa_receipt_vat_code: str = Field(default="", alias="YOOKASSA_RECEIPT_VAT_CODE")
+    yookassa_receipt_payment_subject: str = Field(default="", alias="YOOKASSA_RECEIPT_PAYMENT_SUBJECT")
+    yookassa_receipt_payment_mode: str = Field(default="", alias="YOOKASSA_RECEIPT_PAYMENT_MODE")
     yookassa_reconciliation_interval_seconds: int = Field(
         default=300, alias="YOOKASSA_RECONCILIATION_INTERVAL_SECONDS"
     )
@@ -129,6 +133,37 @@ class Settings(BaseSettings):
             return self.yookassa_test_shop_id, self.yookassa_test_secret_key.get_secret_value()
         raise ValueError("YOOKASSA_MODE must be 'test' or 'live'")
 
+    @property
+    def billing_site_origin(self) -> str:
+        """Return the independently served website origin, never a browser value."""
+        parsed = urlsplit(self.billing_return_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("BILLING_RETURN_URL must be a valid HTTPS URL")
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def build_yookassa_receipt(self, *, email: str, description: str, amount: Decimal) -> dict:
+        """Use merchant-confirmed fiscal settings, with no invented VAT values."""
+        self.validate_receipt_configuration()
+        return {
+            "customer": {"email": email},
+            "items": [{
+                "description": description[:128],
+                "quantity": "1.00",
+                "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+                "vat_code": int(self.yookassa_receipt_vat_code),
+                "payment_subject": self.yookassa_receipt_payment_subject,
+                "payment_mode": self.yookassa_receipt_payment_mode,
+            }],
+        }
+
+    def validate_receipt_configuration(self) -> None:
+        if not self.yookassa_receipt_vat_code.isdigit() or int(self.yookassa_receipt_vat_code) not in range(1, 13):
+            raise ValueError("YOOKASSA_RECEIPT_VAT_CODE must be merchant-confirmed (1-12)")
+        if not re.fullmatch(r"[a-z_]{2,32}", self.yookassa_receipt_payment_subject):
+            raise ValueError("YOOKASSA_RECEIPT_PAYMENT_SUBJECT must be merchant-confirmed")
+        if self.yookassa_receipt_payment_mode not in {"full_payment", "full_prepayment"}:
+            raise ValueError("YOOKASSA_RECEIPT_PAYMENT_MODE must be merchant-confirmed")
+
     def validate_payment_configuration(self) -> None:
         """Fail closed when external web checkout is enabled without its dependencies."""
         if self.payment_provider.lower() != "yookassa_web":
@@ -147,6 +182,13 @@ class Settings(BaseSettings):
         parsed = urlsplit(self.billing_return_url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             errors.append("BILLING_RETURN_URL must be an HTTPS URL without credentials")
+        else:
+            if parsed.path != "/billing/success" or parsed.query or parsed.fragment:
+                errors.append("BILLING_RETURN_URL must point to /billing/success without a query or fragment")
+        try:
+            self.validate_receipt_configuration()
+        except ValueError as exc:
+            errors.append(str(exc))
         if errors:
             raise ValueError("Payment configuration invalid: " + "; ".join(errors))
 

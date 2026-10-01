@@ -1,8 +1,8 @@
-"""Durable external YooKassa checkout for independently authenticated web users.
+"""Durable external YooKassa checkout for server-authorized project owners.
 
-This module has no Telegram handler. The website must establish the buyer's
-identity and pass a trusted local User.id; a browser-supplied master_id alone is
-never authorization. A provider redirect is never proof of payment.
+The Manager Bot issues a short-lived bearer capability for the website. The
+browser cannot choose a buyer or master; the server resolves them from the
+committed checkout session. A provider redirect is never proof of payment.
 """
 
 from dataclasses import dataclass
@@ -30,6 +30,8 @@ IDEMPOTENCY_RETRY_LIMIT = timedelta(hours=23)
 @dataclass(frozen=True)
 class CheckoutOrder:
     checkout_ref: uuid.UUID
+    payment_id: int
+    plan_id: int
     plan_name: str
     amount: Decimal
     currency: str
@@ -61,66 +63,84 @@ class YooKassaCheckoutService:
         master_id: int,
         plan_code: str,
     ) -> CheckoutOrder:
+        async with self.session_maker.begin() as session:
+            return await self.create_order_in_session(
+                session,
+                actor_user_id=actor_user_id,
+                master_id=master_id,
+                plan_code=plan_code,
+            )
+
+    async def create_order_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        actor_user_id: int,
+        master_id: int,
+        plan_code: str,
+    ) -> CheckoutOrder:
+        """Stage an order in the caller's transaction, without committing."""
         if settings.payment_provider.lower() != "yookassa_web":
             raise SubscriptionError("Оплата на сайте сейчас недоступна")
         if not plan_code or len(plan_code) > 32:
             raise PlanNotFoundError("Тариф не найден")
-        async with self.session_maker.begin() as session:
-            master = await session.get(Master, master_id)
-            if master is None or master.owner_user_id != actor_user_id:
-                raise BillingIDORViolationError("Доступ к проекту запрещён")
-            if master.subscription_status == SubscriptionStatus.SUSPENDED:
-                raise SubscriptionError("Подписка заблокирована; обратитесь в поддержку")
-            plan = await session.scalar(
-                select(SubscriptionPlan).where(
-                    SubscriptionPlan.code == plan_code,
-                    SubscriptionPlan.is_active.is_(True),
-                )
+        master = await session.get(Master, master_id)
+        if master is None or master.owner_user_id != actor_user_id:
+            raise BillingIDORViolationError("Доступ к проекту запрещён")
+        if master.subscription_status == SubscriptionStatus.SUSPENDED:
+            raise SubscriptionError("Подписка заблокирована; обратитесь в поддержку")
+        plan = await session.scalar(
+            select(SubscriptionPlan).where(
+                SubscriptionPlan.code == plan_code,
+                SubscriptionPlan.is_active.is_(True),
             )
-            if plan is None:
-                raise PlanNotFoundError("Тариф не найден")
-            if (
-                plan.currency != settings.payment_currency
-                or plan.currency != "RUB"
-                or plan.price <= 0
-                or plan.period_days <= 0
-            ):
-                raise SubscriptionError("Параметры тарифа некорректны")
+        )
+        if plan is None:
+            raise PlanNotFoundError("Тариф не найден")
+        if (
+            plan.currency != settings.payment_currency
+            or plan.currency != "RUB"
+            or plan.price <= 0
+            or plan.period_days <= 0
+        ):
+            raise SubscriptionError("Параметры тарифа некорректны")
 
-            checkout_ref = uuid.uuid4()
-            payment = SubscriptionPayment(
-                master_id=master.id,
-                plan_id=plan.id,
-                provider=PROVIDER_CODE,
-                provider_payment_id=UNCREATED_PREFIX + checkout_ref.hex,
-                checkout_ref=checkout_ref,
-                amount=plan.price,
-                currency=plan.currency,
-                status="PENDING",
-                period_days=plan.period_days,
-            )
-            session.add(payment)
-            await session.flush()
-            session.add(AuditLog(
-                master_id=master.id,
-                actor_user_id=actor_user_id,
-                action="SUBSCRIPTION_PAYMENT_CREATED",
-                entity_type="SubscriptionPayment",
-                entity_id=payment.id,
-                payload_after={
-                    "provider": PROVIDER_CODE,
-                    "plan_code": plan.code,
-                    "amount": str(payment.amount),
-                    "currency": payment.currency,
-                },
-            ))
-            return CheckoutOrder(
-                checkout_ref=checkout_ref,
-                plan_name=plan.name,
-                amount=payment.amount,
-                currency=payment.currency,
-                period_days=payment.period_days,
-            )
+        checkout_ref = uuid.uuid4()
+        payment = SubscriptionPayment(
+            master_id=master.id,
+            plan_id=plan.id,
+            provider=PROVIDER_CODE,
+            provider_payment_id=UNCREATED_PREFIX + checkout_ref.hex,
+            checkout_ref=checkout_ref,
+            amount=plan.price_rub,
+            currency=plan.currency,
+            status="PENDING",
+            period_days=plan.duration_days,
+        )
+        session.add(payment)
+        await session.flush()
+        session.add(AuditLog(
+            master_id=master.id,
+            actor_user_id=actor_user_id,
+            action="SUBSCRIPTION_PAYMENT_CREATED",
+            entity_type="SubscriptionPayment",
+            entity_id=payment.id,
+            payload_after={
+                "provider": PROVIDER_CODE,
+                "plan_code": plan.code,
+                "amount": str(payment.amount),
+                "currency": payment.currency,
+            },
+        ))
+        return CheckoutOrder(
+            checkout_ref=checkout_ref,
+            payment_id=payment.id,
+            plan_id=plan.id,
+            plan_name=plan.name,
+            amount=payment.amount,
+            currency=payment.currency,
+            period_days=payment.period_days,
+        )
 
     async def start_checkout(
         self,

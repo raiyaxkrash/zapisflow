@@ -12,13 +12,14 @@ import logging
 import secrets
 from typing import Any, AsyncGenerator, Optional
 import uuid
+from urllib.parse import parse_qs
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from redis.asyncio import Redis
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,6 +36,8 @@ from app.scheduler import MultiTenantScheduler
 from app.services.bot_registry import BotRegistry
 from app.services.billing.yookassa_checkout import YooKassaCheckoutService
 from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError
+from app.services.billing.checkout_session import CheckoutSessionService
+from app.web.billing_pages import checkout_page, status_page
 from app.services.exceptions import (
     BotDisabledError,
     BotNotFoundError,
@@ -50,6 +53,13 @@ from app.services.update_dedup import (
 )
 
 logger = logging.getLogger("app.web.app")
+
+BILLING_PAGE_HEADERS = {
+    "Cache-Control": "no-store, max-age=0",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+}
 
 
 async def read_limited_request_body(request: Request, max_bytes: int) -> bytes:
@@ -223,6 +233,93 @@ def create_app(
     async def health_live() -> dict[str, str]:
         """Lightweight liveness probe."""
         return {"status": "alive"}
+
+    def billing_services() -> tuple[CheckoutSessionService, YooKassaCheckoutService]:
+        session_maker = app.state.session_factory or async_session_factory
+        shop_id, secret_key = settings.yookassa_credentials
+        checkout = YooKassaCheckoutService(session_maker, YooKassaClient(shop_id, secret_key))
+        return CheckoutSessionService(session_maker, checkout), checkout
+
+    @app.get("/billing/checkout/{token}", tags=["billing"])
+    async def billing_checkout_page(token: str) -> HTMLResponse:
+        if settings.payment_provider.lower() != "yookassa_web":
+            raise HTTPException(status_code=404, detail="Not found")
+        sessions, _ = billing_services()
+        try:
+            offer = await sessions.inspect(token)
+        except SubscriptionError:
+            return HTMLResponse(
+                status_page("Ссылка недействительна", "Запросите новую ссылку на оплату. "),
+                status_code=410,
+                headers=BILLING_PAGE_HEADERS,
+            )
+        return HTMLResponse(checkout_page(token, offer), headers=BILLING_PAGE_HEADERS)
+
+    @app.post("/billing/checkout/{token}/pay", tags=["billing"])
+    async def billing_checkout_pay(token: str, request: Request) -> Response:
+        if settings.payment_provider.lower() != "yookassa_web":
+            raise HTTPException(status_code=404, detail="Not found")
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+            raise HTTPException(status_code=415, detail="Unsupported form encoding")
+        raw = await read_limited_request_body(request, 4096)
+        try:
+            form = parse_qs(raw.decode("utf-8"), keep_blank_values=True, max_num_fields=8)
+            email_fields = form.get("email", [])
+            if len(email_fields) != 1:
+                raise ValueError("one email field required")
+            settings.validate_receipt_configuration()
+        except (UnicodeError, ValueError):
+            return HTMLResponse(
+                status_page("Оплата недоступна", "Проверьте email для чека или обратитесь в поддержку."),
+                status_code=400,
+                headers=BILLING_PAGE_HEADERS,
+            )
+
+        sessions, checkout = billing_services()
+        try:
+            offer, receipt_email = await sessions.consume(token, email_fields[0])
+        except SubscriptionError:
+            return HTMLResponse(
+                status_page("Ссылка недействительна", "Запросите новую ссылку на оплату."),
+                status_code=410,
+                headers=BILLING_PAGE_HEADERS,
+            )
+
+        receipt = settings.build_yookassa_receipt(
+            email=receipt_email,
+            description=f"{offer.plan_name}: подписка на {offer.period_days} дней",
+            amount=offer.amount,
+        )
+        try:
+            redirect = await checkout.start_checkout(
+                checkout_ref=offer.checkout_ref,
+                actor_user_id=offer.user_id,
+                receipt=receipt,
+            )
+        except (YooKassaGatewayError, SubscriptionError):
+            logger.error("External checkout could not start for local payment_id=%s", offer.payment_id)
+            return HTMLResponse(
+                status_page("Не удалось открыть оплату", "Напишите в поддержку для проверки заказа."),
+                status_code=503,
+                headers=BILLING_PAGE_HEADERS,
+            )
+        if redirect.confirmation_url is None:
+            return RedirectResponse("/billing/success", status_code=303, headers=BILLING_PAGE_HEADERS)
+        return RedirectResponse(redirect.confirmation_url, status_code=303, headers=BILLING_PAGE_HEADERS)
+
+    @app.get("/billing/success", tags=["billing"])
+    async def billing_success() -> HTMLResponse:
+        return HTMLResponse(
+            status_page("Проверяем оплату", "Статус подписки обновится после подтверждения платежа ЮKassa."),
+            headers=BILLING_PAGE_HEADERS,
+        )
+
+    @app.get("/billing/cancel", tags=["billing"])
+    async def billing_cancel() -> HTMLResponse:
+        return HTMLResponse(
+            status_page("Оплата не завершена", "Если возникли проблемы с оплатой, обратитесь в поддержку."),
+            headers=BILLING_PAGE_HEADERS,
+        )
 
     @app.post("/billing/yookassa/webhook", tags=["billing"])
     async def yookassa_webhook(request: Request) -> dict[str, bool]:

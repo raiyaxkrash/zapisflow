@@ -95,7 +95,7 @@ async def test_get_payment_rejects_path_injection() -> None:
             await YooKassaClient("shop", "secret", client=http).get_payment("../payments/another")
 
 
-def test_manager_bot_does_not_offer_external_checkout_inside_telegram(monkeypatch) -> None:
+def test_manager_bot_uses_server_side_checkout_callback_without_price(monkeypatch) -> None:
     monkeypatch.setattr(settings, "payment_provider", "yookassa_web")
     plan = SubscriptionPlan(
         code="basic_monthly", name="ZapisFlow Basic", price=Decimal("499.00"),
@@ -103,6 +103,6 @@ def test_manager_bot_does_not_offer_external_checkout_inside_telegram(monkeypatc
     )
     keyboard = subscription_card_keyboard(1, [plan], EffectiveSubscriptionStatus.EXPIRED)
     buttons = [button for row in keyboard.inline_keyboard for button in row]
-    assert not any(button.callback_data and button.callback_data.startswith("mgr:sub:pay:") for button in buttons)
+    assert any(button.callback_data == "mgr:sub:pay:1:basic_monthly" for button in buttons)
+    assert all("499" not in (button.callback_data or "") for button in buttons)
     assert not any(button.url and "checkout" in button.url for button in buttons)
-    assert any(button.url == settings.support_url for button in buttons)

@@ -1,6 +1,7 @@
 """The committed environment example must parse with the real settings class."""
 
 from pathlib import Path
+from decimal import Decimal
 import importlib
 
 import pytest
@@ -70,7 +71,7 @@ def test_yookassa_web_checkout_requires_selected_mode_credentials() -> None:
         _env_file=None,
         PAYMENT_PROVIDER="yookassa_web",
         YOOKASSA_MODE="test",
-        BILLING_RETURN_URL="https://pay.example.test/return",
+        BILLING_RETURN_URL="https://pay.example.test/billing/success",
     )
     with pytest.raises(ValueError, match="shop ID and secret key"):
         missing.validate_payment_configuration()
@@ -83,7 +84,10 @@ def test_yookassa_web_checkout_requires_selected_mode_credentials() -> None:
         YOOKASSA_TEST_SECRET_KEY="test-secret",
         YOOKASSA_SHOP_ID="live-shop",
         YOOKASSA_SECRET_KEY="live-secret",
-        BILLING_RETURN_URL="https://pay.example.test/return",
+        BILLING_RETURN_URL="https://pay.example.test/billing/success",
+        YOOKASSA_RECEIPT_VAT_CODE="1",
+        YOOKASSA_RECEIPT_PAYMENT_SUBJECT="service",
+        YOOKASSA_RECEIPT_PAYMENT_MODE="full_payment",
     )
     configured.validate_payment_configuration()
     assert configured.yookassa_credentials == ("test-shop", "test-secret")
@@ -98,7 +102,7 @@ def test_yookassa_production_rejects_test_mode_without_leaking_credentials() -> 
         YOOKASSA_MODE="test",
         YOOKASSA_TEST_SHOP_ID="test-shop",
         YOOKASSA_TEST_SECRET_KEY="never-print-this-secret",
-        BILLING_RETURN_URL="https://pay.example.test/return",
+        BILLING_RETURN_URL="https://pay.example.test/billing/success",
     )
     with pytest.raises(ValueError, match="must be 'live' in production") as caught:
         configured.validate_payment_configuration()
@@ -109,7 +113,40 @@ def test_yookassa_production_rejects_test_mode_without_leaking_credentials() -> 
         APP_ENV="production",
         PAYMENT_PROVIDER="yookassa_web",
         YOOKASSA_MODE="live",
-        BILLING_RETURN_URL="https://pay.example.test/return",
+        BILLING_RETURN_URL="https://pay.example.test/billing/success",
     )
     with pytest.raises(ValueError, match="shop ID and secret key"):
         missing_live.validate_production_configuration()
+
+
+def test_yookassa_receipt_requires_merchant_settings_and_preserves_price() -> None:
+    missing = Settings(
+        _env_file=None,
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="test",
+        YOOKASSA_TEST_SHOP_ID="test-shop",
+        YOOKASSA_TEST_SECRET_KEY="test-secret",
+        BILLING_RETURN_URL="https://zapisflow.su/billing/success",
+    )
+    with pytest.raises(ValueError, match="YOOKASSA_RECEIPT_VAT_CODE"):
+        missing.validate_payment_configuration()
+
+    configured = Settings(
+        _env_file=None,
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="test",
+        YOOKASSA_TEST_SHOP_ID="test-shop",
+        YOOKASSA_TEST_SECRET_KEY="test-secret",
+        BILLING_RETURN_URL="https://zapisflow.su/billing/success",
+        YOOKASSA_RECEIPT_VAT_CODE="1",
+        YOOKASSA_RECEIPT_PAYMENT_SUBJECT="service",
+        YOOKASSA_RECEIPT_PAYMENT_MODE="full_payment",
+    )
+    configured.validate_payment_configuration()
+    receipt = configured.build_yookassa_receipt(
+        email="buyer@example.com", description="ZapisFlow Basic", amount=Decimal("499.00"),
+    )
+    assert receipt["customer"]["email"] == "buyer@example.com"
+    assert receipt["items"][0]["amount"] == {"value": "499.00", "currency": "RUB"}
+    assert receipt["items"][0]["vat_code"] == 1
+    assert configured.billing_site_origin == "https://zapisflow.su"

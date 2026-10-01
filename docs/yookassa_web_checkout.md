@@ -1,59 +1,83 @@
-# External YooKassa checkout integration
+# YooKassa SaaS checkout on the ZapisFlow website
 
-This repository contains the billing order service and the provider webhook for
-an independently accessed website. It does not contain that website or its
-login system. Keep `PAYMENT_PROVIDER=disabled` until the website can call the
-service with an authenticated local `User.id` and can present the returned
-redirect to the same owner. Do not put the checkout URL in Manager Bot.
+The external website at `https://zapisflow.su` serves the checkout page. The
+API host remains `https://api.zapisflow.su`; configure its YooKassa notification
+URL as `https://api.zapisflow.su/billing/yookassa/webhook`. This channel is for
+ZapisFlow SaaS subscriptions only. Customer payments for a master's services
+remain separate. Telegram invoices and Stars are separate payment channels;
+this implementation does not use Telegram Payments.
 
-## Website handoff
+## Flow
 
-After the site's existing login has identified a ZapisFlow owner, its server
-must map that login to the local `User.id`. It may then call
-`YooKassaCheckoutService.create_order(actor_user_id, master_id, plan_code)`.
-The service checks ownership and reads the active plan's amount, currency, and
-duration from PostgreSQL. It commits a `PENDING` order with an opaque UUID.
-Next call `start_checkout(checkout_ref, actor_user_id)`; only the authenticated
-owner should receive `confirmation_url`. The website must not trust a browser
-supplied user ID, price, subscription status, or return URL. A redirect back to
-the website is informational; it never activates the subscription.
+1. The Manager Bot checks the project owner and reads the active plan from
+   PostgreSQL. In the Manager update transaction it creates one
+   `SubscriptionPayment` with an immutable amount/period snapshot and one
+   `CheckoutSession` with a 15-minute expiry. The URL is sent only after that
+   transaction commits.
+2. The checkout URL contains a 32-byte random bearer token. PostgreSQL stores
+   only its SHA-256 digest. The page displays the saved payment amount and
+   duration, asks for an email for the fiscal receipt, and sends no plan, user,
+   payment ID, or amount from the browser to the payment service.
+3. Submitting the form atomically marks the session used. The backend builds
+   receipt data from the email, payment snapshot and merchant-confirmed fiscal
+   settings, then creates a YooKassa payment with the payment's stable
+   idempotence key. A second form submission cannot create another order.
+4. The browser goes to YooKassa's HTTPS confirmation URL. Returning to
+   `/billing/success` is informational and never activates a subscription.
+   The webhook fetches the current payment from YooKassa using shop credentials,
+   verifies the reference, amount and currency, then calls the existing
+   idempotent `SubscriptionService`. The reconciliation job covers missed
+   webhook notifications. A single payment creates at most one period.
 
-The provider sends `payment.succeeded` or `payment.canceled` to
-`/billing/yookassa/webhook`. That endpoint treats the notification as a hint,
-fetches the payment through the authenticated YooKassa API, verifies its opaque
-reference and amount snapshot, and invokes the existing idempotent subscription
-service. The periodic reconciliation job checks pending provider payments if a
-webhook was missed. One payment can create only one subscription period.
+The token is a bearer capability: anyone who obtains the URL before it is used
+can act on that order. The URL contains no predictable user or payment ID and
+expires quickly. Avoid forwarding it. The checkout URL is excluded from Caddy
+access logs; Uvicorn access logging is disabled for the webhook application.
+The browser receives `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+Without a separate login, the website cannot identify the person holding a
+copied link. It cannot move the payment to another tenant through form fields.
 
-## Configuration
+## Environment and merchant setup
 
-Use distinct shop IDs and secret keys for test and live modes:
+Keep `PAYMENT_PROVIDER=disabled` until test credentials, fiscal values, DNS and
+TLS are verified. Never commit real shop secrets. Required when enabled:
 
 * `PAYMENT_PROVIDER=yookassa_web`
-* `YOOKASSA_MODE=test` or `live` (production requires `live`)
-* `YOOKASSA_TEST_SHOP_ID`, `YOOKASSA_TEST_SECRET_KEY`
-* `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY`
+* `YOOKASSA_MODE=test` for test credentials or `live` for production
+* `YOOKASSA_TEST_SHOP_ID`, `YOOKASSA_TEST_SECRET_KEY` for the test shop
+* `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY` for the live shop
 * `PAYMENT_CURRENCY=RUB`
-* `BILLING_RETURN_URL=https://<independent-site>/<return-path>`
-* `YOOKASSA_RECONCILIATION_INTERVAL_SECONDS=300`
+* `BILLING_DOMAIN=zapisflow.su` for Caddy
+* `BILLING_RETURN_URL=https://zapisflow.su/billing/success`
+* `YOOKASSA_RECEIPT_VAT_CODE`
+* `YOOKASSA_RECEIPT_PAYMENT_SUBJECT`
+* `YOOKASSA_RECEIPT_PAYMENT_MODE`
+* `SUPPORT_TELEGRAM_USERNAME=zapisflow`
 
-Never commit real keys. Configure the webhook URL in the appropriate YooKassa
-shop. The active plan's price is always read from PostgreSQL. Fiscal receipt
-fields depend on the merchant's YooKassa receipt setup; the site integration
-must supply validated receipt data when that shop requires it. This repository
-does not infer tax rates or customer receipt details.
+The merchant must confirm the VAT code and fiscal item attributes against the
+shop's «Чеки от ЮKassa» setup. The site collects an actual customer email for
+the receipt. No tax code, email, or item attribute is invented in production.
+The backend fails startup with `PAYMENT_PROVIDER=yookassa_web` if the fiscal
+settings or selected shop credentials are missing. YooKassa receipt fields are
+described in the [official receipt documentation](https://yookassa.ru/developers/payment-acceptance/receipts/54fz/yoomoney/payments).
 
-## Recovery and limits
+## Recovery and verification
 
-A local order is committed before the YooKassa API call. Repeated creation
-attempts use the same provider idempotence key for up to 23 hours. After that,
-an order whose remote ID was never persisted needs operator reconciliation;
-the service will not issue a new charge request with an expired key. A provider
-webhook can still reconcile it using its opaque reference. Pending orders with
-a stored provider ID are polled by the scheduler. If the provider API is down,
-the webhook returns 503 so it can be retried. No customer card details or
-plaintext provider key are stored in PostgreSQL.
+The provider call happens after the local order commits. Repeated provider
+requests for the same payment use the same key within YooKassa's idempotence
+window; after 23 hours, an uncertain order is not submitted again. A used
+checkout token cannot be used again, even if the external API fails. In that
+case the customer requests a new link or contacts support, while webhook and
+reconciliation continue checking the original order. Operators should inspect
+uncertain orders before asking customers to pay again.
 
-Before enabling production checkout, verify the site's authentication mapping,
-receipt configuration, YooKassa live webhook, one real test transaction in
-the test shop, and the production return URL.
+Before production activation: apply migration `0017`, validate Caddy and TLS
+for both domains, run a real test-shop payment with a receipt, verify webhook
+activation and duplicate notification behavior, then configure the live shop
+and enable `PAYMENT_PROVIDER=yookassa_web`. Do not treat a browser return as
+proof of payment.
+
+Before replacing the VPS Caddyfile, inspect the current `zapisflow.su` site
+configuration. The repository's billing host block serves the billing routes
+and returns 404 for other paths; merge these routes into the existing site
+block if it also serves other pages. Do not overwrite a live website's routes.

@@ -96,6 +96,7 @@ services:
     restart: unless-stopped
     environment:
       DOMAIN: ${DOMAIN}
+      BILLING_DOMAIN: ${BILLING_DOMAIN:-zapisflow.su}
     ports:
       - "80:80"
       - "443:443"

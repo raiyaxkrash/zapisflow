@@ -171,12 +171,14 @@ def subscription_card_keyboard(
 ) -> InlineKeyboardMarkup:
     """Action buttons for subscription management screen."""
     rows = []
-    # Only the explicit local manual/test flow exposes a pay callback.
-    # Independent web checkout is never linked from inside Telegram.
-    show_pay_action = settings.payment_provider.lower() == "manual" and not settings.is_production
+    # A callback performs the owner check and creates a short-lived checkout
+    # capability. No amount or checkout URL is accepted from callback_data.
+    show_pay_action = (
+        settings.payment_provider.lower() == "yookassa_web"
+        or (settings.payment_provider.lower() == "manual" and not settings.is_production)
+    ) and status != EffectiveSubscriptionStatus.SUSPENDED
     for plan in (plans if show_pay_action else ()):
-        price_int = int(plan.price)
-        price_fmt = f"{price_int:,} ₽".replace(",", " ")
+        price_fmt = f"{plan.price:,.2f}".replace(",", " ").removesuffix(".00") + " ₽"
         if status == EffectiveSubscriptionStatus.EXPIRED:
             btn_text = f"💳 Оплатить {price_fmt} ({plan.name})"
         elif status == EffectiveSubscriptionStatus.PAID_ACTIVE:
@@ -204,6 +206,15 @@ def subscription_card_keyboard(
     rows.append([InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")])
     rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subscription_checkout_keyboard(master_id: int, url: str) -> InlineKeyboardMarkup:
+    """Link to the independently hosted one-use SaaS checkout page."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Открыть страницу оплаты", url=url)],
+        [InlineKeyboardButton(text="🆘 Поддержка", url=settings.support_url)],
+        [InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:sub:{master_id}")],
+    ])
 
 
 def subscription_payment_keyboard(

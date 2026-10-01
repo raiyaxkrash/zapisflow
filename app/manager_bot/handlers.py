@@ -26,11 +26,16 @@ from app.manager_bot.keyboards import (
     project_card_keyboard,
     project_list_keyboard,
     subscription_card_keyboard,
+    subscription_checkout_keyboard,
     subscription_payment_keyboard,
     subscription_projects_keyboard,
 )
 from app.services.bot_registry import BotRegistry
 from app.services.subscription_service import SubscriptionService
+from app.database.session import async_session_factory
+from app.services.billing.checkout_session import CheckoutSessionService
+from app.services.billing.yookassa_checkout import YooKassaCheckoutService
+from app.services.billing.yookassa_client import YooKassaClient
 from app.manager_bot.states import ConnectBotStates, CreateMasterStates, RotateTokenStates
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.repositories.master_repository import MasterRepository
@@ -884,7 +889,7 @@ async def _show_subscription_screen(callback: CallbackQuery, master: Master, ses
         primary_plan = plans[0]
 
     plan_name = escape(primary_plan.name)
-    price_fmt = f"{int(primary_plan.price):,} ₽".replace(",", " ")
+    price_fmt = f"{primary_plan.price:,.2f}".replace(",", " ").removesuffix(".00") + " ₽"
 
     if eff_sub.status == EffectiveSubscriptionStatus.TRIAL_ACTIVE:
         date_str = eff_sub.expires_at.strftime("%d.%m.%Y") if eff_sub.expires_at else "—"
@@ -919,11 +924,15 @@ async def _show_subscription_screen(callback: CallbackQuery, master: Master, ses
     footer = (
         "Здесь отображается статус подписки вашего проекта. "
         f"По вопросам обращайтесь в поддержку: {settings.support_tag}."
-        if settings.payment_provider.lower() != "manual" or settings.is_production
+        if settings.payment_provider.lower() not in {"manual", "yookassa_web"} or (
+            settings.payment_provider.lower() == "manual" and settings.is_production
+        )
         else "Выберите тариф для оплаты:"
     )
     text = (
-        f"💳 <b>Управление подпиской: {escape(master.display_name)}</b>\n\n"
+        f"💳 <b>Подписка ZapisFlow</b>\n"
+        f"Проект: {escape(master.display_name)}\n"
+        f"Тариф: <b>{plan_name}</b> — {price_fmt} / {primary_plan.period_days} дней\n\n"
         f"📊 <b>Текущий статус:</b>\n{status_line}\n\n"
         f"{footer}"
     )
@@ -991,6 +1000,9 @@ async def cb_subscription_screen(callback: CallbackQuery, state: FSMContext, ses
 async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) -> None:
     """Initiate subscription payment for a chosen plan."""
     parts = callback.data.split(":")
+    if len(parts) != 5 or not parts[3].isdigit() or not parts[4]:
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
     master_id = int(parts[3])
     plan_code = parts[4]
     user = await _get_or_create_user(session, callback.from_user)
@@ -998,6 +1010,45 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
     master = await session.get(Master, master_id)
     if not master or master.owner_user_id != user.id:
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    if settings.payment_provider.lower() == "yookassa_web":
+        try:
+            shop_id, secret_key = settings.yookassa_credentials
+            checkout_service = YooKassaCheckoutService(
+                async_session_factory, YooKassaClient(shop_id, secret_key)
+            )
+            checkout_sessions = CheckoutSessionService(async_session_factory, checkout_service)
+            token, order = await checkout_sessions.issue(
+                session,
+                actor_user_id=user.id,
+                master_id=master.id,
+                plan_code=plan_code,
+            )
+            url = f"{settings.billing_site_origin}/billing/checkout/{token}"
+        except (SubscriptionError, ValueError):
+            await callback.answer(
+                f"Не удалось открыть оплату. Поддержка: {settings.support_tag}", show_alert=True
+            )
+            return
+
+        amount = f"{order.amount:,.2f}".replace(",", " ").removesuffix(".00")
+        text = (
+            "💳 <b>Подписка ZapisFlow</b>\n\n"
+            f"Тариф: <b>{escape(order.plan_name)}</b>\n"
+            f"Стоимость: {amount} ₽ / {order.period_days} дней\n\n"
+            "Страница оплаты действует 15 минут. Для чека потребуется email.\n"
+            f"📞 Поддержка: {settings.support_tag}"
+        )
+
+        async def show_committed_checkout() -> None:
+            await callback.message.edit_text(
+                text,
+                reply_markup=subscription_checkout_keyboard(master.id, url),
+            )
+            await callback.answer()
+
+        session.info.setdefault("post_commit", []).append(show_committed_checkout)
         return
 
     if settings.is_production:
