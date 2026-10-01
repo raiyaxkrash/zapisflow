@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     payment_provider: str = Field(default="manual", alias="PAYMENT_PROVIDER")
     payment_currency: str = Field(default="RUB", alias="PAYMENT_CURRENCY")
     yookassa_mode: str = Field(default="test", alias="YOOKASSA_MODE")
+    yookassa_allow_test_in_production: bool = Field(
+        default=False, alias="YOOKASSA_ALLOW_TEST_IN_PRODUCTION"
+    )
+    yookassa_test_allowed_telegram_ids: List[int] = Field(
+        default_factory=list, alias="YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS"
+    )
     yookassa_shop_id: str = Field(default="", alias="YOOKASSA_SHOP_ID")
     yookassa_secret_key: SecretStr = Field(default=SecretStr(""), alias="YOOKASSA_SECRET_KEY")
     yookassa_test_shop_id: str = Field(default="", alias="YOOKASSA_TEST_SHOP_ID")
@@ -141,6 +147,15 @@ class Settings(BaseSettings):
             raise ValueError("BILLING_RETURN_URL must be a valid HTTPS URL")
         return f"{parsed.scheme}://{parsed.netloc}"
 
+    def can_use_yookassa_test_checkout(self, telegram_id: int) -> bool:
+        """Keep the production test shop limited to explicitly named owners."""
+        if not self.is_production or self.yookassa_mode.lower() != "test":
+            return True
+        return (
+            self.yookassa_allow_test_in_production
+            and telegram_id in self.yookassa_test_allowed_telegram_ids
+        )
+
     def build_yookassa_receipt(self, *, email: str, description: str, amount: Decimal) -> dict:
         """Use merchant-confirmed fiscal settings, with no invented VAT values."""
         self.validate_receipt_configuration()
@@ -173,12 +188,17 @@ class Settings(BaseSettings):
             errors.append("PAYMENT_CURRENCY must be RUB for YooKassa checkout")
         if self.yookassa_mode.lower() not in {"test", "live"}:
             errors.append("YOOKASSA_MODE must be 'test' or 'live'")
-        elif self.is_production and self.yookassa_mode.lower() != "live":
-            errors.append("YOOKASSA_MODE must be 'live' in production")
+        elif self.is_production and self.yookassa_mode.lower() == "test" and not self.yookassa_allow_test_in_production:
+            errors.append("YOOKASSA_ALLOW_TEST_IN_PRODUCTION=true is required for production test mode")
         else:
             shop_id, secret_key = self.yookassa_credentials
             if not shop_id or not secret_key:
                 errors.append("YooKassa shop ID and secret key are required for the selected mode")
+        if self.is_production and self.yookassa_mode.lower() == "test" and self.yookassa_allow_test_in_production:
+            if not self.yookassa_test_allowed_telegram_ids or any(
+                user_id <= 0 for user_id in self.yookassa_test_allowed_telegram_ids
+            ):
+                errors.append("YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS must contain a test owner")
         parsed = urlsplit(self.billing_return_url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             errors.append("BILLING_RETURN_URL must be an HTTPS URL without credentials")

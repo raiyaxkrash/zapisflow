@@ -86,6 +86,50 @@ async def test_checkout_token_is_random_hashed_tenant_bound_and_price_snapshotte
     assert (await capabilities.inspect(token_a)).user_id == owner_a
 
 
+async def test_production_test_shop_only_allows_named_owner_and_revokes_existing_link(
+    pg_engine: AsyncEngine, billing_config: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    owner_a, master_a, code = await seed_project(sessions)
+    owner_b, master_b, _ = await seed_project(sessions)
+    async with sessions() as session:
+        allowed_telegram_id = (await session.get(User, owner_a)).telegram_id
+        denied_telegram_id = (await session.get(User, owner_b)).telegram_id
+
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "yookassa_allow_test_in_production", True)
+    monkeypatch.setattr(settings, "yookassa_test_allowed_telegram_ids", [allowed_telegram_id])
+    fake = FakeYooKassaClient()
+    token, _, capabilities = await issue_link(
+        sessions, owner_id=owner_a, master_id=master_a, code=code, fake=fake,
+    )
+    assert (await capabilities.inspect(token)).user_id == owner_a
+    with pytest.raises(SubscriptionError, match="Тестовая оплата"):
+        await issue_link(sessions, owner_id=owner_b, master_id=master_b, code=code, fake=fake)
+    assert denied_telegram_id not in settings.yookassa_test_allowed_telegram_ids
+
+    monkeypatch.setattr(settings, "yookassa_test_allowed_telegram_ids", [])
+    with pytest.raises(SubscriptionError):
+        await capabilities.inspect(token)
+    with pytest.raises(SubscriptionError):
+        await capabilities.consume(token, "owner@example.com")
+    assert fake.create_calls == []
+
+
+async def test_unknown_checkout_token_returns_404(
+    pg_engine: AsyncEngine, billing_config: None,
+) -> None:
+    sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    app = create_app(session_factory=sessions)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://pay.zapisflow.su") as web:
+        assert (await web.get("/billing/checkout/" + "A" * 43)).status_code == 404
+        assert (await web.get("/billing/checkout/invalid")).status_code == 404
+        assert (await web.post(
+            "/billing/checkout/" + "A" * 43 + "/pay",
+            data={"email": "owner@example.com"},
+        )).status_code == 404
+
+
 async def test_expired_used_and_inactive_checkout_are_rejected(
     pg_engine: AsyncEngine, billing_config: None,
 ) -> None:

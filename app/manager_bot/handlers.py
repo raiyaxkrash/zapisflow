@@ -879,6 +879,7 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def _show_subscription_screen(callback: CallbackQuery, master: Master, session: AsyncSession) -> None:
     """Render subscription management screen with dynamically resolved plan prices and support links."""
+    can_pay = settings.can_use_yookassa_test_checkout(callback.from_user.id)
     sub_service = SubscriptionService(session)
     eff_sub = await sub_service.get_effective_status(master.id)
     plans = await sub_service.list_active_plans()
@@ -924,7 +925,7 @@ async def _show_subscription_screen(callback: CallbackQuery, master: Master, ses
     footer = (
         "Здесь отображается статус подписки вашего проекта. "
         f"По вопросам обращайтесь в поддержку: {settings.support_tag}."
-        if settings.payment_provider.lower() not in {"manual", "yookassa_web"} or (
+        if not can_pay or settings.payment_provider.lower() not in {"manual", "yookassa_web"} or (
             settings.payment_provider.lower() == "manual" and settings.is_production
         )
         else "Выберите тариф для оплаты:"
@@ -939,7 +940,12 @@ async def _show_subscription_screen(callback: CallbackQuery, master: Master, ses
 
     await callback.message.edit_text(
         text,
-        reply_markup=subscription_card_keyboard(master.id, plans, eff_sub.status),
+        reply_markup=subscription_card_keyboard(
+            master.id,
+            plans,
+            eff_sub.status,
+            can_pay=can_pay,
+        ),
     )
     await callback.answer()
 

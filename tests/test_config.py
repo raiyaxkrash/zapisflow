@@ -104,7 +104,7 @@ def test_yookassa_production_rejects_test_mode_without_leaking_credentials() -> 
         YOOKASSA_TEST_SECRET_KEY="never-print-this-secret",
         BILLING_RETURN_URL="https://pay.example.test/billing/success",
     )
-    with pytest.raises(ValueError, match="must be 'live' in production") as caught:
+    with pytest.raises(ValueError, match="YOOKASSA_ALLOW_TEST_IN_PRODUCTION=true") as caught:
         configured.validate_payment_configuration()
     assert "never-print-this-secret" not in str(caught.value)
 
@@ -117,6 +117,62 @@ def test_yookassa_production_rejects_test_mode_without_leaking_credentials() -> 
     )
     with pytest.raises(ValueError, match="shop ID and secret key"):
         missing_live.validate_production_configuration()
+
+
+def test_yookassa_production_test_mode_requires_opt_in_owner_and_test_credentials() -> None:
+    values = dict(
+        APP_ENV="production",
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="test",
+        BILLING_RETURN_URL="https://pay.zapisflow.su/billing/success",
+        YOOKASSA_RECEIPT_VAT_CODE="1",
+        YOOKASSA_RECEIPT_PAYMENT_SUBJECT="service",
+        YOOKASSA_RECEIPT_PAYMENT_MODE="full_prepayment",
+        YOOKASSA_ALLOW_TEST_IN_PRODUCTION=True,
+        YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS=[2147176678],
+        YOOKASSA_TEST_SHOP_ID="test-shop",
+        YOOKASSA_TEST_SECRET_KEY="test-secret",
+    )
+    configured = Settings(_env_file=None, **values)
+    configured.validate_payment_configuration()
+    assert configured.yookassa_credentials == ("test-shop", "test-secret")
+    assert configured.can_use_yookassa_test_checkout(2147176678)
+    assert not configured.can_use_yookassa_test_checkout(2147176679)
+    receipt = configured.build_yookassa_receipt(
+        email="owner@example.com", description="ZapisFlow Basic", amount=Decimal("499.00"),
+    )
+    assert receipt["items"][0]["payment_subject"] == "service"
+    assert receipt["items"][0]["payment_mode"] == "full_prepayment"
+    assert receipt["items"][0]["vat_code"] == 1
+
+    with pytest.raises(ValueError, match="shop ID and secret key"):
+        Settings(_env_file=None, **{**values, "YOOKASSA_TEST_SECRET_KEY": ""}).validate_payment_configuration()
+    with pytest.raises(ValueError, match="YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS"):
+        Settings(_env_file=None, **{**values, "YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS": []}).validate_payment_configuration()
+    with pytest.raises(ValueError, match="YOOKASSA_RECEIPT_VAT_CODE"):
+        Settings(_env_file=None, **{**values, "YOOKASSA_RECEIPT_VAT_CODE": ""}).validate_payment_configuration()
+    with pytest.raises(ValueError, match="YOOKASSA_RECEIPT_PAYMENT_MODE"):
+        Settings(_env_file=None, **{**values, "YOOKASSA_RECEIPT_PAYMENT_MODE": "invented"}).validate_payment_configuration()
+
+
+@pytest.mark.parametrize("test_opt_in", [False, True])
+def test_yookassa_production_live_mode_ignores_test_opt_in(test_opt_in: bool) -> None:
+    configured = Settings(
+        _env_file=None,
+        APP_ENV="production",
+        PAYMENT_PROVIDER="yookassa_web",
+        YOOKASSA_MODE="live",
+        YOOKASSA_ALLOW_TEST_IN_PRODUCTION=test_opt_in,
+        YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS=[],
+        YOOKASSA_SHOP_ID="live-shop",
+        YOOKASSA_SECRET_KEY="live-secret",
+        BILLING_RETURN_URL="https://pay.zapisflow.su/billing/success",
+        YOOKASSA_RECEIPT_VAT_CODE="1",
+        YOOKASSA_RECEIPT_PAYMENT_SUBJECT="service",
+        YOOKASSA_RECEIPT_PAYMENT_MODE="full_prepayment",
+    )
+    configured.validate_payment_configuration()
+    assert configured.yookassa_credentials == ("live-shop", "live-secret")
 
 
 def test_yookassa_receipt_requires_merchant_settings_and_preserves_price() -> None:

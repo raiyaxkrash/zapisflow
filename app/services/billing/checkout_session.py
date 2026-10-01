@@ -14,12 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.database.models.checkout_session import CheckoutSession
 from app.database.models.master import Master, SubscriptionStatus
 from app.database.models.subscription import SubscriptionPayment, SubscriptionPlan
+from app.database.models.user import User
+from app.config.settings import settings
 from app.services.billing.yookassa_checkout import CheckoutOrder, YooKassaCheckoutService
 from app.services.exceptions import SubscriptionError
 
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 SESSION_TTL = timedelta(minutes=15)
+
+
+class CheckoutSessionNotFound(SubscriptionError):
+    """Unknown or malformed bearer token; avoid disclosing order details."""
 
 
 @dataclass(frozen=True)
@@ -36,7 +42,7 @@ class CheckoutOffer:
 
 def _token_hash(token: str) -> str:
     if not TOKEN_PATTERN.fullmatch(token):
-        raise SubscriptionError("Ссылка на оплату недействительна")
+        raise CheckoutSessionNotFound("Ссылка на оплату недействительна")
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
@@ -123,11 +129,14 @@ class CheckoutSessionService:
     @staticmethod
     async def _validate(session: AsyncSession, row: CheckoutSession | None) -> CheckoutOffer:
         now = datetime.now(timezone.utc)
-        if row is None or row.status != "ISSUED" or row.used_at is not None or row.expires_at <= now:
+        if row is None:
+            raise CheckoutSessionNotFound("Ссылка на оплату недействительна")
+        if row.status != "ISSUED" or row.used_at is not None or row.expires_at <= now:
             raise SubscriptionError("Ссылка на оплату истекла или уже использована")
         payment = await session.get(SubscriptionPayment, row.payment_id)
         master = await session.get(Master, row.master_id)
         plan = await session.get(SubscriptionPlan, row.plan_id)
+        owner = await session.get(User, row.user_id)
         if (
             payment is None
             or master is None
@@ -139,6 +148,8 @@ class CheckoutSessionService:
             or master.owner_user_id != row.user_id
             or master.subscription_status == SubscriptionStatus.SUSPENDED
             or not plan.is_active
+            or owner is None
+            or not settings.can_use_yookassa_test_checkout(owner.telegram_id)
         ):
             raise SubscriptionError("Этот заказ больше нельзя оплатить")
         if payment.checkout_ref is None or payment.amount <= 0 or payment.currency != "RUB":

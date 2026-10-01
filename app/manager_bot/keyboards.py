@@ -168,6 +168,8 @@ def subscription_card_keyboard(
     master_id: int,
     plans: Sequence[SubscriptionPlan],
     status: Optional[EffectiveSubscriptionStatus] = None,
+    *,
+    can_pay: bool = True,
 ) -> InlineKeyboardMarkup:
     """Action buttons for subscription management screen."""
     rows = []
@@ -176,7 +178,7 @@ def subscription_card_keyboard(
     show_pay_action = (
         settings.payment_provider.lower() == "yookassa_web"
         or (settings.payment_provider.lower() == "manual" and not settings.is_production)
-    ) and status != EffectiveSubscriptionStatus.SUSPENDED
+    ) and status != EffectiveSubscriptionStatus.SUSPENDED and can_pay
     for plan in (plans if show_pay_action else ()):
         price_fmt = f"{plan.price:,.2f}".replace(",", " ").removesuffix(".00") + " ₽"
         if status == EffectiveSubscriptionStatus.EXPIRED:

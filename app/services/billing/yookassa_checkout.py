@@ -17,6 +17,7 @@ from app.config.settings import settings
 from app.database.models.audit import AuditLog
 from app.database.models.master import Master, SubscriptionStatus
 from app.database.models.subscription import SubscriptionPayment, SubscriptionPlan
+from app.database.models.user import User
 from app.services.billing.yookassa_client import YooKassaClient, YooKassaPayment
 from app.services.exceptions import BillingIDORViolationError, PlanNotFoundError, SubscriptionError
 from app.services.subscription_service import SubscriptionService
@@ -87,6 +88,9 @@ class YooKassaCheckoutService:
         master = await session.get(Master, master_id)
         if master is None or master.owner_user_id != actor_user_id:
             raise BillingIDORViolationError("Доступ к проекту запрещён")
+        owner = await session.get(User, actor_user_id)
+        if owner is None or not settings.can_use_yookassa_test_checkout(owner.telegram_id):
+            raise SubscriptionError("Тестовая оплата для этого аккаунта недоступна")
         if master.subscription_status == SubscriptionStatus.SUSPENDED:
             raise SubscriptionError("Подписка заблокирована; обратитесь в поддержку")
         plan = await session.scalar(
@@ -162,6 +166,9 @@ class YooKassaCheckoutService:
             master = await session.get(Master, payment.master_id)
             if master is None or master.owner_user_id != actor_user_id:
                 raise BillingIDORViolationError("Доступ к проекту запрещён")
+            owner = await session.get(User, actor_user_id)
+            if owner is None or not settings.can_use_yookassa_test_checkout(owner.telegram_id):
+                raise SubscriptionError("Тестовая оплата для этого аккаунта недоступна")
             if payment.status != "PENDING":
                 raise SubscriptionError("Платёж уже завершён")
             if master.subscription_status == SubscriptionStatus.SUSPENDED:
@@ -209,6 +216,9 @@ class YooKassaCheckoutService:
             master = await session.get(Master, payment.master_id)
             if master is None or master.owner_user_id != actor_user_id:
                 raise BillingIDORViolationError("Доступ к проекту запрещён")
+            owner = await session.get(User, actor_user_id)
+            if owner is None or not settings.can_use_yookassa_test_checkout(owner.telegram_id):
+                raise SubscriptionError("Тестовая оплата для этого аккаунта недоступна")
             if master.subscription_status == SubscriptionStatus.SUSPENDED:
                 raise SubscriptionError("Подписка заблокирована; обратитесь в поддержку")
             # The order's amount, term, and plan were validated and committed

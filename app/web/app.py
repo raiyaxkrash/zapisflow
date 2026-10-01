@@ -36,7 +36,7 @@ from app.scheduler import MultiTenantScheduler
 from app.services.bot_registry import BotRegistry
 from app.services.billing.yookassa_checkout import YooKassaCheckoutService
 from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError
-from app.services.billing.checkout_session import CheckoutSessionService
+from app.services.billing.checkout_session import CheckoutSessionNotFound, CheckoutSessionService
 from app.web.billing_pages import checkout_page, status_page
 from app.services.exceptions import (
     BotDisabledError,
@@ -247,6 +247,8 @@ def create_app(
         sessions, _ = billing_services()
         try:
             offer = await sessions.inspect(token)
+        except CheckoutSessionNotFound:
+            raise HTTPException(status_code=404, detail="Not found")
         except SubscriptionError:
             return HTMLResponse(
                 status_page("Ссылка недействительна", "Запросите новую ссылку на оплату. "),
@@ -278,6 +280,8 @@ def create_app(
         sessions, checkout = billing_services()
         try:
             offer, receipt_email = await sessions.consume(token, email_fields[0])
+        except CheckoutSessionNotFound:
+            raise HTTPException(status_code=404, detail="Not found")
         except SubscriptionError:
             return HTMLResponse(
                 status_page("Ссылка недействительна", "Запросите новую ссылку на оплату."),
