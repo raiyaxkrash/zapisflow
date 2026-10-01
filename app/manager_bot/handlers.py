@@ -26,11 +26,15 @@ from app.manager_bot.keyboards import (
     project_card_keyboard,
     project_list_keyboard,
     subscription_card_keyboard,
+    subscription_canceled_keyboard,
     subscription_checkout_keyboard,
     subscription_payment_keyboard,
+    subscription_pending_keyboard,
     subscription_projects_keyboard,
+    subscription_success_keyboard,
 )
 from app.services.bot_registry import BotRegistry
+from app.services.rate_limiter import check_rate_limit
 from app.services.subscription_service import SubscriptionService
 from app.database.session import async_session_factory
 from app.services.billing.yookassa_checkout import YooKassaCheckoutService
@@ -43,10 +47,12 @@ from app.services.audit_service import AuditEvent, AuditService
 from app.services.bot_provisioning_service import BotProvisioningService
 from app.services.exceptions import (
     AccessDeniedError,
+    BillingIDORViolationError,
     DuplicateBotError,
     InvalidBotTokenError,
     ManagerTokenCollisionError,
     ProvisioningWebhookError,
+    SubscriptionError,
     TelegramGatewayError,
     TokenRotationBotMismatchError,
 )
@@ -1041,16 +1047,16 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
             return
         amount = f"{order.amount:,.2f}".replace(",", " ").removesuffix(".00")
         text = (
-            "💳 <b>Подписка ZapisFlow</b>\n\n"
-            f"Тариф: <b>{escape(order.plan_name)}</b>\n"
-            f"Стоимость: {amount} ₽ / {order.period_days} дней\n\n"
-            "Нажмите кнопку, чтобы открыть страницу оплаты ЮKassa. "
-            "После оплаты вернитесь в бот и обновите статус подписки.\n"
-            f"📞 Поддержка: {settings.support_tag}"
+            "💳 <b>Оплата подписки</b>\n\n"
+            f"Тариф:\n<b>{escape(order.plan_name)}</b>\n\n"
+            f"Стоимость:\n<b>{amount} ₽</b>\n\n"
+            f"Период:\n<b>{order.period_days} дней</b>"
         )
         await callback.message.edit_text(
             text,
-            reply_markup=subscription_checkout_keyboard(master.id, redirect.confirmation_url),
+            reply_markup=subscription_checkout_keyboard(
+                master.id, redirect.confirmation_url, order.payment_id
+            ),
         )
         await callback.answer()
         return
@@ -1162,3 +1168,117 @@ async def cb_subscription_confirm(callback: CallbackQuery, session: AsyncSession
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer("Подписка продлена!", show_alert=False)
 
+
+@manager_router.callback_query(F.data.startswith("mgr:sub:check:"))
+async def cb_subscription_check(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Manual payment check via YooKassa fallback button with rate limiting and strict verification."""
+    parts = callback.data.split(":")
+    if len(parts) != 5 or not parts[3].isdigit() or not parts[4].isdigit():
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+
+    master_id = int(parts[3])
+    payment_id = int(parts[4])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    # 1. Rate limiting check (prevent spamming YooKassa API)
+    rate_key = f"rate_limit:check_sub_payment:{user.id}:{payment_id}"
+    redis_client = getattr(callback.bot, "redis", None)
+    if not await check_rate_limit(redis_client, rate_key, cooldown_seconds=5):
+        await callback.answer(
+            "⏳ Пожалуйста, подождите несколько секунд перед повторной проверкой.",
+            show_alert=True,
+        )
+        return
+
+    # 2. Check payment via YooKassaCheckoutService
+    try:
+        shop_id, secret_key = settings.yookassa_credentials
+        checkout_service = YooKassaCheckoutService(
+            async_session_factory, YooKassaClient(shop_id, secret_key)
+        )
+        result = await checkout_service.check_payment(
+            payment_id=payment_id,
+            actor_user_id=user.id,
+        )
+    except BillingIDORViolationError:
+        await callback.answer("Ошибка: доступ к проекту запрещён.", show_alert=True)
+        return
+    except SubscriptionError as exc:
+        await callback.answer(f"{str(exc)}. Поддержка: {settings.support_tag}", show_alert=True)
+        return
+    except Exception as exc:
+        logger.exception("Unexpected error checking payment #%s: %s", payment_id, exc)
+        await callback.answer(f"Ошибка проверки оплаты. Поддержка: {settings.support_tag}", show_alert=True)
+        return
+
+    # 3. Handle results
+    amount_str = f"{result.amount:,.2f}".replace(",", " ").removesuffix(".00") + " ₽"
+
+    if result.status == "SUCCEEDED":
+        paid_str = result.paid_until.strftime("%d.%m.%Y") if result.paid_until else "—"
+        text = (
+            "<b>🎉 Оплата подтверждена!</b>\n\n"
+            f"Вы приобрели подписку <b>{escape(result.plan_name)}</b> на <b>{result.period_days} дней</b>.\n\n"
+            f"💳 Стоимость: <b>{amount_str}</b>\n\n"
+            f"📅 Подписка активна до:\n<b>{paid_str}</b>\n\n"
+            "Теперь вы можете пользоваться ZapisFlow."
+        )
+        await callback.message.edit_text(
+            text,
+            reply_markup=subscription_success_keyboard(master_id),
+        )
+        await callback.answer("🎉 Оплата подтверждена!")
+        return
+
+    if result.status == "ALREADY_CONFIRMED":
+        paid_str = result.paid_until.strftime("%d.%m.%Y") if result.paid_until else "—"
+        text = (
+            "<b>✅ Оплата уже подтверждена</b>\n\n"
+            f"Тариф:\n<b>{escape(result.plan_name)}</b>\n\n"
+            f"Действует до:\n<b>{paid_str}</b>\n\n"
+            "Вы уже можете пользоваться ZapisFlow."
+        )
+        await callback.message.edit_text(
+            text,
+            reply_markup=subscription_success_keyboard(master_id),
+        )
+        await callback.answer("Оплата уже подтверждена.")
+        return
+
+    if result.status == "PENDING":
+        text = (
+            "⏳ <b>Оплата ещё не подтверждена</b>\n\n"
+            "ЮKassa пока не сообщила об успешной оплате.\n\n"
+            "Попробуйте проверить ещё раз немного позже."
+        )
+        await callback.message.edit_text(
+            text,
+            reply_markup=subscription_pending_keyboard(master_id, payment_id, result.confirmation_url),
+        )
+        await callback.answer("⏳ Оплата ещё не поступила. Попробуйте чуть позже.", show_alert=True)
+        return
+
+    if result.status == "CANCELLED":
+        text = (
+            "❌ <b>Оплата не завершена</b>\n\n"
+            "Платёж был отменён или не состоялся."
+        )
+        await callback.message.edit_text(
+            text,
+            reply_markup=subscription_canceled_keyboard(master_id, result.plan_code),
+        )
+        await callback.answer("Платёж был отменён.", show_alert=True)
+        return
+
+    # GATEWAY_ERROR or temporary provider failure
+    text = (
+        "⚠️ <b>Не удалось проверить оплату</b>\n\n"
+        "Сервис оплаты временно недоступен.\n\n"
+        "Попробуйте ещё раз позже."
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=subscription_pending_keyboard(master_id, payment_id, result.confirmation_url),
+    )
+    await callback.answer("Сервис оплаты временно недоступен. Попробуйте позже.", show_alert=True)

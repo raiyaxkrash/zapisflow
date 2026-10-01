@@ -18,7 +18,7 @@ from app.database.models.audit import AuditLog
 from app.database.models.master import Master, SubscriptionStatus
 from app.database.models.subscription import SubscriptionPayment, SubscriptionPlan
 from app.database.models.user import User
-from app.services.billing.yookassa_client import YooKassaClient, YooKassaPayment
+from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError, YooKassaPayment
 from app.services.exceptions import BillingIDORViolationError, PlanNotFoundError, SubscriptionError
 from app.services.subscription_service import SubscriptionService
 
@@ -44,6 +44,20 @@ class CheckoutRedirect:
     checkout_ref: uuid.UUID
     confirmation_url: str | None
     status: str
+
+
+@dataclass(frozen=True)
+class PaymentCheckResult:
+    status: str  # "SUCCEEDED", "ALREADY_CONFIRMED", "PENDING", "CANCELLED", "GATEWAY_ERROR"
+    payment_id: int
+    plan_name: str
+    plan_code: str
+    period_days: int
+    amount: Decimal
+    currency: str
+    paid_until: datetime | None = None
+    confirmation_url: str | None = None
+    error_message: str | None = None
 
 
 class YooKassaCheckoutService:
@@ -341,6 +355,175 @@ class YooKassaCheckoutService:
             if remote.status == "canceled" and payment.status == "PENDING":
                 payment.status = "CANCELLED"
             return False
+
+    async def check_payment(
+        self,
+        *,
+        payment_id: int,
+        actor_user_id: int,
+    ) -> PaymentCheckResult:
+        """Authenticate caller, verify local order and remote YooKassa status, and activate subscription if succeeded."""
+        async with self.session_maker() as session:
+            payment = await session.get(SubscriptionPayment, payment_id)
+            if payment is None or payment.provider != PROVIDER_CODE:
+                raise SubscriptionError("Платёж не найден")
+            master = await session.get(Master, payment.master_id)
+            if master is None or master.owner_user_id != actor_user_id:
+                raise BillingIDORViolationError("Доступ к проекту запрещён")
+            owner = await session.get(User, actor_user_id)
+            if owner is None or not settings.can_use_yookassa_test_checkout(owner.telegram_id):
+                raise SubscriptionError("Тестовая оплата для этого аккаунта недоступна")
+            if master.subscription_status == SubscriptionStatus.SUSPENDED:
+                raise SubscriptionError("Подписка заблокирована; обратитесь в поддержку")
+            plan = await session.get(SubscriptionPlan, payment.plan_id)
+            if plan is None:
+                raise SubscriptionError("Тариф платежа не найден")
+
+            # Check snapshot properties
+            if (
+                payment.currency != "RUB"
+                or payment.amount <= 0
+                or payment.period_days <= 0
+            ):
+                raise SubscriptionError("Параметры платежа некорректны")
+
+            # Fast path if already confirmed
+            if payment.status == "SUCCEEDED":
+                return PaymentCheckResult(
+                    status="ALREADY_CONFIRMED",
+                    payment_id=payment.id,
+                    plan_name=plan.name,
+                    plan_code=plan.code,
+                    period_days=payment.period_days,
+                    amount=payment.amount,
+                    currency=payment.currency,
+                    paid_until=master.paid_until,
+                )
+
+            # If already cancelled locally
+            if payment.status == "CANCELLED":
+                return PaymentCheckResult(
+                    status="CANCELLED",
+                    payment_id=payment.id,
+                    plan_name=plan.name,
+                    plan_code=plan.code,
+                    period_days=payment.period_days,
+                    amount=payment.amount,
+                    currency=payment.currency,
+                )
+
+            provider_payment_id = payment.provider_payment_id
+            checkout_ref = payment.checkout_ref
+            amount = payment.amount
+            currency = payment.currency
+            plan_name = plan.name
+            plan_code = plan.code
+            period_days = payment.period_days
+            local_plan_id = payment.plan_id
+
+            if provider_payment_id.startswith(UNCREATED_PREFIX) or checkout_ref is None:
+                return PaymentCheckResult(
+                    status="PENDING",
+                    payment_id=payment.id,
+                    plan_name=plan_name,
+                    plan_code=plan_code,
+                    period_days=period_days,
+                    amount=amount,
+                    currency=currency,
+                )
+
+        # Call YooKassa outside DB transaction to prevent holding locks during remote HTTP call
+        try:
+            remote = await self.client.get_payment(provider_payment_id)
+        except YooKassaGatewayError as exc:
+            # Do NOT change local payment status to FAILED or CANCELLED on temporary gateway error!
+            return PaymentCheckResult(
+                status="GATEWAY_ERROR",
+                payment_id=payment_id,
+                plan_name=plan_name,
+                plan_code=plan_code,
+                period_days=period_days,
+                amount=amount,
+                currency=currency,
+                error_message=str(exc),
+            )
+
+        # Verify remote response matches local order
+        self._verify_remote(
+            remote,
+            checkout_ref,
+            amount,
+            currency,
+            payment_id=payment_id,
+            user_id=actor_user_id,
+            plan_id=local_plan_id,
+        )
+
+        async with self.session_maker.begin() as session:
+            payment = await session.scalar(
+                select(SubscriptionPayment)
+                .where(SubscriptionPayment.id == payment_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if payment is None:
+                raise SubscriptionError("Локальный платёж не найден")
+            master = await session.get(Master, payment.master_id)
+            if master is None:
+                raise SubscriptionError("Проект платежа не найден")
+
+            # Check if concurrent webhook or reconciliation already succeeded
+            if payment.status == "SUCCEEDED":
+                return PaymentCheckResult(
+                    status="ALREADY_CONFIRMED",
+                    payment_id=payment.id,
+                    plan_name=plan_name,
+                    plan_code=plan_code,
+                    period_days=period_days,
+                    amount=amount,
+                    currency=currency,
+                    paid_until=master.paid_until,
+                )
+
+            if remote.status == "succeeded" and remote.paid:
+                await SubscriptionService(session).process_successful_payment(
+                    PROVIDER_CODE, remote.id
+                )
+                await session.refresh(master)
+                return PaymentCheckResult(
+                    status="SUCCEEDED",
+                    payment_id=payment.id,
+                    plan_name=plan_name,
+                    plan_code=plan_code,
+                    period_days=period_days,
+                    amount=amount,
+                    currency=currency,
+                    paid_until=master.paid_until,
+                )
+
+            if remote.status == "canceled":
+                if payment.status == "PENDING":
+                    payment.status = "CANCELLED"
+                return PaymentCheckResult(
+                    status="CANCELLED",
+                    payment_id=payment.id,
+                    plan_name=plan_name,
+                    plan_code=plan_code,
+                    period_days=period_days,
+                    amount=amount,
+                    currency=currency,
+                )
+
+            return PaymentCheckResult(
+                status="PENDING",
+                payment_id=payment.id,
+                plan_name=plan_name,
+                plan_code=plan_code,
+                period_days=period_days,
+                amount=amount,
+                currency=currency,
+                confirmation_url=remote.confirmation_url,
+            )
 
     @staticmethod
     def _verify_remote(
