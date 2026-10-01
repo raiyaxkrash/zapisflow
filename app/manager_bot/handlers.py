@@ -485,7 +485,7 @@ async def msg_onboarding_address(message: Message, state: FSMContext, session: A
     addr = (message.text or "").strip()
     if addr and len(addr) <= 500:
         settings_repo = MasterSettingsRepository(session)
-        await settings_repo.update(master_id, studio_address=addr)
+        await settings_repo.update_settings(master_id, studio_address=addr)
 
     await state.set_state(MasterOnboardingStates.waiting_for_phone)
     text = (
@@ -592,7 +592,7 @@ async def msg_onboarding_phone(message: Message, state: FSMContext, session: Asy
     phone = (message.text or "").strip()
     if phone and len(phone) <= 64:
         settings_repo = MasterSettingsRepository(session)
-        await settings_repo.update(master_id, studio_phone=phone, whatsapp_phone=phone)
+        await settings_repo.update_settings(master_id, studio_phone=phone, whatsapp_phone=phone)
 
     act_type = data.get("activity_type") or master.activity_type or "other"
     sugg = DEFAULT_SERVICE_SUGGESTIONS.get(act_type, DEFAULT_SERVICE_SUGGESTIONS["other"])
@@ -4070,7 +4070,7 @@ async def msg_manager_schedule_advance(
         await state.clear()
         return
 
-    await MasterSettingsRepository(session).update(master_id, min_advance_hours=hours)
+    await MasterSettingsRepository(session).update_settings(master_id, min_advance_hours=hours)
     await state.clear()
     settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
     await message.answer(f"✅ Минимальное время до записи установлено: <b>{hours} ч.</b>", reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj))
@@ -4115,7 +4115,7 @@ async def msg_manager_schedule_horizon(
         await state.clear()
         return
 
-    await MasterSettingsRepository(session).update(master_id, booking_horizon_days=days)
+    await MasterSettingsRepository(session).update_settings(master_id, booking_horizon_days=days)
     await state.clear()
     settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
     await message.answer(f"✅ Горизонт записи установлен: <b>{days} дней</b>", reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj))
@@ -4222,7 +4222,7 @@ async def msg_manager_set_about(message: Message, state: FSMContext, session: As
         await state.clear()
         return
 
-    await MasterSettingsRepository(session).update(master_id, about_text=desc)
+    await MasterSettingsRepository(session).update_settings(master_id, about_text=desc)
     await state.clear()
 
     settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)

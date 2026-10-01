@@ -37,9 +37,12 @@ from app.manager_bot.handlers import (
     cb_onboarding_accept_service,
     cb_onboarding_activity_type,
     cb_project_card,
+    msg_onboarding_address,
+    msg_onboarding_phone,
+    msg_manager_schedule_horizon,
     msg_manager_service_add_duration,
 )
-from app.manager_bot.states import MasterOnboardingStates
+from app.manager_bot.states import MasterOnboardingStates, ManagerScheduleStates
 from app.repositories.master_repository import MasterRepository
 from app.repositories.portfolio_repository import PortfolioRepository
 from app.repositories.schedule_repository import ScheduleRepository
@@ -142,6 +145,79 @@ async def test_onboarding_activity_type_populates_portfolio_categories(
 
     state.update_data.assert_awaited_with(onboarding_master_id=master.id, activity_type="nails")
     state.set_state.assert_awaited_with(MasterOnboardingStates.waiting_for_address)
+
+
+@pytest.mark.asyncio
+async def test_onboarding_address_persists_and_advances_to_phone(
+    pg_session: AsyncSession, master_with_owner
+):
+    master, owner = master_with_owner
+    state = AsyncMock()
+    state.get_data.return_value = {"onboarding_master_id": master.id}
+    message = SimpleNamespace(
+        text="г. Москва, ул. Ленина, 25",
+        from_user=SimpleNamespace(
+            id=owner.telegram_id,
+            first_name=owner.first_name,
+            last_name=owner.last_name,
+            username=owner.username,
+        ),
+        answer=AsyncMock(),
+    )
+
+    await msg_onboarding_address(message, state, pg_session)
+
+    settings_obj = await pg_session.get(MasterSettings, master.id)
+    assert settings_obj.studio_address == message.text
+    state.set_state.assert_awaited_once_with(MasterOnboardingStates.waiting_for_phone)
+    message.answer.assert_awaited_once()
+    assert "телефон" in message.answer.await_args.args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_onboarding_phone_persists_and_advances_to_service(
+    pg_session: AsyncSession, master_with_owner
+):
+    master, owner = master_with_owner
+    state = AsyncMock()
+    state.get_data.return_value = {"onboarding_master_id": master.id, "activity_type": "barber"}
+    message = SimpleNamespace(
+        text="+79991234567",
+        from_user=SimpleNamespace(
+            id=owner.telegram_id,
+            first_name=owner.first_name,
+            last_name=owner.last_name,
+            username=owner.username,
+        ),
+        answer=AsyncMock(),
+    )
+
+    await msg_onboarding_phone(message, state, pg_session)
+
+    settings_obj = await pg_session.get(MasterSettings, master.id)
+    assert settings_obj.studio_phone == "+79991234567"
+    assert settings_obj.whatsapp_phone == "+79991234567"
+    state.set_state.assert_awaited_once_with(MasterOnboardingStates.waiting_for_service_title)
+    message.answer.assert_awaited_once()
+    assert "первая услуга" in message.answer.await_args.args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_manager_schedule_horizon_uses_settings_repository_api(
+    pg_session: AsyncSession, master_with_owner
+):
+    master, _owner = master_with_owner
+    state = AsyncMock()
+    state.get_data.return_value = {"sch_master_id": master.id}
+    message = SimpleNamespace(text="45", answer=AsyncMock())
+
+    await msg_manager_schedule_horizon(message, state, pg_session)
+
+    settings_obj = await pg_session.get(MasterSettings, master.id)
+    assert settings_obj.booking_horizon_days == 45
+    state.clear.assert_awaited_once()
+    message.answer.assert_awaited_once()
+    assert "45 дней" in message.answer.await_args.args[0]
 
 
 @pytest.mark.asyncio

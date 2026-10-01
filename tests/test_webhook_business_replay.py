@@ -17,6 +17,7 @@ from app.bot.middlewares.db_session import DbSessionMiddleware
 from app.database.models.appointment import Appointment
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterSettings, MasterStatus, SubscriptionStatus
 from app.database.models.payment import Payment
+from app.database.models.processed_update import ProcessedWebhookUpdate
 from app.database.models.service import DepositType, Service
 from app.database.models.subscription import SubscriptionPayment, SubscriptionPeriod, SubscriptionPlan
 from app.database.models.telegram_outbox import TelegramOutbox
@@ -117,6 +118,66 @@ async def test_booking_callback_crash_and_replay_creates_one_appointment(pg_sess
     assert await pg_session.scalar(select(func.count(Appointment.id)).where(Appointment.master_id == master.id)) == 1
     assert await pg_session.scalar(select(func.count(Payment.id)).where(Payment.master_id == master.id)) == 1
     assert await pg_session.scalar(select(func.count(TelegramOutbox.id)).where(TelegramOutbox.master_id == master.id)) == 1
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_expired_booking_callback_is_acknowledged_and_deduplicated(
+    pg_session: AsyncSession, monkeypatch
+) -> None:
+    """An expired subscription is a completed rejection, not a hanging webhook."""
+    suffix = uuid4().int % 1_000_000_000
+    owner = User(telegram_id=5_000_000_000 + suffix, first_name="Owner")
+    client = User(telegram_id=6_000_000_000 + suffix, first_name="Client")
+    pg_session.add_all([owner, client])
+    await pg_session.flush()
+    master = Master(
+        owner_user_id=owner.id,
+        display_name=f"Expired booking {suffix}",
+        status=MasterStatus.ACTIVE,
+        subscription_status=SubscriptionStatus.EXPIRED,
+    )
+    pg_session.add(master)
+    await pg_session.flush()
+
+    middleware = _middleware_with_savepoints(pg_session, monkeypatch)
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    state = MagicMock()
+    state.get_data = AsyncMock(
+        return_value={"service_id": 123, "slot_timestamp": int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp())}
+    )
+    state.clear = AsyncMock()
+    update_id = 3_000_000_000 + suffix
+    update = Update(update_id=update_id)
+    scope = f"tenant:expired-{suffix}"
+    calls = 0
+
+    async def handler(_event, data):
+        nonlocal calls
+        calls += 1
+        await cb_agree_policy(callback, state, client, data["session"], master.id)
+
+    await middleware(handler, update, {"webhook_update_scope": scope})
+    await middleware(handler, update, {"webhook_update_scope": scope})
+
+    assert calls == 1
+    callback.answer.assert_awaited_once()
+    assert "временно недоступна" in callback.answer.await_args.args[0]
+    assert callback.answer.await_args.kwargs["show_alert"] is True
+    state.clear.assert_awaited_once()
+    assert await pg_session.scalar(
+        select(func.count(ProcessedWebhookUpdate.update_id)).where(
+            ProcessedWebhookUpdate.scope == scope,
+            ProcessedWebhookUpdate.update_id == update_id,
+        )
+    ) == 1
+    assert await pg_session.scalar(
+        select(func.count(Appointment.id)).where(Appointment.master_id == master.id)
+    ) == 0
+    assert await pg_session.scalar(
+        select(func.count(Payment.id)).where(Payment.master_id == master.id)
+    ) == 0
 
 
 @requires_postgres

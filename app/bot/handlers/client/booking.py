@@ -42,7 +42,7 @@ from app.services.telegram_outbox import (
     enqueue_telegram_edit,
     enqueue_telegram_message,
 )
-from app.services.exceptions import SlotAlreadyBookedError
+from app.services.exceptions import SlotAlreadyBookedError, SubscriptionExpiredError
 from app.services.slot_engine import SlotEngine
 from app.services.subscription_access_policy import SubscriptionAccessPolicy
 from app.utils.formatters import (
@@ -569,6 +569,15 @@ async def cb_agree_policy(
         await callback.answer(
             "Ой! Кто-то успел занять это время прямо перед вами. Пожалуйста, выберите другое время 🌸",
             show_alert=True,
+        )
+        return
+    except SubscriptionExpiredError as exc:
+        # The entitlement gate is an expected business rejection. Acknowledge
+        # it only after the webhook transaction commits its completion marker,
+        # so Telegram retries cannot leave the callback spinning indefinitely.
+        session.info.setdefault("post_commit", []).append(state.clear)
+        session.info.setdefault("post_commit", []).append(
+            lambda message=str(exc): callback.answer(message, show_alert=True)
         )
         return
 
