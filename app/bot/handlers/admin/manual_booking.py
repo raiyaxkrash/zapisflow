@@ -25,6 +25,11 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
+from app.services.telegram_outbox import (
+    bound_bot_instance_id,
+    enqueue_telegram_edit,
+    enqueue_telegram_message,
+)
 from app.services.exceptions import SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
 from app.utils.formatters import format_datetime_ru, format_rub
@@ -384,8 +389,6 @@ async def finalize_manual_booking(
             await event.answer(err_msg)
         return
 
-    await state.clear()
-
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
@@ -402,6 +405,8 @@ async def finalize_manual_booking(
     )
     if notes:
         success_text += f"<b>Заметка:</b> {notes}\n"
+
+    session.info.setdefault("post_commit", []).append(state.clear)
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -422,9 +427,21 @@ async def finalize_manual_booking(
         ]
     )
 
+    bot_instance_id = bound_bot_instance_id(session, master_id)
+    key = f"appointment:{appointment.id}:manual-created"
     if isinstance(event, Message):
-        await event.answer(text=success_text, reply_markup=keyboard)
+        await enqueue_telegram_message(
+            session, master_id=master_id, bot_instance_id=bot_instance_id,
+            chat_id=event.chat.id, text=success_text, reply_markup=keyboard,
+            idempotency_key=key,
+        )
     else:
         if event.message:
-            await event.message.edit_text(text=success_text, reply_markup=keyboard)
-        await event.answer("Запись создана! ✅")
+            await enqueue_telegram_edit(
+                session, master_id=master_id, bot_instance_id=bot_instance_id,
+                chat_id=event.message.chat.id, message_id=event.message.message_id,
+                text=success_text, reply_markup=keyboard, idempotency_key=key,
+            )
+        session.info.setdefault("post_commit", []).append(
+            lambda: event.answer("Запись создана! ✅")
+        )

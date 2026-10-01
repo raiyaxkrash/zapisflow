@@ -236,8 +236,6 @@ async def show_broadcast_preview(
         button_text=data.get("button_text"),
         button_url=data.get("button_url"),
     )
-    await state.update_data(broadcast_id=broadcast.id)
-    await state.set_state(AdminBroadcastSG.confirming)
 
     info_header = (
         f"<b>👁 ПРЕДПРОСМОТР РАССЫЛКИ #{broadcast.id}</b>\n"
@@ -264,22 +262,25 @@ async def show_broadcast_preview(
 
     preview_text = info_header + broadcast.text
 
-    if broadcast.photo_file_id:
-        bot = event.bot if isinstance(event, Message) else event.message.bot
-        chat_id = event.from_user.id
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=broadcast.photo_file_id,
-            caption=preview_text,
-            reply_markup=confirm_keyboard,
-        )
-    else:
-        if isinstance(event, Message):
+    async def after_commit() -> None:
+        await state.update_data(broadcast_id=broadcast.id)
+        await state.set_state(AdminBroadcastSG.confirming)
+        if broadcast.photo_file_id:
+            bot = event.bot if isinstance(event, Message) else event.message.bot
+            await bot.send_photo(
+                chat_id=event.from_user.id,
+                photo=broadcast.photo_file_id,
+                caption=preview_text,
+                reply_markup=confirm_keyboard,
+            )
+        elif isinstance(event, Message):
             await event.answer(text=preview_text, reply_markup=confirm_keyboard)
         else:
             if event.message:
                 await event.message.edit_text(text=preview_text, reply_markup=confirm_keyboard)
             await event.answer()
+
+    session.info.setdefault("post_commit", []).append(after_commit)
 
 
 @router.callback_query(F.data.startswith("adm_bc:send:"))
@@ -287,60 +288,26 @@ async def cb_broadcast_execute(
     callback: CallbackQuery, state: FSMContext, bot: Bot, session: AsyncSession, master_id: int
 ) -> None:
     """
-    Execute broadcast dispatch.
+    Queue recipient deliveries in the webhook transaction. The scheduler sends after commit.
     """
     broadcast_id = int(callback.data.split(":")[2])
-    await state.clear()
-
-    if callback.message:
-        if callback.message.caption:
-            await callback.message.edit_caption(
-                caption=f"{callback.message.caption}\n\n⏳ <b>Рассылка запущена в фоновом режиме...</b>"
-            )
-        else:
-            await callback.message.edit_text(
-                text=f"{callback.message.text}\n\n⏳ <b>Рассылка запущена в фоновом режиме...</b>"
-            )
-
-    await callback.answer("Рассылка запущена! 🚀", show_alert=False)
-
     broadcast_svc = BroadcastService(session)
-    completed_bc = await broadcast_svc.execute_broadcast(
-        master_id=master_id, broadcast_id=broadcast_id, bot=bot
-    )
+    campaign = await broadcast_svc.queue_broadcast(master_id, broadcast_id)
 
-    if completed_bc.status == BroadcastStatus.SENDING:
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=(
-                f"⏳ Рассылка #{completed_bc.id} уже выполняется. "
-                f"Отправлено: {completed_bc.success_count}, "
-                f"ошибок: {completed_bc.fail_count}."
-            ),
-        )
-        return
+    async def after_commit() -> None:
+        await state.clear()
+        if campaign.status == BroadcastStatus.COMPLETED:
+            text = f"Рассылка #{broadcast_id} уже завершена."
+        else:
+            text = f"Рассылка #{broadcast_id} поставлена в очередь."
+        if callback.message:
+            if callback.message.caption:
+                await callback.message.edit_caption(caption=text)
+            else:
+                await callback.message.edit_text(text=text)
+        await callback.answer(text, show_alert=False)
 
-    summary_text = (
-        f"🎉 <b>Рассылка #{completed_bc.id} успешно завершена!</b>\n\n"
-        f"• Всего получателей: <b>{completed_bc.total_count}</b>\n"
-        f"• Успешно доставлено: <b>{completed_bc.success_count}</b> ✅\n"
-        f"• Ошибок (заблокировали): <b>{completed_bc.fail_count}</b> ❌"
-    )
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="◀️ В панель мастера",
-                    callback_data=AdminMenuCallback(action="dashboard").pack(),
-                )
-            ]
-        ]
-    )
-    await bot.send_message(
-        chat_id=callback.from_user.id,
-        text=summary_text,
-        reply_markup=keyboard,
-    )
+    session.info.setdefault("post_commit", []).append(after_commit)
 
 
 @router.callback_query(F.data == "adm_bc:cancel")

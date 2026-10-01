@@ -3,6 +3,7 @@ Database session middleware providing an active AsyncSession to event handlers.
 """
 
 import hashlib
+import logging
 from typing import Any, Awaitable, Callable, Dict
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Update
@@ -10,6 +11,8 @@ from sqlalchemy import text
 
 from app.database.models.processed_update import ProcessedWebhookUpdate
 from app.database.session import async_session_factory
+
+logger = logging.getLogger(__name__)
 
 
 class DbSessionMiddleware(BaseMiddleware):
@@ -29,6 +32,9 @@ class DbSessionMiddleware(BaseMiddleware):
                 scope = data.get("webhook_update_scope")
                 update_id = event.update_id if isinstance(event, Update) else None
                 if scope is not None and update_id is not None:
+                    session.info["webhook_update_scope"] = scope
+                    session.info["webhook_update_id"] = update_id
+                if scope is not None and update_id is not None:
                     # Serialize the same update across replicas in PostgreSQL.
                     # The lock and the completion row are in this transaction.
                     lock_bytes = hashlib.blake2b(
@@ -46,6 +52,11 @@ class DbSessionMiddleware(BaseMiddleware):
                 if scope is not None and update_id is not None:
                     session.add(ProcessedWebhookUpdate(scope=scope, update_id=update_id))
                 await session.commit()
+                for callback in session.info.pop("post_commit", []):
+                    try:
+                        await callback()
+                    except Exception:
+                        logger.exception("Post-commit callback failed for update scope=%s id=%s", scope, update_id)
                 return result
             except Exception:
                 await session.rollback()

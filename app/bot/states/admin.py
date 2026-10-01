@@ -81,6 +81,12 @@ class AdminSettingsSG(StatesGroup):
     editing_value = State()
 
 
+class AdminContactsSG(StatesGroup):
+    """Editing one tenant-scoped contact field."""
+
+    editing_value = State()
+
+
 class AdminRejectPaymentSG(StatesGroup):
     """
     Entering custom rejection explanation for payment receipt.

@@ -196,11 +196,14 @@ async def cb_admin_calendar_toggle_day_off(
     text, is_day_off = await format_day_info(target_date, session, master_id=master_id)
     keyboard = get_admin_day_management_keyboard(target_date, is_day_off=is_day_off)
 
-    if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=keyboard)
-
     alert_msg = "День сделан выходным 🔴" if new_is_day_off else "День сделан рабочим 🟢"
-    await callback.answer(alert_msg, show_alert=False)
+    if callback.message:
+        session.info.setdefault("post_commit", []).append(
+            lambda: callback.message.edit_text(text=text, reply_markup=keyboard)
+        )
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer(alert_msg, show_alert=False)
+    )
 
 
 # --- Set Custom Working Hours ---
@@ -374,7 +377,6 @@ async def msg_admin_calendar_save_blocked_slot(
     start_dt = tz.localize(datetime.combine(target_date, start_t))
     end_dt = tz.localize(datetime.combine(target_date, end_t))
 
-    await state.clear()
     auth_service = MasterAuthorizationService(session)
     if not await auth_service.is_admin(master_id, db_user.id):
         await message.answer("Доступ запрещен")
@@ -388,12 +390,15 @@ async def msg_admin_calendar_save_blocked_slot(
         created_by_admin_id=admin.id,
         master_id=master_id,
     )
+    session.info.setdefault("post_commit", []).append(state.clear)
 
     text, is_day_off = await format_day_info(target_date, session, master_id=master_id)
     keyboard = get_admin_day_management_keyboard(target_date, is_day_off=is_day_off)
-    await message.answer(
-        text=f"🔒 <b>Интервал успешно заблокирован!</b>\n\n{text}",
-        reply_markup=keyboard,
+    session.info.setdefault("post_commit", []).append(
+        lambda: message.answer(
+            text=f"🔒 <b>Интервал успешно заблокирован!</b>\n\n{text}",
+            reply_markup=keyboard,
+        )
     )
 
 

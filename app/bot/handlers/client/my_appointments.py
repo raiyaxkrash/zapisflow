@@ -81,7 +81,6 @@ async def cb_booking_detail(
 
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
-    master_contact = await settings_repo.get_value(master_id, "master_telegram", "https://t.me/")
 
     card_text = render_appointment_card(appointment, tz_name=tz_str)
 
@@ -102,7 +101,7 @@ async def cb_booking_detail(
         card_text += (
             "\n\nℹ️ <i>Для переноса времени или даты записи, пожалуйста, свяжитесь с мастером лично.</i>"
         )
-        markup = get_appointment_detail_keyboard(appointment, master_contact_url=master_contact)
+        markup = get_appointment_detail_keyboard(appointment)
 
     if callback.message:
         await callback.message.edit_text(text=card_text, reply_markup=markup)

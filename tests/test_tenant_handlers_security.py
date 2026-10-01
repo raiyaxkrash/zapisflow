@@ -173,6 +173,9 @@ async def test_crm_notes_are_tenant_scoped_even_for_shared_user(
     state = SimpleNamespace(get_data=AsyncMock(return_value={"user_id": client_a.id}), clear=AsyncMock())
     message = SimpleNamespace(text="Updated A", answer=AsyncMock())
     await msg_admin_client_save_note(message, state, pg_session, master_a.id)
+    message.answer.assert_not_awaited()
+    for callback in pg_session.info.pop("post_commit"):
+        await callback()
     assert "Updated A" in message.answer.await_args.kwargs["text"]
     card_b = await format_client_crm_card(client_a, pg_session, "UTC", master_b.id)
     assert "Updated A" not in card_b

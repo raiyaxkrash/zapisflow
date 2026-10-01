@@ -33,6 +33,11 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
 from app.services.booking_service import BookingService
+from app.services.telegram_outbox import (
+    bound_bot_instance_id,
+    enqueue_telegram_edit,
+    enqueue_telegram_message,
+)
 from app.services.exceptions import SlotAlreadyBookedError
 from app.services.slot_engine import SlotEngine
 from app.services.subscription_access_policy import SubscriptionAccessPolicy
@@ -482,8 +487,6 @@ async def cb_agree_policy(
         )
         return
 
-    await state.clear()
-
     # Fetch requisites from settings
     settings_repo = MasterSettingsRepository(session)
     bank_name = await settings_repo.get_value(master_id, "bank_name", settings.bank_name)
@@ -510,9 +513,30 @@ async def cb_agree_policy(
         "После перевода нажмите <b>«Я оплатил(а)»</b> и отправьте фото чека или скриншот:"
     )
 
+    # Redis FSM is external to PostgreSQL. Keep it until the booking and the
+    # processed-update marker have committed together.
+    session.info.setdefault("post_commit", []).append(state.clear)
+
+    bot_instance_id = bound_bot_instance_id(session, master_id)
     if callback.message:
-        await callback.message.edit_text(
+        await enqueue_telegram_edit(
+            session,
+            master_id=master_id,
+            bot_instance_id=bot_instance_id,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
             text=text,
             reply_markup=get_payment_screen_keyboard(appointment.id),
+            idempotency_key=f"appointment:{appointment.id}:payment-screen",
         )
-    await callback.answer()
+    else:
+        await enqueue_telegram_message(
+            session,
+            master_id=master_id,
+            bot_instance_id=bot_instance_id,
+            chat_id=callback.from_user.id,
+            text=text,
+            reply_markup=get_payment_screen_keyboard(appointment.id),
+            idempotency_key=f"appointment:{appointment.id}:payment-screen",
+        )
+    session.info.setdefault("post_commit", []).append(callback.answer)

@@ -3,6 +3,7 @@ Admin settings and studio payment details management handlers.
 Allows viewing and editing payment requisites, studio address, and booking policies.
 """
 
+from html import escape
 from typing import Any
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -29,18 +30,16 @@ async def format_settings_text(session: AsyncSession, master_id: int) -> tuple[s
     card = await repo.get_value(master_id, "bank_card_number", settings.bank_card_number)
     bank = await repo.get_value(master_id, "bank_name", settings.bank_name)
     recipient = await repo.get_value(master_id, "bank_recipient_name", settings.bank_recipient_name)
-    address = await repo.get_value(
-        master_id, "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
-    )
+    address = await repo.get_value(master_id, "studio_address")
     hold_min = await repo.get_value(master_id, "hold_duration_minutes", settings.hold_duration_minutes)
     cancel_hours = await repo.get_value(master_id, "cancel_policy_hours", 24)
 
     text = (
         "<b>⚙️ Настройки и реквизиты студии</b>\n\n"
-        f"💳 <b>Номер карты:</b> <code>{card}</code>\n"
-        f"🏦 <b>Банк:</b> {bank}\n"
-        f"👤 <b>Получатель:</b> {recipient}\n"
-        f"📍 <b>Адрес студии:</b> {address}\n"
+        f"💳 <b>Номер карты:</b> <code>{escape(str(card or 'не указан'))}</code>\n"
+        f"🏦 <b>Банк:</b> {escape(str(bank or 'не указан'))}\n"
+        f"👤 <b>Получатель:</b> {escape(str(recipient or 'не указан'))}\n"
+        f"📍 <b>Адрес студии:</b> {escape(str(address or 'не указан'))}\n"
         f"⏳ <b>Время удержания слота (hold):</b> {hold_min} мин.\n"
         f"⏰ <b>Бесплатная отмена:</b> за {cancel_hours} ч. до визита\n\n"
         "Нажмите на параметр для изменения:"
@@ -63,11 +62,8 @@ async def format_settings_text(session: AsyncSession, master_id: int) -> tuple[s
                     text="✏️ ФИО получателя",
                     callback_data="adm_set:edit:bank_recipient_name",
                 ),
-                InlineKeyboardButton(
-                    text="✏️ Адрес студии",
-                    callback_data="adm_set:edit:studio_address",
-                ),
             ],
+            [InlineKeyboardButton(text="📞 Контакты", callback_data="adm_contact:view")],
             [
                 InlineKeyboardButton(
                     text="✏️ Время удержания (мин)",
@@ -111,19 +107,20 @@ async def cb_admin_settings_edit_prompt(
     """
     Prompt admin for new value of the chosen setting.
     """
-    setting_key = callback.data.split(":")[2]
-    await state.set_state(AdminSettingsSG.editing_value)
-    await state.update_data(setting_key=setting_key)
-
     names = {
         "bank_card_number": "номер банковской карты для предоплат",
         "bank_name": "название банка (например: Сбербанк, Т-Банк)",
         "bank_recipient_name": "ФИО получателя перевода (например: Екатерина В.)",
-        "studio_address": "полный адрес студии / кабинета",
         "hold_duration_minutes": "время удержания неоплаченного слота (в минутах, например: 30)",
         "cancel_policy_hours": "срок отмены без потери предоплаты (в часах, например: 24)",
     }
-    label = names.get(setting_key, setting_key)
+    setting_key = (callback.data or "").removeprefix("adm_set:edit:")
+    if setting_key not in names:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+    await state.set_state(AdminSettingsSG.editing_value)
+    await state.update_data(setting_key=setting_key)
+    label = names[setting_key]
 
     text = f"Введите новое значение для параметра <b>«{label}»</b>:"
     keyboard = InlineKeyboardMarkup(
@@ -150,7 +147,14 @@ async def msg_admin_settings_save_value(
     Validate and save updated setting value.
     """
     data = await state.get_data()
-    setting_key = data["setting_key"]
+    setting_key = data.get("setting_key")
+    if setting_key not in {
+        "bank_card_number", "bank_name", "bank_recipient_name",
+        "hold_duration_minutes", "cancel_policy_hours",
+    }:
+        await state.clear()
+        await message.answer("Редактирование устарело. Откройте настройки заново.")
+        return
     raw_val = message.text.strip()
 
     val: Any = raw_val
@@ -170,10 +174,12 @@ async def msg_admin_settings_save_value(
 
     repo = MasterSettingsRepository(session)
     await repo.update_settings(master_id, **{setting_key: val})
-    await session.commit()
-    await state.clear()
+    session.info.setdefault("post_commit", []).append(state.clear)
 
     text, keyboard = await format_settings_text(session, master_id)
-    await message.answer(
-        text=f"✅ <b>Настройка успешно сохранена!</b>\n\n{text}", reply_markup=keyboard
+    session.info.setdefault("post_commit", []).append(
+        lambda: message.answer(
+            text=f"✅ <b>Настройка успешно сохранена!</b>\n\n{text}",
+            reply_markup=keyboard,
+        )
     )

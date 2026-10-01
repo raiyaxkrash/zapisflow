@@ -21,6 +21,12 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.user_repository import UserRepository
 from app.services.payment_service import PaymentService
+from app.services.telegram_outbox import (
+    bound_bot_instance_id,
+    enqueue_telegram_edit,
+    enqueue_telegram_edit_caption,
+    enqueue_telegram_message,
+)
 from app.services.exceptions import InvalidBookingStatusError
 from app.services.master_authorization_service import MasterAuthorizationService
 from app.utils.formatters import format_datetime_ru, format_rub
@@ -221,10 +227,8 @@ async def cb_approve_payment(
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
-    studio_address = await settings_repo.get_value(
-        master_id, "studio_address", "г. Москва, ул. Ленина, д. 25, студия 4"
-    )
-    await session.commit()
+    studio_address = await settings_repo.get_value(master_id, "studio_address")
+    address_line = f"📍 <b>Адрес студии:</b> {escape(studio_address)}\n" if studio_address else ""
 
     # 1. Update admin message text and remove action buttons
     confirmed_text = (
@@ -233,18 +237,18 @@ async def cb_approve_payment(
         "Изменения сохранены."
     )
     if callback.message:
-        try:
-            if callback.message.caption:
-                await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n{confirmed_text}")
-            else:
-                await callback.message.edit_text(text=confirmed_text)
-        except Exception:
-            logger.exception("Failed to update admin approval message for payment %s", payment_id)
-
-    try:
-        await callback.answer("Оплата успешно подтверждена ✅", show_alert=False)
-    except Exception:
-        logger.exception("Failed to answer admin approval callback for payment %s", payment_id)
+        enqueue_edit = enqueue_telegram_edit_caption if callback.message.caption else enqueue_telegram_edit
+        await enqueue_edit(
+            session, master_id=master_id,
+            bot_instance_id=bound_bot_instance_id(session, master_id),
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            **({"caption": confirmed_text} if callback.message.caption else {"text": confirmed_text}),
+            idempotency_key=f"payment:{payment_id}:approved:admin-ui",
+        )
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer("Оплата успешно подтверждена ✅", show_alert=False)
+    )
 
     # 2. Notify client
     if appointment.user and appointment.user.telegram_id:
@@ -252,16 +256,17 @@ async def cb_approve_payment(
             f"🎉 <b>Ваша запись подтверждена!</b> ✅\n\n"
             f"🌸 <b>Услуга:</b> {appointment.snapshot_service_title}\n"
             f"🗓 <b>Дата и время:</b> {dt_str}\n"
-            f"📍 <b>Адрес студии:</b> {studio_address}\n\n"
+            f"{address_line}\n"
             "Предоплата успешно зачислена. С нетерпением ждём вас! ❤️"
         )
-        try:
-            await bot.send_message(
-                chat_id=appointment.user.telegram_id,
-                text=client_text,
-            )
-        except Exception:
-            logger.exception("Failed to notify client of approved payment %s", payment_id)
+        await enqueue_telegram_message(
+            session,
+            master_id=master_id,
+            bot_instance_id=bound_bot_instance_id(session, master_id),
+            chat_id=appointment.user.telegram_id,
+            text=client_text,
+            idempotency_key=f"payment:{payment_id}:approved:client",
+        )
 
 
 @router.callback_query(F.data.startswith("adm_pay:reject:"))
@@ -371,22 +376,21 @@ async def cb_do_reject_payment(
         await callback.answer(response, show_alert=True)
         return
     appointment = decision.appointment
-    await session.commit()
 
     reject_text = f"❌ <b>Оплата отклонена:</b> {reason_text}\nБронь продлена клиенту на 15 мин."
     if callback.message:
-        try:
-            if callback.message.caption:
-                await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n{reject_text}")
-            else:
-                await callback.message.edit_text(text=reject_text)
-        except Exception:
-            logger.exception("Failed to update admin rejection message for payment %s", payment_id)
-
-    try:
-        await callback.answer("Оплата отклонена ❌")
-    except Exception:
-        logger.exception("Failed to answer admin rejection callback for payment %s", payment_id)
+        enqueue_edit = enqueue_telegram_edit_caption if callback.message.caption else enqueue_telegram_edit
+        await enqueue_edit(
+            session, master_id=master_id,
+            bot_instance_id=bound_bot_instance_id(session, master_id),
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            **({"caption": reject_text} if callback.message.caption else {"text": reject_text}),
+            idempotency_key=f"payment:{payment_id}:rejected:admin-ui",
+        )
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer("Оплата отклонена ❌")
+    )
 
     # Notify client
     if appointment.user and appointment.user.telegram_id:
@@ -396,13 +400,14 @@ async def cb_do_reject_payment(
             "⏳ Мы продлили время вашей брони на <b>15 минут</b>. "
             "Пожалуйста, проверьте перевод и отправьте корректный чек в разделе «Мои записи» 🌸"
         )
-        try:
-            await bot.send_message(
-                chat_id=appointment.user.telegram_id,
-                text=client_text,
-            )
-        except Exception:
-            logger.exception("Failed to notify client of rejected payment %s", payment_id)
+        await enqueue_telegram_message(
+            session,
+            master_id=master_id,
+            bot_instance_id=bound_bot_instance_id(session, master_id),
+            chat_id=appointment.user.telegram_id,
+            text=client_text,
+            idempotency_key=f"payment:{payment_id}:rejected:client",
+        )
 
 
 @router.callback_query(F.data.startswith("adm_pay:retain_cancelled:"))
@@ -427,7 +432,6 @@ async def cb_resolve_cancelled_payment(
     if not decision.changed:
         await callback.answer("Платёж уже обработан", show_alert=True)
         return
-    await session.commit()
 
     result_text = (
         "✅ Перевод по отменённой записи подтверждён; предоплата удержана."
@@ -435,30 +439,30 @@ async def cb_resolve_cancelled_payment(
         else "❌ Перевод по отменённой записи не поступил."
     )
     if callback.message:
-        try:
-            if callback.message.caption:
-                await callback.message.edit_caption(
-                    caption=f"{callback.message.caption}\n\n{result_text}"
-                )
-            else:
-                await callback.message.edit_text(text=result_text)
-        except Exception:
-            logger.exception("Failed to update cancelled payment message for %s", payment_id)
-    try:
-        await callback.answer("Платёж обработан", show_alert=False)
-    except Exception:
-        logger.exception("Failed to answer cancelled payment callback for %s", payment_id)
+        enqueue_edit = enqueue_telegram_edit_caption if callback.message.caption else enqueue_telegram_edit
+        await enqueue_edit(
+            session, master_id=master_id,
+            bot_instance_id=bound_bot_instance_id(session, master_id),
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            **({"caption": result_text} if callback.message.caption else {"text": result_text}),
+            idempotency_key=f"payment:{payment_id}:cancelled:{'retained' if received else 'rejected'}:admin-ui",
+        )
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer("Платёж обработан", show_alert=False)
+    )
 
     user = decision.appointment.user
     if user and user.telegram_id > 0:
-        try:
-            await bot.send_message(
-                chat_id=user.telegram_id,
-                text=(
-                    "Предоплата по отменённой записи подтверждена и удержана согласно правилам."
-                    if received
-                    else "Перевод по отменённой записи не найден; предоплата не зачтена."
-                ),
-            )
-        except Exception:
-            logger.exception("Failed to notify client of cancelled payment %s", payment_id)
+        await enqueue_telegram_message(
+            session,
+            master_id=master_id,
+            bot_instance_id=bound_bot_instance_id(session, master_id),
+            chat_id=user.telegram_id,
+            text=(
+                "Предоплата по отменённой записи подтверждена и удержана согласно правилам."
+                if received
+                else "Перевод по отменённой записи не найден; предоплата не зачтена."
+            ),
+            idempotency_key=f"payment:{payment_id}:cancelled:{'retained' if received else 'rejected'}:client",
+        )

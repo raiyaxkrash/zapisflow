@@ -42,7 +42,7 @@ def get_main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(
-            text="📞 Связаться с мастером",
+            text="📞 Контакты",
             callback_data=MenuCallback(action="contact").pack(),
         )
     )

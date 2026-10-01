@@ -19,6 +19,8 @@ from app.scheduler.jobs.hold_cleaner import clean_expired_holds
 from app.scheduler.jobs.reminder_generator import generate_visit_reminders
 from app.scheduler.jobs.reminder_worker import send_visit_reminders
 from app.scheduler.jobs.subscription_worker import refresh_subscriptions
+from app.scheduler.jobs.broadcast_worker import resume_broadcasts
+from app.scheduler.jobs.telegram_outbox_worker import dispatch_telegram_outbox
 from app.services.bot_registry import BotRegistry
 
 logger = logging.getLogger("app.scheduler")
@@ -99,6 +101,38 @@ class MultiTenantScheduler:
             kwargs={
                 "session_maker": self.session_maker,
                 "batch_size": settings.scheduler_batch_size,
+            },
+        )
+
+        # Campaign recipients and one-off Telegram notifications are durable
+        # work units and continue after webhook completion or process restart.
+        self._scheduler.add_job(
+            resume_broadcasts,
+            trigger="interval",
+            seconds=settings.reminder_delivery_interval_seconds,
+            id="resume_broadcasts",
+            name="Resume Broadcast Deliveries",
+            replace_existing=True,
+            kwargs={
+                "registry": self.registry,
+                "bot": self.bot,
+                "session_maker": self.session_maker,
+                "batch_size": settings.scheduler_batch_size,
+            },
+        )
+        self._scheduler.add_job(
+            dispatch_telegram_outbox,
+            trigger="interval",
+            seconds=settings.reminder_delivery_interval_seconds,
+            id="dispatch_telegram_outbox",
+            name="Dispatch Telegram Outbox",
+            replace_existing=True,
+            kwargs={
+                "registry": self.registry,
+                "session_maker": self.session_maker,
+                "batch_size": settings.scheduler_batch_size,
+                "max_attempts": settings.job_max_attempts,
+                "lease_seconds": settings.job_processing_timeout_seconds,
             },
         )
 

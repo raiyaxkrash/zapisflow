@@ -65,7 +65,6 @@ async def _get_or_create_user(session: AsyncSession, from_user: Any) -> User:
         last_name=from_user.last_name or "",
         username=from_user.username or "",
     )
-    await session.commit()
     return user
 
 
@@ -211,8 +210,10 @@ async def msg_new_master_name(message: Message, state: FSMContext, session: Asyn
             "trial_ends_at": master.trial_ends_at.isoformat() if master.trial_ends_at else None,
         },
     )
-    await session.commit()
-    await state.clear()
+    if session.info.get("webhook_update_scope") is not None:
+        session.info.setdefault("post_commit", []).append(state.clear)
+    else:
+        await state.clear()
 
     if trial_granted and master.trial_ends_at:
         trial_text = f"Пробный период действует до: <b>{master.trial_ends_at.strftime('%d.%m.%Y')}</b>.\n\n"
@@ -229,7 +230,13 @@ async def msg_new_master_name(message: Message, state: FSMContext, session: Asyn
     )
     bot_repo = BotInstanceRepository(session)
     bot_instance = await bot_repo.get_current_for_master(master.id)
-    await message.answer(text, reply_markup=project_card_keyboard(master, bot_instance))
+    keyboard = project_card_keyboard(master, bot_instance)
+    if session.info.get("webhook_update_scope") is not None:
+        session.info.setdefault("post_commit", []).append(
+            lambda: message.answer(text, reply_markup=keyboard)
+        )
+    else:
+        await message.answer(text, reply_markup=keyboard)
 
 
 # ---------------------------------------------------------------------------
@@ -448,12 +455,17 @@ async def cb_confirm_bot_connection(
     bot_username = data.get("candidate_username")
     bot_first_name = data.get("candidate_first_name")
 
-    # Immediately clear FSM before provisioning (0 residual data in Redis/Memory)
-    await state.clear()
-
     if not master_id or not encrypted_token or not bot_id:
+        await state.clear()
         await callback.answer("Данные устарели. Начните сначала.", show_alert=True)
         return
+
+    # Keep the confirmation context until the processed-update marker commits.
+    # A crash after the provisioning saga commits can then replay safely.
+    if session.info.get("webhook_update_scope") is not None:
+        session.info.setdefault("post_commit", []).append(state.clear)
+    else:
+        await state.clear()
 
     user = await _get_or_create_user(session, callback.from_user)
 
@@ -984,7 +996,6 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
             actor_user_id=user.id,
             plan_code=plan_code,
         )
-        await session.commit()
     except Exception as exc:
         logger.exception("Failed to create subscription payment: %s", exc)
         await callback.answer(
@@ -1043,7 +1054,6 @@ async def cb_subscription_confirm(callback: CallbackQuery, session: AsyncSession
             provider=payment.provider,
             provider_payment_id=payment.provider_payment_id,
         )
-        await session.commit()
     except Exception as exc:
         logger.exception("Failed to process payment #%s: %s", payment_id, exc)
         await callback.answer(

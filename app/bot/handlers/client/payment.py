@@ -24,6 +24,12 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.services.booking_service import BookingService
 from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.payment_service import PaymentService
+from app.services.telegram_outbox import (
+    bound_bot_instance_id,
+    enqueue_telegram_document,
+    enqueue_telegram_message,
+    enqueue_telegram_photo,
+)
 from app.utils.formatters import format_datetime_ru, format_rub
 
 router = Router(name="client_payment")
@@ -96,7 +102,7 @@ async def msg_receive_proof(
     user_comment = message.caption or None
 
     payment_service = PaymentService(session)
-    appointment, payment, _proof = await payment_service.submit_payment_proof(
+    appointment, payment, proof = await payment_service.submit_payment_proof(
         master_id=master_id,
         appointment_id=appointment_id,
         user_id=db_user.id,
@@ -149,50 +155,50 @@ async def msg_receive_proof(
         ]
     )
 
-    # The middleware commits at the end of the update. Commit here as well so a
-    # Telegram reply can never claim that an uncommitted proof was accepted.
-    await session.commit()
+    # The update ledger and proof are committed together by DbSessionMiddleware.
+    # Clear Redis state only after that transaction succeeds.
+    session.info.setdefault("post_commit", []).append(state.clear)
 
-    try:
-        await state.clear()
-    except Exception:
-        logger.exception("Could not clear upload state after committing proof %s", payment.id)
-
-    try:
-        await message.answer(
+    bot_instance_id = bound_bot_instance_id(session, master_id)
+    await enqueue_telegram_message(
+        session,
+        master_id=master_id,
+        bot_instance_id=bot_instance_id,
+        chat_id=db_user.telegram_id,
+        text=(
             "Чек успешно получен! 🌸\n\n"
             "Мастер уже проверяет поступление перевода. "
             "Обычно это занимает от 5 до 30 минут.\n\n"
-            "Как только оплата будет подтверждена, вам придёт уведомление ✅",
-            reply_markup=get_main_menu_keyboard(),
-        )
-    except Exception:
-        logger.exception("Could not acknowledge committed proof %s to client", payment.id)
+            "Как только оплата будет подтверждена, вам придёт уведомление ✅"
+        ),
+        idempotency_key=f"payment-proof:{proof.id}:client",
+    )
 
     auth_service = MasterAuthorizationService(session)
     admin_recipients = await auth_service.get_admin_recipients(master_id=master_id)
 
     for admin_tg_id in admin_recipients:
-        try:
-            if media_type == MediaType.PHOTO:
-                await bot.send_photo(
-                    chat_id=admin_tg_id,
-                    photo=telegram_file_id,
-                    caption=admin_caption,
-                    reply_markup=admin_keyboard,
-                )
-            else:
-                await bot.send_document(
-                    chat_id=admin_tg_id,
-                    document=telegram_file_id,
-                    caption=admin_caption,
-                    reply_markup=admin_keyboard,
-                )
-        except Exception:
-            logger.exception(
-                "Could not notify admin %s about committed proof %s",
-                admin_tg_id,
-                payment.id,
+        if media_type == MediaType.PHOTO:
+            await enqueue_telegram_photo(
+                session,
+                master_id=master_id,
+                bot_instance_id=bot_instance_id,
+                chat_id=admin_tg_id,
+                photo_file_id=telegram_file_id,
+                caption=admin_caption,
+                reply_markup=admin_keyboard,
+                idempotency_key=f"payment-proof:{proof.id}:admin:{admin_tg_id}",
+            )
+        else:
+            await enqueue_telegram_document(
+                session,
+                master_id=master_id,
+                bot_instance_id=bot_instance_id,
+                chat_id=admin_tg_id,
+                document_file_id=telegram_file_id,
+                caption=admin_caption,
+                reply_markup=admin_keyboard,
+                idempotency_key=f"payment-proof:{proof.id}:admin:{admin_tg_id}",
             )
 
 
@@ -207,7 +213,6 @@ async def cb_cancel_hold_booking(
     """
     Cancel booking on requisites screen before payment is confirmed.
     """
-    await state.clear()
     booking_service = BookingService(session)
 
     try:
@@ -217,6 +222,7 @@ async def cb_cancel_hold_booking(
             user_id=db_user.id,
             reason="Отменено клиентом на экране оплаты",
         )
+        session.info.setdefault("post_commit", []).append(state.clear)
         text = "Бронь успешно отменена. Слот освобождён ↩️"
     except Exception as e:
         text = f"Не удалось отменить запись: {e}"

@@ -14,6 +14,7 @@ from app.database.models.notification import (
     NotificationType,
 )
 from app.repositories.base import BaseRepository
+from app.utils.delivery_lock import REMINDER_LOCK_NAMESPACE, delivery_is_in_flight
 
 logger = logging.getLogger("app.repositories.notification")
 
@@ -147,7 +148,13 @@ class NotificationRepository(BaseRepository[Notification]):
         res = await self.session.execute(stmt)
         stale = list(res.scalars().all())
 
+        reclaimed = 0
         for notif in stale:
+            if await delivery_is_in_flight(
+                await self.session.connection(), REMINDER_LOCK_NAMESPACE, notif.id
+            ):
+                continue
+            reclaimed += 1
             if notif.attempt_count < max_attempts:
                 notif.status = NotificationStatus.PENDING
                 notif.claimed_at = None
@@ -159,7 +166,7 @@ class NotificationRepository(BaseRepository[Notification]):
                 notif.last_error = f"Abandoned: max attempts ({max_attempts}) reached after timeout"
 
         await self.session.flush()
-        return len(stale)
+        return reclaimed
 
     async def renew_claim(self, notification_id: int, worker_id: str, claim_attempt: int) -> bool:
         """Keep an in-flight delivery leased only while this claim still owns it."""
@@ -199,25 +206,6 @@ class NotificationRepository(BaseRepository[Notification]):
             .values(claimed_at=datetime.now(timezone.utc))
         )
         return result.rowcount
-
-    async def lock_owned_claim(self, notification_id: int, worker_id: str, claim_attempt: int) -> bool:
-        """Lock an owned delivery through the external send and final status write.
-
-        SKIP LOCKED keeps another replica from waiting on this in-flight send.
-        The caller must keep this transaction open until send outcome is stored.
-        """
-        result = await self.session.execute(
-            select(Notification.id)
-            .where(
-                Notification.id == notification_id,
-                Notification.status == NotificationStatus.PROCESSING,
-                Notification.claimed_by == worker_id,
-                Notification.attempt_count == claim_attempt,
-                Notification.next_attempt_at.is_(None),
-            )
-            .with_for_update(skip_locked=True)
-        )
-        return result.scalar_one_or_none() is not None
 
     async def mark_sent(self, notification_id: int, worker_id: str, claim_attempt: int) -> bool:
         """Mark delivered only if the original worker still owns the claim."""

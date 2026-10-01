@@ -3,6 +3,7 @@
 import logging
 import secrets
 from typing import List, Optional, Tuple
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -96,12 +97,32 @@ class BotProvisioningService:
         clean_token = token.strip()
 
         # 1. Verify Master ownership
-        master = await self.master_repo.get_by_id(master_id)
+        # Serialize connect attempts for one project. This lock is held until the
+        # durable PROVISIONING row is committed below.
+        master = await self.session.scalar(
+            select(Master).where(Master.id == master_id).with_for_update()
+        )
         if not master or master.owner_user_id != actor_user_id:
             raise AccessDeniedError("У вас нет прав на управление данным проектом.")
 
         # 2. Check current bot instance for this master
         existing_current = await self.bot_repo.get_current_for_master(master_id)
+        if existing_current and existing_current.telegram_bot_id == bot_identity.id:
+            current_token = (
+                self.crypto.decrypt(
+                    existing_current.encrypted_token,
+                    associated_data=bot_identity.id,
+                )
+                if existing_current.encrypted_token else None
+            )
+            if current_token and secrets.compare_digest(current_token, clean_token):
+                # The first attempt may have committed before its webhook update
+                # completed. Resume that durable step without creating another
+                # BotInstance, token version, or trial.
+                if existing_current.status in (BotInstanceStatus.PROVISIONING, BotInstanceStatus.ERROR):
+                    return await self.retry_provisioning(existing_current.id, actor_user_id)
+                if existing_current.status in (BotInstanceStatus.SETUP_REQUIRED, BotInstanceStatus.ACTIVE):
+                    return existing_current
         if existing_current and existing_current.status in (
             BotInstanceStatus.ACTIVE,
             BotInstanceStatus.PROVISIONING,
@@ -214,6 +235,9 @@ class BotProvisioningService:
         if not bot_instance:
             raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
 
+        if bot_instance.status in (BotInstanceStatus.SETUP_REQUIRED, BotInstanceStatus.ACTIVE):
+            return bot_instance
+
         if not bot_instance.encrypted_token or not bot_instance.telegram_bot_id:
             raise ProvisioningWebhookError("Токен бота не настроен.")
 
@@ -271,7 +295,12 @@ class BotProvisioningService:
     ) -> BotInstance:
         """Rotate token for an existing bot instance, enforcing matching telegram_bot_id."""
         clean_token = new_token.strip()
-        bot_instance = await self.bot_repo.get_by_id_and_owner(bot_instance_id, actor_user_id)
+        bot_instance = await self.session.scalar(
+            select(BotInstance)
+            .join(Master, BotInstance.master_id == Master.id)
+            .where(BotInstance.id == bot_instance_id, Master.owner_user_id == actor_user_id)
+            .with_for_update(of=BotInstance)
+        )
         if not bot_instance:
             raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
 
@@ -281,6 +310,16 @@ class BotProvisioningService:
         # 2. Strict ID matching: new token must belong to the exact same Telegram bot
         if identity.id != bot_instance.telegram_bot_id:
             raise TokenRotationBotMismatchError("Это токен другого Telegram-бота.")
+
+        if bot_instance.encrypted_token:
+            stored_token = self.crypto.decrypt(
+                bot_instance.encrypted_token,
+                associated_data=identity.id,
+            )
+            if secrets.compare_digest(stored_token, clean_token):
+                if bot_instance.status == BotInstanceStatus.ERROR:
+                    return await self.retry_provisioning(bot_instance.id, actor_user_id)
+                return bot_instance
 
         # 3. Encrypt new token
         new_encrypted = self.crypto.encrypt(clean_token, associated_data=identity.id)
@@ -337,6 +376,8 @@ class BotProvisioningService:
         bot_instance = await self.bot_repo.get_by_id_and_owner(bot_instance_id, actor_user_id)
         if not bot_instance:
             raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
+        if bot_instance.status == BotInstanceStatus.DISABLED:
+            return bot_instance
 
         # 1. Best-effort deleteWebhook
         if bot_instance.encrypted_token and bot_instance.telegram_bot_id:
@@ -381,6 +422,8 @@ class BotProvisioningService:
         bot_instance = await self.bot_repo.get_by_id_and_owner(bot_instance_id, actor_user_id)
         if not bot_instance:
             raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
+        if bot_instance.status in (BotInstanceStatus.SETUP_REQUIRED, BotInstanceStatus.ACTIVE):
+            return bot_instance
 
         if not bot_instance.encrypted_token or not bot_instance.telegram_bot_id:
             raise ProvisioningWebhookError("Токен бота не настроен.")
@@ -444,18 +487,21 @@ class BotProvisioningService:
         if not master or master.owner_user_id != actor_user_id:
             raise AccessDeniedError("У вас нет прав на управление данным проектом.")
 
+        bot_instance = await self.bot_repo.get_current_for_master(master_id)
+        if master.status == MasterStatus.ACTIVE and bot_instance and bot_instance.status == BotInstanceStatus.ACTIVE:
+            return True, []
+
         is_ready, missing = await self.readiness_service.check(master_id)
         if not is_ready:
             return False, missing
 
         # Readiness passed -> activate
         master.status = MasterStatus.ACTIVE
-        bot_instance = await self.bot_repo.get_current_for_master(master_id)
         if bot_instance and bot_instance.status == BotInstanceStatus.SETUP_REQUIRED:
             bot_instance.status = BotInstanceStatus.ACTIVE
 
         try:
-            await self.session.commit()
+            await self.session.flush()
         except IntegrityError as exc:
             await self.session.rollback()
             orig_str = str(exc.orig) if hasattr(exc, "orig") else str(exc)
@@ -473,5 +519,5 @@ class BotProvisioningService:
             entity_id=bot_instance.id if bot_instance else None,
             payload_after={"master_status": "ACTIVE", "bot_status": "ACTIVE"},
         )
-        await self.session.commit()
+        await self.session.flush()
         return True, []

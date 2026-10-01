@@ -16,30 +16,27 @@ from app.services.analytics_service import AnalyticsService
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "commit_fails, notification_fails, expected_count",
+    "commit_fails, enqueue_fails, expected_count",
     [
-        pytest.param(False, False, 1, id="commit-before-notification"),
-        pytest.param(True, False, 0, id="commit-failure-blocks-notification"),
-        pytest.param(False, True, 1, id="notification-failure-keeps-expiry"),
+        pytest.param(False, False, 1, id="expiry-and-outbox-commit"),
+        pytest.param(True, False, 0, id="commit-failure-rolls-back"),
+        pytest.param(False, True, 0, id="outbox-failure-rolls-back-expiry"),
     ],
 )
 async def test_clean_expired_holds_job(
-    commit_fails, notification_fails, expected_count, caplog
+    commit_fails, enqueue_fails, expected_count, caplog
 ):
     """
-    Test that clean_expired_holds notifies only a successfully expired hold.
+    Expiry and durable notification intent commit or roll back together.
     """
     mock_bot = AsyncMock()
     mock_session = AsyncMock()
     if commit_fails:
         mock_session.commit.side_effect = RuntimeError("database commit failed")
 
-    async def send_message_after_commit(**kwargs):
-        assert mock_session.commit.await_count == 1
-        if notification_fails:
-            raise RuntimeError("Telegram unavailable")
-
-    mock_bot.send_message.side_effect = send_message_after_commit
+    enqueue = AsyncMock()
+    if enqueue_fails:
+        enqueue.side_effect = RuntimeError("outbox unavailable")
 
     # Create dummy user and appointment with expired hold
     user = User(id=1, telegram_id=12345678, first_name="Тест")
@@ -79,6 +76,9 @@ async def test_clean_expired_holds_job(
         mock_settings_repo = AsyncMock()
         mock_settings_repo.get_value.return_value = "Europe/Moscow"
 
+        mock_bot_repo = AsyncMock()
+        mock_bot_repo.get_active_by_master_id.return_value = MagicMock(id=7)
+
         mp.setattr(
             "app.scheduler.jobs.hold_cleaner.AppointmentRepository",
             lambda s: mock_app_repo,
@@ -91,20 +91,23 @@ async def test_clean_expired_holds_job(
             "app.scheduler.jobs.hold_cleaner.MasterSettingsRepository",
             lambda s: mock_settings_repo,
         )
+        mp.setattr("app.scheduler.jobs.hold_cleaner.BotInstanceRepository", lambda s: mock_bot_repo)
+        mp.setattr("app.scheduler.jobs.hold_cleaner.enqueue_telegram_message", enqueue)
 
         cleaned = await clean_expired_holds(mock_bot, session_maker=mock_session_maker)
 
     assert cleaned == expected_count
     mock_booking_service.expire_booking.assert_awaited_once_with(app.id, master_id=1)
-    mock_session.commit.assert_awaited_once()
-    if commit_fails:
-        mock_session.rollback.assert_awaited_once()
-        mock_bot.send_message.assert_not_awaited()
+    if enqueue_fails:
+        mock_session.commit.assert_not_awaited()
     else:
-        mock_bot.send_message.assert_awaited_once()
-    if notification_fails:
-        assert "Failed to send expiry notice" in caplog.text
+        mock_session.commit.assert_awaited_once()
+    if commit_fails or enqueue_fails:
+        mock_session.rollback.assert_awaited_once()
+    else:
         mock_session.rollback.assert_not_awaited()
+    enqueue.assert_awaited_once()
+    mock_bot.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -230,3 +230,52 @@ async def test_postgres_ledger_blocks_replay_after_db_commit_before_redis_comple
     assert calls == 1
     assert (await pg_session.get(AppSetting, setting_key)).value == {"calls": 1}
     assert await pg_session.get(ProcessedWebhookUpdate, (scope, update_id)) is not None
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_post_commit_callbacks_run_only_after_successful_webhook_commit(
+    pg_session: AsyncSession, monkeypatch
+):
+    import app.bot.middlewares.db_session as middleware_module
+
+    factory = async_sessionmaker(
+        pg_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    monkeypatch.setattr(middleware_module, "async_session_factory", factory)
+    middleware = DbSessionMiddleware()
+    scope = f"tenant:postcommit:{uuid.uuid4().hex}"
+    events = []
+
+    async def successful(_event, data):
+        session = data["session"]
+        session.add(AppSetting(key=f"postcommit_{uuid.uuid4().hex}", value={"ok": True}))
+
+        async def callback():
+            assert not session.in_transaction()
+            events.append("after_commit")
+
+        session.info.setdefault("post_commit", []).append(callback)
+
+    await middleware(
+        successful,
+        Update.model_validate(make_telegram_update(985001)),
+        {"webhook_update_scope": scope},
+    )
+    assert events == ["after_commit"]
+
+    async def failing(_event, data):
+        data["session"].info.setdefault("post_commit", []).append(
+            lambda: events.append("wrong")
+        )
+        raise RuntimeError("handler crash")
+
+    with pytest.raises(RuntimeError, match="handler crash"):
+        await middleware(
+            failing,
+            Update.model_validate(make_telegram_update(985002)),
+            {"webhook_update_scope": scope},
+        )
+    assert events == ["after_commit"]

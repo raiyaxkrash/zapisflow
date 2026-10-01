@@ -97,6 +97,11 @@ class TenantContextMiddleware(BaseMiddleware):
         if master_id is None or (settings.app_mode == "webhook" and bot_instance is None):
             logger.error("Fail-closed: update rejected without trusted tenant context")
             return None
+
+        if session is not None and bot_instance is not None:
+            # Outbox producers use only this verified server-side binding.
+            session.info["bot_instance_id"] = bot_instance.id
+            session.info["trusted_master_id"] = master_id
         if settings.app_mode == "webhook" and session is None:
             logger.error("Fail-closed: webhook update rejected without database session")
             return None

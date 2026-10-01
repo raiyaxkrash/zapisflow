@@ -127,10 +127,12 @@ async def cb_admin_service_toggle(
     keyboard = get_admin_service_card_keyboard(service)
 
     if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=keyboard)
+        session.info.setdefault("post_commit", []).append(
+            lambda: callback.message.edit_text(text=text, reply_markup=keyboard)
+        )
 
     msg = "Услуга включена 🟢" if new_status else "Услуга выключена 🔴"
-    await callback.answer(msg)
+    session.info.setdefault("post_commit", []).append(lambda: callback.answer(msg))
 
 
 @router.callback_query(AdminServiceCallback.filter(F.action == "archive"))
@@ -278,11 +280,13 @@ async def msg_admin_service_save_field(
 
     await session.flush()
     await session.refresh(service)
-    await state.clear()
+    session.info.setdefault("post_commit", []).append(state.clear)
 
     text = f"✅ <b>Параметр успешно обновлён!</b>\n\n" + format_service_card(service)
     keyboard = get_admin_service_card_keyboard(service)
-    await message.answer(text=text, reply_markup=keyboard)
+    session.info.setdefault("post_commit", []).append(
+        lambda: message.answer(text=text, reply_markup=keyboard)
+    )
 
 
 # --- Add Service Wizard ---
@@ -412,7 +416,7 @@ async def msg_add_service_finalize(
         return
 
     data = await state.get_data()
-    await state.clear()
+    session.info.setdefault("post_commit", []).append(state.clear)
 
     price = Decimal(data["price"])
     if deposit_val > price:
@@ -436,4 +440,6 @@ async def msg_add_service_finalize(
 
     text = f"🎉 <b>Новая услуга успешно создана!</b>\n\n" + format_service_card(new_service)
     keyboard = get_admin_service_card_keyboard(new_service)
-    await message.answer(text=text, reply_markup=keyboard)
+    session.info.setdefault("post_commit", []).append(
+        lambda: message.answer(text=text, reply_markup=keyboard)
+    )

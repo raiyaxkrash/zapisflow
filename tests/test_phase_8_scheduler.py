@@ -50,6 +50,7 @@ from app.database.models.notification import (
     NotificationStatus,
     NotificationType,
 )
+from app.database.models.telegram_outbox import TelegramOutbox
 from app.database.models.service import DepositType, Service
 from app.database.models.user import User
 from app.repositories.appointment_repository import AppointmentRepository
@@ -124,6 +125,13 @@ async def _create_master(
     return master
 
 
+async def _create_active_bot(session: AsyncSession, master_id: int) -> BotInstance:
+    instance = BotInstance(master_id=master_id, status=BotInstanceStatus.ACTIVE, is_current=True)
+    session.add(instance)
+    await session.flush()
+    return instance
+
+
 async def _create_service(
     session: AsyncSession, master_id: int, title: str = "Маникюр", price: Decimal = Decimal("2000.00")
 ) -> Service:
@@ -187,6 +195,7 @@ async def test_01_hold_cleaner_concurrent_skip_locked(pg_engine: AsyncEngine) ->
     async with session_maker() as session:
         owner = await _create_user(session, 91001, "Owner_Hold_1")
         master = await _create_master(session, owner.id, "Master_Hold_1")
+        await _create_active_bot(session, master.id)
         service = await _create_service(session, master.id, "Service_Hold_1")
 
         created_apps = []
@@ -220,6 +229,7 @@ async def test_01_hold_cleaner_concurrent_skip_locked(pg_engine: AsyncEngine) ->
     total_cleaned += sweep
 
     assert total_cleaned == 10
+    mock_bot.send_message.assert_not_awaited()
 
     # Verify database state
     async with session_maker() as session:
@@ -229,6 +239,11 @@ async def test_01_hold_cleaner_concurrent_skip_locked(pg_engine: AsyncEngine) ->
         for a in apps:
             assert a.status == AppointmentStatus.EXPIRED
             assert a.hold_until is None
+        outbox_rows = (await session.execute(select(TelegramOutbox).where(
+            TelegramOutbox.master_id == master.id,
+            TelegramOutbox.operation_type == "send_message",
+        ))).scalars().all()
+        assert len(outbox_rows) == 10
 
 
 @requires_postgres
@@ -246,6 +261,7 @@ async def test_02_hold_cleaner_protects_payment_proof_sent(pg_engine: AsyncEngin
         client3 = await _create_user(session, 92053, "Client_Future")
 
         master = await _create_master(session, owner.id, "Master_Hold_2")
+        await _create_active_bot(session, master.id)
         service = await _create_service(session, master.id, "Service_Hold_2")
 
         # 1. PAYMENT_PROOF_SENT with past hold
@@ -295,12 +311,18 @@ async def test_02_hold_cleaner_protects_payment_proof_sent(pg_engine: AsyncEngin
 
         re_future = await session.get(Appointment, app_future.id)
         assert re_future.status == AppointmentStatus.WAITING_PAYMENT
+        outbox_rows = (await session.execute(select(TelegramOutbox).where(
+            TelegramOutbox.master_id == master.id,
+        ))).scalars().all()
+        assert len(outbox_rows) == 1
+        assert outbox_rows[0].idempotency_key == f"appointment:{app_expired.id}:hold-expired:client"
+    mock_bot.send_message.assert_not_awaited()
 
 
 @requires_postgres
 @pytest.mark.asyncio
 async def test_03_hold_cleaner_tenant_bot_routing(pg_engine: AsyncEngine) -> None:
-    """Hold cleaner routes client notification via tenant's active bot from BotRegistry."""
+    """Hold cleaner queues notices under each tenant's active BotInstance."""
     session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
     now_utc = datetime.now(timezone.utc)
 
@@ -312,6 +334,8 @@ async def test_03_hold_cleaner_tenant_bot_routing(pg_engine: AsyncEngine) -> Non
 
         master_a = await _create_master(session, owner_a.id, "Master_A")
         master_b = await _create_master(session, owner_b.id, "Master_B")
+        instance_a = await _create_active_bot(session, master_a.id)
+        instance_b = await _create_active_bot(session, master_b.id)
         svc_a = await _create_service(session, master_a.id, "Service_A")
         svc_b = await _create_service(session, master_b.id, "Service_B")
 
@@ -350,11 +374,19 @@ async def test_03_hold_cleaner_tenant_bot_routing(pg_engine: AsyncEngine) -> Non
     cleaned = await clean_expired_holds(registry=mock_registry, session_maker=session_maker)
     assert cleaned == 2
 
-    bot_a.send_message.assert_awaited_once()
-    assert bot_a.send_message.call_args.kwargs["chat_id"] == client_a.telegram_id
-
-    bot_b.send_message.assert_awaited_once()
-    assert bot_b.send_message.call_args.kwargs["chat_id"] == client_b.telegram_id
+    bot_a.send_message.assert_not_awaited()
+    bot_b.send_message.assert_not_awaited()
+    async with session_maker() as session:
+        rows = (await session.execute(select(TelegramOutbox).where(
+            TelegramOutbox.idempotency_key.in_([
+                f"appointment:{app_a.id}:hold-expired:client",
+                f"appointment:{app_b.id}:hold-expired:client",
+            ])
+        ))).scalars().all()
+        assert {(row.master_id, row.bot_instance_id, row.target_chat_id) for row in rows} == {
+            (master_a.id, instance_a.id, client_a.telegram_id),
+            (master_b.id, instance_b.id, client_b.telegram_id),
+        }
 
 
 @requires_postgres
@@ -368,6 +400,7 @@ async def test_04_hold_cleaner_notification_failure_does_not_rollback_db(pg_engi
         owner = await _create_user(session, 91005, "Owner_Fail")
         client = await _create_user(session, 92071, "Client_Fail")
         master = await _create_master(session, owner.id, "Master_Fail")
+        await _create_active_bot(session, master.id)
         svc = await _create_service(session, master.id, "Service_Fail")
         app = await _create_appointment(
             session,
@@ -390,6 +423,11 @@ async def test_04_hold_cleaner_notification_failure_does_not_rollback_db(pg_engi
         rechecked = await session.get(Appointment, app.id)
         assert rechecked.status == AppointmentStatus.EXPIRED
         assert rechecked.hold_until is None
+        row = (await session.execute(select(TelegramOutbox).where(
+            TelegramOutbox.idempotency_key == f"appointment:{app.id}:hold-expired:client"
+        ))).scalar_one()
+        assert row.master_id == master.id
+    mock_bot.send_message.assert_not_awaited()
 
 
 @requires_postgres

@@ -278,7 +278,6 @@ async def msg_admin_client_save_note(
     """
     data = await state.get_data()
     user_id = data["user_id"]
-    await state.clear()
 
     mc_repo = MasterClientRepository(session)
     client = await mc_repo.get_client(master_id, user_id)
@@ -290,6 +289,7 @@ async def msg_admin_client_save_note(
     note_text = message.text.strip()
     await mc_repo.update_notes(master_id=master_id, user_id=user_id, notes=note_text)
     await session.flush()
+    session.info.setdefault("post_commit", []).append(state.clear)
 
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
@@ -300,4 +300,6 @@ async def msg_admin_client_save_note(
     )
     tg_id = user.telegram_id if (user.telegram_id and user.telegram_id > 0) else None
     keyboard = get_admin_client_card_keyboard(user_id=user.id, telegram_id=tg_id)
-    await message.answer(text=text, reply_markup=keyboard)
+    session.info.setdefault("post_commit", []).append(
+        lambda: message.answer(text=text, reply_markup=keyboard)
+    )

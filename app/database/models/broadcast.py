@@ -89,6 +89,7 @@ class BroadcastRecipient(Base):
     __tablename__ = "broadcast_recipients"
     __table_args__ = (
         Index("ix_broadcast_recipients_claim", "broadcast_id", "status"),
+        Index("ix_broadcast_recipients_retry", "status", "next_attempt_at"),
         Index(
             "uq_broadcast_recipients_active_campaign_user",
             "broadcast_id",
@@ -114,6 +115,7 @@ class BroadcastRecipient(Base):
     claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

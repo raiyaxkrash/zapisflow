@@ -33,6 +33,7 @@ from app.services.booking_service import BookingService
 from app.services.exceptions import BookingNotFoundError, InvalidBookingStatusError, SlotAlreadyBookedError
 from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.slot_engine import SlotEngine
+from app.services.telegram_outbox import bound_bot_instance_id, enqueue_telegram_message
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
 
 router = Router(name="admin_appointments")
@@ -248,7 +249,6 @@ async def cb_appointment_complete(
             master_id=master_id, appointment_id=callback_data.appointment_id
         )
     except (BookingNotFoundError, InvalidBookingStatusError) as exc:
-        await session.rollback()
         await callback.answer(str(exc), show_alert=True)
         return
 
@@ -258,11 +258,14 @@ async def cb_appointment_complete(
     keyboard = get_admin_appointment_card_keyboard(
         appointment, filter_type=callback_data.filter_type or "today"
     )
-    await session.commit()
 
     if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=keyboard)
-    await callback.answer("Запись успешно отмечена как выполненная! 🎉", show_alert=True)
+        session.info.setdefault("post_commit", []).append(
+            lambda: callback.message.edit_text(text=text, reply_markup=keyboard)
+        )
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer("Запись успешно отмечена как выполненная! 🎉", show_alert=True)
+    )
 
 
 @router.callback_query(AdminAppointmentCallback.filter(F.action == "no_show"))
@@ -280,7 +283,6 @@ async def cb_appointment_no_show(
             master_id=master_id, appointment_id=callback_data.appointment_id
         )
     except (BookingNotFoundError, InvalidBookingStatusError) as exc:
-        await session.rollback()
         await callback.answer(str(exc), show_alert=True)
         return
 
@@ -290,12 +292,13 @@ async def cb_appointment_no_show(
     keyboard = get_admin_appointment_card_keyboard(
         appointment, filter_type=callback_data.filter_type or "today"
     )
-    await session.commit()
 
     if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=keyboard)
-    await callback.answer(
-        "Клиент отмечен как NO-SHOW. Предоплата удержана.", show_alert=True
+        session.info.setdefault("post_commit", []).append(
+            lambda: callback.message.edit_text(text=text, reply_markup=keyboard)
+        )
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer("Клиент отмечен как NO-SHOW. Предоплата удержана.", show_alert=True)
     )
 
 
@@ -317,18 +320,15 @@ async def cb_appointment_cancel(
             reason="Отменено мастером через панель управления",
         )
     except (BookingNotFoundError, InvalidBookingStatusError) as exc:
-        await session.rollback()
         await callback.answer(str(exc), show_alert=True)
         return
 
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
     dt_str = format_datetime_ru(appointment.start_time, tz_name=tz_str)
-    await session.commit()
 
     # Notify client if Telegram ID is available
     if appointment.user and appointment.user.telegram_id:
-        try:
             client_msg = (
                 f"⚠️ <b>Ваша запись отменена мастером</b>\n\n"
                 f"🌸 <b>Услуга:</b> {appointment.snapshot_service_title}\n"
@@ -336,11 +336,12 @@ async def cb_appointment_cancel(
                 "Если у вас возникли вопросы или вы хотите перенести визит на другое время, "
                 "пожалуйста, свяжитесь с мастером 🌸"
             )
-            await bot.send_message(
-                chat_id=appointment.user.telegram_id, text=client_msg
+            await enqueue_telegram_message(
+                session, master_id=master_id,
+                bot_instance_id=bound_bot_instance_id(session, master_id),
+                chat_id=appointment.user.telegram_id, text=client_msg,
+                idempotency_key=f"appointment:{appointment.id}:cancelled-admin:client",
             )
-        except Exception:
-            pass
 
     text = format_appointment_card(appointment, tz_name=tz_str)
     keyboard = get_admin_appointment_card_keyboard(
@@ -348,8 +349,12 @@ async def cb_appointment_cancel(
     )
 
     if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=keyboard)
-    await callback.answer("Запись отменена. Клиент уведомлён ❌", show_alert=True)
+        session.info.setdefault("post_commit", []).append(
+            lambda: callback.message.edit_text(text=text, reply_markup=keyboard)
+        )
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer("Запись отменена. Клиенту отправлено уведомление ❌", show_alert=True)
+    )
 
 
 # --- Rescheduling Wizard ---
@@ -531,7 +536,7 @@ async def cb_reschedule_confirm_slot(
         await callback.answer(str(e), show_alert=True)
         return
 
-    await state.clear()
+    session.info.setdefault("post_commit", []).append(state.clear)
 
     settings_repo = MasterSettingsRepository(session)
     tz_str = await settings_repo.get_value(master_id, "timezone", settings.timezone)
@@ -539,25 +544,33 @@ async def cb_reschedule_confirm_slot(
 
     # Notify client
     if appointment.user and appointment.user.telegram_id:
-        try:
             client_msg = (
                 f"🗓 <b>Ваша запись перенесена мастером!</b>\n\n"
                 f"🌸 <b>Услуга:</b> {appointment.snapshot_service_title}\n"
                 f"⏰ <b>Новая дата и время:</b> {dt_str}\n\n"
                 "Ждём вас в назначенное время! ❤️"
             )
-            await bot.send_message(
-                chat_id=appointment.user.telegram_id, text=client_msg
+            await enqueue_telegram_message(
+                session, master_id=master_id,
+                bot_instance_id=bound_bot_instance_id(session, master_id),
+                chat_id=appointment.user.telegram_id, text=client_msg,
+                idempotency_key=(
+                    f"{session.info.get('webhook_update_scope', 'appointment')}:{session.info.get('webhook_update_id', new_start_time.isoformat())}:reschedule-client"
+                ),
             )
-        except Exception:
-            pass
 
     text = format_appointment_card(appointment, tz_name=tz_str)
-    keyboard = get_admin_appointment_card_keyboard(appointment, filter_type=filter_type)
+    keyboard = get_admin_appointment_card_keyboard(
+        appointment, filter_type=data.get("filter_type") or "today"
+    )
 
     if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=keyboard)
-    await callback.answer("Запись успешно перенесена! Клиент уведомлён ✅", show_alert=True)
+        session.info.setdefault("post_commit", []).append(
+            lambda: callback.message.edit_text(text=text, reply_markup=keyboard)
+        )
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer("Запись успешно перенесена! Клиенту отправлено уведомление ✅", show_alert=True)
+    )
 
 
 # --- Appointment Internal Note ---
@@ -613,7 +626,7 @@ async def msg_appointment_save_note(
     data = await state.get_data()
     appointment_id = data["appointment_id"]
     filter_type = data.get("filter_type", "today")
-    await state.clear()
+    session.info.setdefault("post_commit", []).append(state.clear)
 
     app_repo = AppointmentRepository(session)
     appointment = await app_repo.get_by_id_with_relations(appointment_id, master_id=master_id)

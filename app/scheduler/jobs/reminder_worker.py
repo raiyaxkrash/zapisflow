@@ -6,6 +6,7 @@ routes via dynamic tenant BotRegistry, and handles transient retries and permane
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from html import escape
 import logging
 from typing import Optional
 import uuid
@@ -30,6 +31,7 @@ from app.repositories.notification_repository import NotificationRepository
 from app.scheduler.jobs.reminder_generator import generate_visit_reminders
 from app.services.bot_registry import BotRegistry
 from app.services.exceptions import BotDisabledError, BotUnavailableError
+from app.utils.delivery_lock import REMINDER_LOCK_NAMESPACE, delivery_lock
 from app.utils.formatters import format_datetime_ru, format_rub, format_time_ru
 
 logger = logging.getLogger("app.scheduler.reminder_worker")
@@ -272,8 +274,9 @@ async def send_visit_reminders(
                 studio_address = (
                     m_settings.studio_address
                     if m_settings and m_settings.studio_address
-                    else "Адрес студии мастера"
+                    else None
                 )
+                address_line = f"📍 <b>Адрес:</b> {escape(studio_address)}\n" if studio_address else ""
 
                 if notif.type == NotificationType.REMINDER_24H:
                     dt_str = format_datetime_ru(app.start_time, tz_name=tz_str)
@@ -283,7 +286,7 @@ async def send_visit_reminders(
                         f"🌸 <b>Напоминание о записи на завтра!</b>\n\n"
                         f"Напоминаем, что вы записаны на <b>{app.snapshot_service_title}</b>:\n"
                         f"🗓 <b>Дата и время:</b> {dt_str}\n"
-                        f"📍 <b>Адрес:</b> {studio_address}\n"
+                        f"{address_line}"
                         f"💰 <b>К доплате на месте:</b> {rem_str}\n\n"
                         "Если ваши планы изменились, пожалуйста, предупредите мастера заранее ❤️"
                     )
@@ -293,33 +296,43 @@ async def send_visit_reminders(
                         f"⏰ <b>Скоро ваша запись!</b>\n\n"
                         f"Через несколько часов мы ждём вас на <b>{app.snapshot_service_title}</b>:\n"
                         f"🗓 <b>Время визита:</b> {time_str}\n"
-                        f"📍 <b>Адрес:</b> {studio_address}\n\n"
+                        f"{address_line}\n"
                         "Пожалуйста, приходите без опозданий. До скорой встречи! 🌸"
                     )
                 else:
                     msg_text = f"Напоминание о записи #{app.id} ({app.snapshot_service_title})"
 
-                # Hold the PostgreSQL row lock until the Telegram call and its
-                # outcome commit. A failed heartbeat cannot make an in-flight
-                # send reclaimable by another replica.
+                # A PostgreSQL session-level advisory lock coordinates live
+                # replicas without keeping a transaction open over Telegram.
+                # The committed claim and CAS status transition are durable;
+                # a crash after Telegram accepts the send can still retry it.
                 delivered = False
                 marked_sent = False
-                async with session_maker() as session:
-                    async with session.begin():
+                engine = session_maker.kw["bind"]
+                async with delivery_lock(engine, REMINDER_LOCK_NAMESPACE, notification_id) as acquired:
+                    if not acquired:
+                        continue
+                    async with session_maker() as session:
                         repo = NotificationRepository(session)
-                        if not await repo.lock_owned_claim(notification_id, actual_worker_id, claim_attempt):
-                            logger.info("Reminder #%s claim was superseded before send", notification_id)
-                            continue
-                        try:
-                            await target_bot.send_message(chat_id=user.telegram_id, text=msg_text)
-                            delivered = True
-                            marked_sent = await repo.mark_sent(
+                        still_owned = await repo.renew_claim(notification_id, actual_worker_id, claim_attempt)
+                        await session.commit()
+                    if not still_owned:
+                        logger.info("Reminder #%s claim was superseded before send", notification_id)
+                        continue
+                    try:
+                        await target_bot.send_message(chat_id=user.telegram_id, text=msg_text)
+                        delivered = True
+                        async with session_maker() as session:
+                            marked_sent = await NotificationRepository(session).mark_sent(
                                 notification_id, actual_worker_id, claim_attempt
                             )
-                        except TelegramForbiddenError:
-                            logger.warning(
-                                "Bot blocked by user %s on reminder #%s", user.telegram_id, notification_id
-                            )
+                            await session.commit()
+                    except TelegramForbiddenError:
+                        logger.warning(
+                            "Bot blocked by user %s on reminder #%s", user.telegram_id, notification_id
+                        )
+                        async with session_maker() as session:
+                            repo = NotificationRepository(session)
                             mc_res = await session.execute(
                                 select(MasterClient).where(
                                     MasterClient.master_id == app.master_id,
@@ -334,27 +347,32 @@ async def send_visit_reminders(
                                 actual_worker_id, claim_attempt,
                                 retry_delay_seconds=None, max_attempts=actual_max_attempts,
                             )
-                        except TelegramRetryAfter as exc:
-                            logger.warning(
-                                "Telegram rate limited reminder #%s, retry after %s s",
-                                notification_id, exc.retry_after,
-                            )
-                            await repo.mark_failed(
+                            await session.commit()
+                    except TelegramRetryAfter as exc:
+                        logger.warning(
+                            "Telegram rate limited reminder #%s, retry after %s s",
+                            notification_id, exc.retry_after,
+                        )
+                        async with session_maker() as session:
+                            await NotificationRepository(session).mark_failed(
                                 notification_id, f"Rate limited: retry after {exc.retry_after}s",
                                 actual_worker_id, claim_attempt,
                                 retry_delay_seconds=int(exc.retry_after) + 1,
                                 max_attempts=actual_max_attempts,
                             )
-                        except Exception as exc:
-                            delay = 30 * (2 ** notif.attempt_count)
-                            logger.warning(
-                                "Error delivering reminder #%s (attempt %s): %s",
-                                notification_id, notif.attempt_count, exc,
-                            )
-                            await repo.mark_failed(
+                            await session.commit()
+                    except Exception as exc:
+                        delay = 30 * (2 ** notif.attempt_count)
+                        logger.warning(
+                            "Error delivering reminder #%s (attempt %s): %s",
+                            notification_id, notif.attempt_count, exc,
+                        )
+                        async with session_maker() as session:
+                            await NotificationRepository(session).mark_failed(
                                 notification_id, str(exc), actual_worker_id, claim_attempt,
                                 retry_delay_seconds=delay, max_attempts=actual_max_attempts,
                             )
+                            await session.commit()
 
                 if delivered:
                     if not marked_sent:

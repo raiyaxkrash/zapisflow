@@ -129,9 +129,7 @@ def get_my_appointments_keyboard(
     return builder.as_markup()
 
 
-def get_appointment_detail_keyboard(
-    appointment: Appointment, master_contact_url: str
-) -> InlineKeyboardMarkup:
+def get_appointment_detail_keyboard(appointment: Appointment) -> InlineKeyboardMarkup:
     """
     Detailed appointment actions: cancellation, contact master, or back.
     """
@@ -154,8 +152,8 @@ def get_appointment_detail_keyboard(
 
     builder.row(
         InlineKeyboardButton(
-            text="📞 Связаться с мастером",
-            url=master_contact_url,
+            text="📞 Контакты",
+            callback_data=MenuCallback(action="contact").pack(),
         )
     )
 
