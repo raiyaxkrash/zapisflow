@@ -1,6 +1,7 @@
 """Command and callback handlers for platform Manager Bot."""
 
 from datetime import datetime, timedelta, timezone
+from html import escape
 import logging
 from typing import Any, Dict, Optional
 
@@ -91,7 +92,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession) 
         await message.answer(text, reply_markup=main_menu_keyboard())
     else:
         text = (
-            f"👋 Здравствуйте, <b>{user.first_name}</b>!\n\n"
+            f"👋 Здравствуйте, <b>{escape(user.first_name)}</b>!\n\n"
             "Выберите проект для управления или создайте новый:"
         )
         await message.answer(text, reply_markup=project_list_keyboard(masters))
@@ -109,9 +110,13 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext, session: Asyn
     """Return to main menu."""
     await state.clear()
     user = await _get_or_create_user(session, callback.from_user)
-    text = f"<b>Beauty Bot Manager</b> — панель управления проектами ({user.first_name}):"
-    await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
+    text = f"<b>Beauty Bot Manager</b> — панель управления проектами ({escape(user.first_name)}):"
     await callback.answer()
+    try:
+        await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 @manager_router.callback_query(F.data == "mgr:help")
@@ -124,8 +129,12 @@ async def cb_help(callback: CallbackQuery) -> None:
         "3. <b>Настройте услуги и расписание</b> — откройте созданного бота по deep link.\n"
         "4. <b>Запустите приём записей</b> — когда всё готово, активируйте бота в этом меню."
     )
-    await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
     await callback.answer()
+    try:
+        await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 @manager_router.callback_query(F.data == "mgr:projects")

@@ -41,12 +41,21 @@ class SensitiveDataFilter(logging.Filter):
 
 def sanitize_log_record(record: logging.LogRecord) -> logging.LogRecord:
     """Redact the rendered message and traceback before any handler formats them."""
-    try:
-        record.msg = redact_token(record.getMessage())
-        record.args = ()
-    except Exception:
-        if isinstance(record.msg, str):
-            record.msg = redact_token(record.msg)
+    if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) == 5:
+        # Uvicorn's AccessFormatter unpacks the five structured arguments.
+        # Preserve their shape while redacting any token-bearing path/address.
+        record.msg = redact_token(record.msg)
+        record.args = tuple(redact_token(arg) if isinstance(arg, str) else arg for arg in record.args)
+    else:
+        try:
+            record.msg = redact_token(record.getMessage())
+            record.args = ()
+        except Exception:
+            if isinstance(record.msg, str):
+                record.msg = redact_token(record.msg)
+            # A malformed third-party format string must not escape the filter
+            # with unsanitized arguments or fail again in the formatter.
+            record.args = ()
 
     if record.exc_info:
         # Formatter normally builds exc_text after filters have run. Precompute the
