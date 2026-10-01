@@ -59,7 +59,7 @@ class Service(Base, TimestampMixin):
         default=DepositType.FIXED,
         nullable=False,
     )
-    deposit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    deposit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0.00"), nullable=False)
     
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)

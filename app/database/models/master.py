@@ -79,6 +79,7 @@ class Master(Base):
         nullable=False,
     )
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow", nullable=False)
+    activity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     trial_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     paid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

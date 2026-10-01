@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.client import MenuCallback
 from app.config.settings import settings as app_settings
 from app.repositories.master_settings_repository import MasterSettingsRepository
+from app.services.crm_service import MasterCrmService
 from app.services.master_contacts import contact_phone_e164, render_contacts
 from app.services.telegram_outbox import bound_bot_instance_id, enqueue_telegram_contact
 
@@ -119,3 +120,58 @@ async def cb_contact_call(
     else:
         await callback.message.answer_contact(phone_number=phone, first_name="Мастер")
         await callback.answer()
+
+
+@router.callback_query(MenuCallback.filter(F.action == "reviews"))
+async def cb_client_reviews(
+    callback: CallbackQuery, session: AsyncSession, master_id: int
+) -> None:
+    """Display master reviews and rating summary for clients."""
+    crm_svc = MasterCrmService(session)
+    summary = await crm_svc.get_reviews_summary(master_id, limit=5)
+
+    avg_r = summary.get("average_rating")
+    cnt = summary.get("total_reviews", 0)
+
+    if cnt > 0 and avg_r is not None:
+        stars_bar = "⭐" * round(avg_r)
+        text = (
+            f"⭐ <b>Отзывы о мастере</b>\n\n"
+            f"Рейтинг: <b>{avg_r:.1f}</b> {stars_bar}\n"
+            f"Всего отзывов: <b>{cnt}</b>\n\n"
+            f"💬 <b>Последние отзывы:</b>\n\n"
+        )
+        for r in summary.get("recent_reviews", []):
+            u_name = html.escape(r.get("user_name") or "Клиент")
+            stars = "⭐" * r.get("rating", 5)
+            dt_str = r.get("created_at") or ""
+            c_text = f"\n«{html.escape(r['comment'])}»" if r.get("comment") else ""
+            text += f"• <b>{u_name}</b> {stars} ({dt_str}){c_text}\n\n"
+    else:
+        text = (
+            "⭐ <b>Отзывы клиентов</b>\n\n"
+            "Пока отзывов нет. Вы сможете оставить свой отзыв сразу после посещения процедуры! ✨"
+        )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📅 Записаться",
+                    callback_data=MenuCallback(action="book").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="🏠 В главное меню",
+                    callback_data=MenuCallback(action="main").pack(),
+                ),
+            ]
+        ]
+    )
+
+    if callback.message:
+        if callback.message.photo:
+            await callback.message.delete()
+            await callback.message.answer(text=text, reply_markup=keyboard)
+        else:
+            await callback.message.edit_text(text=text, reply_markup=keyboard)
+    await callback.answer()

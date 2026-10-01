@@ -1,7 +1,9 @@
 """Tenant-scoped Master CRM service for client management, segmentation, reviews and finances."""
 
+import csv
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
+import io
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import pytz
 from sqlalchemy import case, distinct, func, or_, select, update
@@ -514,3 +516,183 @@ class MasterCrmService:
             "avg_ticket": metrics["avg_ticket"],
             "top_services": metrics["top_services"],
         }
+
+    # -------------------------------------------------------------------------
+    # 7. DASHBOARD «СЕГОДНЯ»
+    # -------------------------------------------------------------------------
+    async def get_today_dashboard(self, master_id: int) -> Dict[str, Any]:
+        """Aggregate today's summary metrics and next upcoming appointment for master dashboard."""
+        tz = await self._get_timezone(master_id)
+        now_local = datetime.now(tz)
+        today = now_local.date()
+        start_dt = tz.localize(datetime.combine(today, time.min)).astimezone(timezone.utc)
+        end_dt = tz.localize(datetime.combine(today, time.max)).astimezone(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+
+        # 1. Today's aggregate counts
+        stmt = (
+            select(
+                func.count(Appointment.id).label("total_today"),
+                func.count().filter(Appointment.status == AppointmentStatus.COMPLETED).label("completed_today"),
+                func.coalesce(
+                    func.sum(case((Appointment.status == AppointmentStatus.COMPLETED, Appointment.snapshot_service_price), else_=0)),
+                    0
+                ).label("revenue_today"),
+                func.count(distinct(Appointment.user_id)).label("unique_clients_today"),
+            )
+            .where(
+                Appointment.master_id == master_id,
+                Appointment.start_time >= start_dt,
+                Appointment.start_time <= end_dt,
+                ~Appointment.status.in_([
+                    AppointmentStatus.CANCELLED_BY_CLIENT,
+                    AppointmentStatus.CANCELLED_BY_ADMIN,
+                    AppointmentStatus.EXPIRED,
+                ]),
+            )
+        )
+        res = await self.session.execute(stmt)
+        row = res.one()
+
+        total_today = row.total_today or 0
+        revenue_today = Decimal(row.revenue_today or 0)
+        unique_clients_today = row.unique_clients_today or 0
+
+        # New clients today: users whose earliest appointment for this master is today
+        new_clients_count = 0
+        if unique_clients_today > 0:
+            today_users_subq = (
+                select(distinct(Appointment.user_id))
+                .where(
+                    Appointment.master_id == master_id,
+                    Appointment.start_time >= start_dt,
+                    Appointment.start_time <= end_dt,
+                )
+                .scalar_subquery()
+            )
+            prior_app_exists = (
+                select(distinct(Appointment.user_id))
+                .where(
+                    Appointment.master_id == master_id,
+                    Appointment.user_id.in_(today_users_subq),
+                    Appointment.start_time < start_dt,
+                )
+            )
+            prior_users = set((await self.session.scalars(prior_app_exists)).all())
+            all_today_users = set((await self.session.scalars(
+                select(distinct(Appointment.user_id))
+                .where(
+                    Appointment.master_id == master_id,
+                    Appointment.start_time >= start_dt,
+                    Appointment.start_time <= end_dt,
+                )
+            )).all())
+            new_clients_count = len(all_today_users - prior_users)
+
+        # 2. Next upcoming appointment today
+        next_stmt = (
+            select(Appointment)
+            .where(
+                Appointment.master_id == master_id,
+                Appointment.start_time >= now_utc,
+                Appointment.start_time <= end_dt,
+                Appointment.status.in_([AppointmentStatus.CONFIRMED, AppointmentStatus.COMPLETED]),
+            )
+            .options(selectinload(Appointment.user), selectinload(Appointment.service))
+            .order_by(Appointment.start_time.asc())
+            .limit(1)
+        )
+        next_app = (await self.session.execute(next_stmt)).scalars().first()
+        next_info = None
+        if next_app:
+            local_start = next_app.start_time.astimezone(tz)
+            u_name = next_app.user.first_name if next_app.user else "Клиент"
+            s_title = next_app.service.title if next_app.service else "Услуга"
+            next_info = {
+                "time_str": local_start.strftime("%H:%M"),
+                "client_name": u_name,
+                "service_title": s_title,
+            }
+
+        return {
+            "total_today": total_today,
+            "revenue_today": revenue_today,
+            "unique_clients_today": unique_clients_today,
+            "new_clients_today": new_clients_count,
+            "next_appointment": next_info,
+        }
+
+    # -------------------------------------------------------------------------
+    # 8. CSV EXPORT (TENANT-SCOPED)
+    # -------------------------------------------------------------------------
+    async def export_clients_csv(self, master_id: int) -> str:
+        """Export all clients of a master to CSV with UTF-8 BOM strictly isolated to master_id."""
+        app_subq = (
+            select(
+                Appointment.user_id.label("uid"),
+                func.count(Appointment.id).label("total_cnt"),
+                func.count().filter(Appointment.status == AppointmentStatus.COMPLETED).label("completed_cnt"),
+                func.coalesce(
+                    func.sum(case((Appointment.status == AppointmentStatus.COMPLETED, Appointment.snapshot_service_price), else_=0)),
+                    0,
+                ).label("spent_sum"),
+                func.min(Appointment.start_time).label("first_visit"),
+                func.max(Appointment.start_time).label("last_visit"),
+            )
+            .where(Appointment.master_id == master_id)
+            .group_by(Appointment.user_id)
+            .subquery()
+        )
+
+        query = (
+            select(
+                MasterClient,
+                User,
+                func.coalesce(app_subq.c.total_cnt, 0).label("total_cnt"),
+                func.coalesce(app_subq.c.completed_cnt, 0).label("completed_cnt"),
+                func.coalesce(app_subq.c.spent_sum, 0).label("spent_sum"),
+                app_subq.c.first_visit,
+                app_subq.c.last_visit,
+            )
+            .join(User, MasterClient.user_id == User.id)
+            .outerjoin(app_subq, MasterClient.user_id == app_subq.c.uid)
+            .where(MasterClient.master_id == master_id)
+            .order_by(MasterClient.created_at.desc())
+        )
+        res = await self.session.execute(query)
+        rows = res.all()
+
+        output = io.StringIO()
+        output.write("\ufeff")
+        writer = csv.writer(output, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+        writer.writerow([
+            "Имя",
+            "Фамилия",
+            "Телефон",
+            "Telegram",
+            "Всего записей",
+            "Завершено",
+            "LTV (₽)",
+            "Первый визит",
+            "Последний визит",
+            "Заметки мастера",
+        ])
+
+        for client, user, total_cnt, completed_cnt, spent_sum, first_v, last_v in rows:
+            first_str = first_v.strftime("%d.%m.%Y") if first_v else (client.first_visit_at.strftime("%d.%m.%Y") if client.first_visit_at else "—")
+            last_str = last_v.strftime("%d.%m.%Y") if last_v else (client.last_visit_at.strftime("%d.%m.%Y") if client.last_visit_at else "—")
+            tg_str = f"@{user.username}" if user.username else f"id:{user.telegram_id}"
+            writer.writerow([
+                user.first_name or "",
+                user.last_name or "",
+                user.phone or "",
+                tg_str,
+                total_cnt,
+                completed_cnt,
+                float(spent_sum or 0),
+                first_str,
+                last_str,
+                client.notes or "",
+            ])
+
+        return output.getvalue()

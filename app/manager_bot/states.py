@@ -38,3 +38,51 @@ class MasterContactStates(StatesGroup):
     """FSM states for editing master contacts in Manager Bot."""
 
     waiting_for_value = State()
+
+
+class MasterOnboardingStates(StatesGroup):
+    """FSM states for guided onboarding wizard."""
+
+    waiting_for_activity_type = State()
+    waiting_for_address = State()
+    waiting_for_phone = State()
+    waiting_for_service_title = State()
+    waiting_for_service_price = State()
+    waiting_for_service_duration = State()
+    waiting_for_schedule = State()
+
+
+class ManagerServiceStates(StatesGroup):
+    """FSM states for managing services in Manager Bot."""
+
+    waiting_for_title = State()
+    waiting_for_price = State()
+    waiting_for_duration = State()
+    waiting_for_buffer = State()
+    waiting_for_deposit_value = State()
+    waiting_for_edit_field_value = State()
+
+
+class ManagerPortfolioStates(StatesGroup):
+    """FSM states for managing portfolio in Manager Bot."""
+
+    waiting_for_category_title = State()
+    waiting_for_photo = State()
+    waiting_for_caption = State()
+
+
+class ManagerScheduleStates(StatesGroup):
+    """FSM states for managing schedule in Manager Bot."""
+
+    waiting_for_hours = State()
+    waiting_for_break = State()
+    waiting_for_day_off_date = State()
+    waiting_for_horizon_days = State()
+    waiting_for_advance_hours = State()
+
+
+class ManagerSettingsStates(StatesGroup):
+    """FSM states for editing general project settings."""
+
+    waiting_for_name = State()
+    waiting_for_description = State()

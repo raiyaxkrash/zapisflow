@@ -9,16 +9,20 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
 from app.core.security import mask_token
 from app.core.token_crypto import TokenCrypto
 from app.database.models.master import BotInstanceStatus, Master, MasterSettings, MasterStatus, SubscriptionStatus
+from app.database.models.portfolio import PortfolioCategory, PortfolioItem
+from app.database.models.schedule import ScheduleTemplate
+from app.database.models.service import DepositType, Service
 from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPayment, SubscriptionPlan
 from app.database.models.user import User
 from app.manager_bot.keyboards import (
+    ACTIVITY_TYPE_NAMES,
     admin_bot_detail_keyboard,
     admin_bots_keyboard,
     admin_dashboard_keyboard,
@@ -45,6 +49,20 @@ from app.manager_bot.keyboards import (
     main_menu_keyboard,
     manager_contact_cancel_keyboard,
     manager_contacts_keyboard,
+    manager_notification_settings_keyboard,
+    manager_portfolio_categories_keyboard,
+    manager_portfolio_item_detail_keyboard,
+    manager_portfolio_items_keyboard,
+    manager_prepayment_settings_keyboard,
+    manager_schedule_menu_keyboard,
+    manager_service_detail_keyboard,
+    manager_services_list_keyboard,
+    manager_settings_menu_keyboard,
+    onboarding_activity_type_keyboard,
+    onboarding_completion_keyboard,
+    onboarding_schedule_keyboard,
+    onboarding_skip_keyboard,
+    onboarding_suggested_service_keyboard,
     project_card_keyboard,
     project_list_keyboard,
     reviews_keyboard,
@@ -71,11 +89,20 @@ from app.manager_bot.states import (
     CreateMasterStates,
     CrmNoteStates,
     CrmSearchStates,
+    ManagerPortfolioStates,
+    ManagerScheduleStates,
+    ManagerServiceStates,
+    ManagerSettingsStates,
     MasterContactStates,
+    MasterOnboardingStates,
     RotateTokenStates,
 )
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.repositories.master_repository import MasterRepository
+from app.repositories.master_settings_repository import MasterSettingsRepository
+from app.repositories.portfolio_repository import PortfolioRepository
+from app.repositories.schedule_repository import ScheduleRepository
+from app.repositories.service_repository import ServiceRepository
 from app.repositories.user_repository import UserRepository
 from app.services.audit_service import AuditEvent, AuditService
 from app.services.bot_provisioning_service import BotProvisioningService
@@ -96,6 +123,28 @@ from app.services.telegram_provisioning_gateway import BotIdentity, TelegramProv
 logger = logging.getLogger("app.manager_bot")
 
 manager_router = Router(name="manager_bot_router")
+
+DEFAULT_PORTFOLIO_CATEGORIES: Dict[str, list[str]] = {
+    "nails": ["Маникюр", "Педикюр", "Дизайн ногтей"],
+    "lashes": ["Классика", "Объёмное наращивание (2D/3D)", "Ламинирование"],
+    "brows": ["Коррекция и окрашивание", "Долговременная укладка"],
+    "barber": ["Мужская стрижка", "Оформление бороды", "Комплекс"],
+    "hair": ["Женская стрижка", "Окрашивание", "Укладка"],
+    "makeup": ["Дневной макияж", "Вечерний макияж", "Свадебный образ"],
+    "cosmetology": ["Чистка лица", "Пилинги", "Уходовые процедуры"],
+    "other": ["Примеры работ", "До и После"],
+}
+
+DEFAULT_SERVICE_SUGGESTIONS: Dict[str, Dict[str, Any]] = {
+    "nails": {"title": "Маникюр с покрытием гель-лак", "price": 2000, "duration_min": 90, "buffer_min": 15},
+    "lashes": {"title": "Классическое наращивание ресниц", "price": 2500, "duration_min": 120, "buffer_min": 15},
+    "brows": {"title": "Комплекс: коррекция + окрашивание бровей", "price": 1500, "duration_min": 45, "buffer_min": 15},
+    "barber": {"title": "Мужская стрижка", "price": 1800, "duration_min": 45, "buffer_min": 15},
+    "hair": {"title": "Стрижка и укладка", "price": 2500, "duration_min": 60, "buffer_min": 15},
+    "makeup": {"title": "Вечерний макияж", "price": 3000, "duration_min": 60, "buffer_min": 15},
+    "cosmetology": {"title": "Комбинированная чистка лица", "price": 3500, "duration_min": 90, "buffer_min": 15},
+    "other": {"title": "Основная услуга", "price": 2000, "duration_min": 60, "buffer_min": 15},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -290,19 +339,405 @@ async def msg_new_master_name(message: Message, state: FSMContext, session: Asyn
         )
 
     text = (
-        f"✅ <b>Проект «{name}» успешно создан!</b>\n\n"
+        f"✅ <b>Проект «{escape(name)}» успешно создан!</b>\n\n"
         f"{trial_text}"
-        "Следующий шаг — подключите Telegram-бота для приёма записей клиентов."
+        "🎯 <b>Шаг 1 из 4: Выберите сферу деятельности:</b>\n"
+        "Это поможет настроить категории портфолио и примеры услуг:"
     )
-    bot_repo = BotInstanceRepository(session)
-    bot_instance = await bot_repo.get_current_for_master(master.id)
-    keyboard = project_card_keyboard(master, bot_instance)
+    keyboard = onboarding_activity_type_keyboard(master.id)
     if session.info.get("webhook_update_scope") is not None:
         session.info.setdefault("post_commit", []).append(
             lambda: message.answer(text, reply_markup=keyboard)
         )
     else:
         await message.answer(text, reply_markup=keyboard)
+
+
+# ---------------------------------------------------------------------------
+# Guided Master Onboarding Flow
+# ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.startswith("mgr:ob:act:"))
+async def cb_onboarding_activity_type(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Step 1: Activity type selected. Populate default portfolio categories and ask for address."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    act_type = parts[4]
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    master.activity_type = act_type
+    await session.flush()
+
+    # Seed default portfolio categories for this activity type
+    port_repo = PortfolioRepository(session)
+    existing_cats = await port_repo.list_categories(master_id, active_only=False)
+    if not existing_cats:
+        cats = DEFAULT_PORTFOLIO_CATEGORIES.get(act_type, DEFAULT_PORTFOLIO_CATEGORIES["other"])
+        for idx, cat_title in enumerate(cats, start=1):
+            await port_repo.create_category(master_id, cat_title, display_order=idx)
+
+    await state.update_data(onboarding_master_id=master_id, activity_type=act_type)
+    await state.set_state(MasterOnboardingStates.waiting_for_address)
+
+    act_label = ACTIVITY_TYPE_NAMES.get(act_type, act_type)
+    text = (
+        f"🎯 Сфера: <b>{act_label}</b>\n\n"
+        "📍 <b>Шаг 2 из 4: Адрес студии / кабинета</b>\n\n"
+        "Напишите адрес или район, где вы принимаете клиентов\n"
+        "(например: <i>г. Москва, ул. Тверская 12, оф. 305</i>):\n\n"
+        "<i>Или нажмите «Пропустить», если принимаете на дому или адрес пока не готов:</i>"
+    )
+    await callback.message.edit_text(text, reply_markup=onboarding_skip_keyboard(master_id, "address"))
+    await callback.answer()
+
+
+@manager_router.message(MasterOnboardingStates.waiting_for_address)
+async def msg_onboarding_address(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Step 2 (address input): Save address and ask for contact phone."""
+    data = await state.get_data()
+    master_id = data.get("onboarding_master_id")
+    if not master_id:
+        await state.clear()
+        await message.answer("Сессия устарела. Откройте проект заново.", reply_markup=main_menu_keyboard())
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await message.answer("Ошибка доступа.")
+        return
+
+    addr = (message.text or "").strip()
+    if addr and len(addr) <= 500:
+        settings_repo = MasterSettingsRepository(session)
+        await settings_repo.update(master_id, studio_address=addr)
+
+    await state.set_state(MasterOnboardingStates.waiting_for_phone)
+    text = (
+        "📞 <b>Шаг 2.1: Рабочий телефон / WhatsApp</b>\n\n"
+        "Укажите номер телефона для связи с клиентами\n"
+        "(например: <i>+79991234567</i>):"
+    )
+    await message.answer(text, reply_markup=onboarding_skip_keyboard(master_id, "phone"))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:ob:skip:"))
+async def cb_onboarding_skip(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Handle skipping an optional onboarding step."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    step = parts[4]
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    await callback.answer()
+
+    if step == "address":
+        await state.set_state(MasterOnboardingStates.waiting_for_phone)
+        text = (
+            "📞 <b>Шаг 2.1: Рабочий телефон / WhatsApp</b>\n\n"
+            "Укажите номер телефона для связи с клиентами\n"
+            "(например: <i>+79991234567</i>):"
+        )
+        await callback.message.edit_text(text, reply_markup=onboarding_skip_keyboard(master_id, "phone"))
+
+    elif step == "phone":
+        data = await state.get_data()
+        act_type = data.get("activity_type") or master.activity_type or "other"
+        sugg = DEFAULT_SERVICE_SUGGESTIONS.get(act_type, DEFAULT_SERVICE_SUGGESTIONS["other"])
+        await state.update_data(
+            suggested_title=sugg["title"],
+            suggested_price=sugg["price"],
+            suggested_duration=sugg["duration_min"],
+        )
+        await state.set_state(MasterOnboardingStates.waiting_for_service_title)
+
+        text = (
+            "💅 <b>Шаг 3 из 4: Первая услуга в прайс-листе</b>\n\n"
+            f"Мы подготовили базовый вариант для вашей сферы:\n"
+            f"• <b>Название:</b> {escape(sugg['title'])}\n"
+            f"• <b>Стоимость:</b> {sugg['price']} ₽\n"
+            f"• <b>Длительность:</b> {sugg['duration_min']} мин.\n\n"
+            "Вы можете добавить её в 1 клик или ввести своё название:"
+        )
+        await callback.message.edit_text(text, reply_markup=onboarding_suggested_service_keyboard(master_id))
+
+    elif step == "service":
+        await state.set_state(MasterOnboardingStates.waiting_for_schedule)
+        text = (
+            "📅 <b>Шаг 4 из 4: График приёма клиентов</b>\n\n"
+            "Базовый график:\n"
+            "• <b>Понедельник — Пятница:</b> 10:00 – 19:00\n"
+            "• <b>Перерыв:</b> 14:00 – 15:00\n"
+            "• <b>Суббота и Воскресенье:</b> Выходной\n\n"
+            "Принять базовый график?"
+        )
+        await callback.message.edit_text(text, reply_markup=onboarding_schedule_keyboard(master_id))
+
+    elif step == "schedule":
+        await state.clear()
+        bot_repo = BotInstanceRepository(session)
+        bot_instance = await bot_repo.get_current_for_master(master_id)
+        text = (
+            f"🎉 <b>Ваш проект «{escape(master.display_name)}» готов к работе!</b>\n\n"
+            "Теперь ваши клиенты смогут:\n"
+            "📅 Записываться на услуги онлайн\n"
+            "💳 Вносить предоплату\n"
+            "🔔 Получать автоматические напоминания\n"
+            "⭐ Оставлять отзывы о визитах\n\n"
+            "Подключите вашего бота, чтобы запустить онлайн-запись:"
+        )
+        await callback.message.edit_text(text, reply_markup=onboarding_completion_keyboard(master_id, bot_instance))
+
+
+@manager_router.message(MasterOnboardingStates.waiting_for_phone)
+async def msg_onboarding_phone(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Step 2.1 (phone input): Save phone and prompt for first service."""
+    data = await state.get_data()
+    master_id = data.get("onboarding_master_id")
+    if not master_id:
+        await state.clear()
+        await message.answer("Сессия устарела. Откройте проект заново.", reply_markup=main_menu_keyboard())
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await message.answer("Ошибка доступа.")
+        return
+
+    phone = (message.text or "").strip()
+    if phone and len(phone) <= 64:
+        settings_repo = MasterSettingsRepository(session)
+        await settings_repo.update(master_id, studio_phone=phone, whatsapp_phone=phone)
+
+    act_type = data.get("activity_type") or master.activity_type or "other"
+    sugg = DEFAULT_SERVICE_SUGGESTIONS.get(act_type, DEFAULT_SERVICE_SUGGESTIONS["other"])
+    await state.update_data(
+        suggested_title=sugg["title"],
+        suggested_price=sugg["price"],
+        suggested_duration=sugg["duration_min"],
+    )
+    await state.set_state(MasterOnboardingStates.waiting_for_service_title)
+
+    text = (
+        "💅 <b>Шаг 3 из 4: Первая услуга в прайс-листе</b>\n\n"
+        f"Мы подготовили базовый вариант для вашей сферы:\n"
+        f"• <b>Название:</b> {escape(sugg['title'])}\n"
+        f"• <b>Стоимость:</b> {sugg['price']} ₽\n"
+        f"• <b>Длительность:</b> {sugg['duration_min']} мин.\n\n"
+        "Вы можете добавить её в 1 клик или ввести своё название:"
+    )
+    await message.answer(text, reply_markup=onboarding_suggested_service_keyboard(master_id))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:ob:srv:accept:"))
+async def cb_onboarding_accept_service(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Step 3: Accept suggested service."""
+    master_id = int(callback.data.split(":")[4])
+    user = await _get_or_create_user(session, callback.from_user)
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    title = data.get("suggested_title") or "Основная услуга"
+    price = data.get("suggested_price") or 2000
+    dur = data.get("suggested_duration") or 60
+
+    srv_repo = ServiceRepository(session)
+    await srv_repo.create_service(
+        master_id=master_id,
+        title=title,
+        price=price,
+        duration_min=dur,
+        buffer_min=15,
+        deposit_type=DepositType.PERCENT,
+        deposit_value=0,
+        is_active=True,
+    )
+
+    await state.set_state(MasterOnboardingStates.waiting_for_schedule)
+    text = (
+        f"✅ Услуга <b>«{escape(title)}»</b> ({price} ₽) добавлена!\n\n"
+        "📅 <b>Шаг 4 из 4: График приёма клиентов</b>\n\n"
+        "Базовый график:\n"
+        "• <b>Понедельник — Пятница:</b> 10:00 – 19:00\n"
+        "• <b>Перерыв:</b> 14:00 – 15:00\n"
+        "• <b>Суббота и Воскресенье:</b> Выходной\n\n"
+        "Принять базовый график?"
+    )
+    await callback.message.edit_text(text, reply_markup=onboarding_schedule_keyboard(master_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:ob:srv:custom:"))
+async def cb_onboarding_custom_service(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt for custom service title."""
+    master_id = int(callback.data.split(":")[4])
+    await state.set_state(MasterOnboardingStates.waiting_for_service_title)
+    text = (
+        "✏️ <b>Введите название вашей услуги</b>\n"
+        "(например: <i>Снятие + Маникюр + Покрытие</i> или <i>Мужская стрижка Fade</i>):"
+    )
+    await callback.message.edit_text(text, reply_markup=onboarding_skip_keyboard(master_id, "service"))
+    await callback.answer()
+
+
+@manager_router.message(MasterOnboardingStates.waiting_for_service_title)
+async def msg_onboarding_custom_service_title(message: Message, state: FSMContext) -> None:
+    """Save custom service title and ask for price."""
+    title = (message.text or "").strip()
+    if not title or len(title) > 255:
+        await message.answer("Название должно содержать от 2 до 255 символов. Попробуйте ещё раз:")
+        return
+
+    await state.update_data(custom_title=title)
+    await state.set_state(MasterOnboardingStates.waiting_for_service_price)
+    data = await state.get_data()
+    master_id = data.get("onboarding_master_id", 0)
+    text = f"Услуга: <b>{escape(title)}</b>\n\n💰 <b>Укажите стоимость услуги в рублях (число):</b>"
+    await message.answer(text, reply_markup=onboarding_skip_keyboard(master_id, "service"))
+
+
+@manager_router.message(MasterOnboardingStates.waiting_for_service_price)
+async def msg_onboarding_custom_service_price(message: Message, state: FSMContext) -> None:
+    """Save custom price and ask for duration."""
+    raw = (message.text or "").strip().replace(" ", "").replace("₽", "").replace("руб", "")
+    try:
+        price = int(raw)
+        if price < 0 or price > 1_000_000:
+            raise ValueError
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число (например, 2500):")
+        return
+
+    await state.update_data(custom_price=price)
+    await state.set_state(MasterOnboardingStates.waiting_for_service_duration)
+    data = await state.get_data()
+    master_id = data.get("onboarding_master_id", 0)
+    text = f"Стоимость: <b>{price} ₽</b>\n\n⏱ <b>Укажите длительность процедуры в минутах (например: 60, 90, 120):</b>"
+    await message.answer(text, reply_markup=onboarding_skip_keyboard(master_id, "service"))
+
+
+@manager_router.message(MasterOnboardingStates.waiting_for_service_duration)
+async def msg_onboarding_custom_service_duration(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save duration, create service and prompt for schedule."""
+    raw = (message.text or "").strip().replace("мин", "")
+    try:
+        dur = int(raw)
+        if dur <= 0 or dur > 1440:
+            raise ValueError
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число минут (от 10 до 720):")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("onboarding_master_id")
+    if not master_id:
+        await state.clear()
+        await message.answer("Ошибка сессии.", reply_markup=main_menu_keyboard())
+        return
+
+    title = data.get("custom_title", "Услуга")
+    price = data.get("custom_price", 2000)
+
+    srv_repo = ServiceRepository(session)
+    await srv_repo.create_service(
+        master_id=master_id,
+        title=title,
+        price=price,
+        duration_min=dur,
+        buffer_min=15,
+        deposit_type=DepositType.PERCENT,
+        deposit_value=0,
+        is_active=True,
+    )
+
+    await state.set_state(MasterOnboardingStates.waiting_for_schedule)
+    text = (
+        f"✅ Услуга <b>«{escape(title)}»</b> ({price} ₽, {dur} мин) сохранена!\n\n"
+        "📅 <b>Шаг 4 из 4: График приёма клиентов</b>\n\n"
+        "Базовый график:\n"
+        "• <b>Понедельник — Пятница:</b> 10:00 – 19:00\n"
+        "• <b>Перерыв:</b> 14:00 – 15:00\n"
+        "• <b>Суббота и Воскресенье:</b> Выходной\n\n"
+        "Принять базовый график?"
+    )
+    await message.answer(text, reply_markup=onboarding_schedule_keyboard(master_id))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:ob:sch:accept:"))
+async def cb_onboarding_accept_schedule(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Step 4: Accept standard schedule."""
+    master_id = int(callback.data.split(":")[4])
+    user = await _get_or_create_user(session, callback.from_user)
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    from datetime import time as dt_time
+    sch_repo = ScheduleRepository(session)
+    # Mon-Fri: 10:00-19:00 with break 14:00-15:00
+    for day in range(5):
+        await sch_repo.set_template(
+            weekday=day,
+            is_day_off=False,
+            work_start=dt_time(10, 0),
+            work_end=dt_time(19, 0),
+            breaks=[(dt_time(14, 0), dt_time(15, 0))],
+            master_id=master_id,
+        )
+    # Sat-Sun: Day off
+    for day in range(5, 7):
+        await sch_repo.set_template(
+            weekday=day,
+            is_day_off=True,
+            master_id=master_id,
+        )
+
+    await state.clear()
+    bot_repo = BotInstanceRepository(session)
+    bot_instance = await bot_repo.get_current_for_master(master_id)
+
+    text = (
+        f"🎉 <b>Ваш проект «{escape(master.display_name)}» готов к работе!</b>\n\n"
+        "Теперь ваши клиенты могут:\n"
+        "📅 Записываться на услуги онлайн\n"
+        "💳 Вносить предоплату\n"
+        "🔔 Получать автоматические напоминания\n"
+        "⭐ Оставлять отзывы о визитах\n\n"
+        "Подключите вашего бота, чтобы запустить онлайн-запись:"
+    )
+    await callback.message.edit_text(text, reply_markup=onboarding_completion_keyboard(master_id, bot_instance))
+    await callback.answer()
 
 
 # ---------------------------------------------------------------------------
@@ -359,13 +794,35 @@ async def cb_project_card(callback: CallbackQuery, state: FSMContext, session: A
     else:
         sub_info = "🚫 Заблокирована"
 
+    crm_svc = MasterCrmService(session)
+    dashboard = await crm_svc.get_today_dashboard(master.id)
+    nxt_text = ""
+    if dashboard.get("next_appointment"):
+        nxt = dashboard["next_appointment"]
+        nxt_text = (
+            f"⏰ <b>Ближайшая запись:</b>\n"
+            f"• Время: <b>{nxt['time_str']}</b>\n"
+            f"• Клиент: <b>{escape(nxt['client_name'])}</b>\n"
+            f"• Услуга: <b>{escape(nxt['service_title'])}</b>\n\n"
+        )
+    else:
+        nxt_text = "⏰ <i>На сегодня больше нет предстоящих записей</i>\n\n"
+
+    act_label = ACTIVITY_TYPE_NAMES.get(master.activity_type or "", "")
+    act_suffix = f" • {act_label}" if act_label else ""
+
     text = (
-        f"⚙️ <b>Управление проектом: {master.display_name}</b>\n\n"
+        f"⚙️ <b>Проект: {escape(master.display_name)}</b>{act_suffix}\n\n"
+        f"📊 <b>Сегодня:</b>\n"
+        f"📅 Записей: <b>{dashboard['total_today']}</b>\n"
+        f"💰 Выручка: <b>{int(dashboard['revenue_today'])} ₽</b>\n"
+        f"👥 Клиентов: <b>{dashboard['unique_clients_today']}</b>\n"
+        f"🆕 Новых: <b>{dashboard['new_clients_today']}</b>\n\n"
+        f"{nxt_text}"
         f"🤖 <b>Telegram-бот:</b> {bot_info}\n"
         f"📊 <b>Статус бота:</b> {bot_status_str}\n"
         f"💳 <b>Подписка:</b> {sub_info}\n"
         f"📋 <b>Готовность к запуску:</b> {readiness_text}\n"
-        f"🌍 <b>Часовой пояс:</b> {master.timezone}\n"
     )
     await callback.message.edit_text(
         text,
@@ -2559,3 +3016,1128 @@ def _render_contacts_summary_text(project_name: str, settings_obj: Optional[Mast
 
     lines.append("\nНажмите на кнопку ниже, чтобы изменить нужное поле:")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: CRM Export
+# ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.startswith("mgr:crm:export:"))
+async def cb_crm_export(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Export clients to CSV file strictly scoped to master_id."""
+    master_id = int(callback.data.split(":")[3])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    crm_svc = MasterCrmService(session)
+    csv_str = await crm_svc.export_clients_csv(master_id)
+    csv_bytes = csv_str.encode("utf-8-sig")
+
+    filename = f"clients_{master_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    doc = BufferedInputFile(csv_bytes, filename=filename)
+
+    await callback.answer("Формирую CSV выгрузку...")
+    if callback.message:
+        await callback.message.answer_document(
+            document=doc,
+            caption=f"📤 <b>Экспорт клиентской базы «{escape(master.display_name)}»</b>\nФайл CSV готов для открытия в Excel.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Services Management
+# ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.startswith("mgr:services:"))
+async def cb_manager_services_list(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """List services for master."""
+    await state.clear()
+    master_id = int(callback.data.split(":")[2])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    srv_repo = ServiceRepository(session)
+    services = await srv_repo.list_all_for_admin(master_id)
+    active_count = sum(1 for s in services if s.is_active and not s.is_archived)
+
+    text = (
+        f"💅 <b>Услуги и прайс-лист проекта «{escape(master.display_name)}»</b>\n\n"
+        f"Всего активных услуг: <b>{active_count}</b>\n\n"
+        "🟢 — услуга доступна для онлайн-записи\n"
+        "🔴 — услуга скрыта от клиентов\n\n"
+        "Выберите услугу для настройки или добавьте новую:"
+    )
+    await callback.message.edit_text(text, reply_markup=manager_services_list_keyboard(master_id, services))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:srv:card:"))
+async def cb_manager_service_card(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Service details card."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    service_id = int(parts[4])
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    srv_repo = ServiceRepository(session)
+    service = await srv_repo.get_by_id(service_id, master_id)
+    if not service:
+        await callback.answer("Услуга не найдена.", show_alert=True)
+        return
+
+    status_str = "🟢 Активна (доступна для записи)" if service.is_active else "🔴 Выключена (скрыта)"
+    dep_str = f"{int(service.deposit_value)}%" if service.deposit_type == DepositType.PERCENT else f"{int(service.deposit_value)} ₽"
+    desc_str = service.description or "<i>нет описания</i>"
+
+    text = (
+        f"💅 <b>Услуга: {escape(service.title)}</b>\n\n"
+        f"• <b>Статус:</b> {status_str}\n"
+        f"• <b>Стоимость:</b> {int(service.price)} ₽\n"
+        f"• <b>Длительность:</b> {service.duration_min} мин.\n"
+        f"• <b>Буфер после услуги:</b> {service.buffer_min} мин.\n"
+        f"• <b>Предоплата:</b> {dep_str}\n\n"
+        f"📝 <b>Описание:</b>\n{escape(desc_str)}"
+    )
+    await callback.message.edit_text(text, reply_markup=manager_service_detail_keyboard(master_id, service))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:srv:toggle:"))
+async def cb_manager_service_toggle(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Toggle service active status."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    service_id = int(parts[4])
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    srv_repo = ServiceRepository(session)
+    new_status = await srv_repo.toggle_active(service_id, master_id)
+    if new_status is None:
+        await callback.answer("Услуга не найдена.", show_alert=True)
+        return
+
+    service = await srv_repo.get_by_id(service_id, master_id)
+    msg = "Услуга включена 🟢" if new_status else "Услуга выключена 🔴"
+    await callback.answer(msg)
+    await cb_manager_service_card(callback, session)
+
+
+@manager_router.callback_query(F.data.startswith("mgr:srv:delete:"))
+async def cb_manager_service_delete(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Soft-delete / archive service without breaking appointment history."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    service_id = int(parts[4])
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    srv_repo = ServiceRepository(session)
+    await srv_repo.archive(service_id, master_id)
+    await callback.answer("Услуга удалена (архивирована)", show_alert=True)
+
+    # Return to services list
+    services = await srv_repo.list_all_for_admin(master_id)
+    text = (
+        f"💅 <b>Услуги и прайс-лист проекта «{escape(master.display_name)}»</b>\n\n"
+        "Услуга успешно удалена.\n\n"
+        "Выберите услугу для настройки или добавьте новую:"
+    )
+    await callback.message.edit_text(text, reply_markup=manager_services_list_keyboard(master_id, services))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:srv:add:"))
+async def cb_manager_service_add(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Start adding a service in Manager Bot."""
+    master_id = int(callback.data.split(":")[3])
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    await state.update_data(srv_master_id=master_id)
+    await state.set_state(ManagerServiceStates.waiting_for_title)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:services:{master_id}")]]
+    )
+    text = "💅 <b>Добавление новой услуги</b>\n\nВведите название услуги (например: <i>Smart-педикюр</i>):"
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerServiceStates.waiting_for_title)
+async def msg_manager_service_add_title(message: Message, state: FSMContext) -> None:
+    """Receive title and prompt for price."""
+    title = (message.text or "").strip()
+    if not title or len(title) > 255:
+        await message.answer("Название должно быть от 2 до 255 символов. Попробуйте ещё раз:")
+        return
+
+    await state.update_data(srv_title=title)
+    await state.set_state(ManagerServiceStates.waiting_for_price)
+    data = await state.get_data()
+    master_id = data.get("srv_master_id", 0)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:services:{master_id}")]]
+    )
+    await message.answer(f"Услуга: <b>{escape(title)}</b>\n\n💰 <b>Введите стоимость услуги в рублях (число):</b>", reply_markup=cancel_kb)
+
+
+@manager_router.message(ManagerServiceStates.waiting_for_price)
+async def msg_manager_service_add_price(message: Message, state: FSMContext) -> None:
+    """Receive price and prompt for duration."""
+    raw = (message.text or "").strip().replace(" ", "").replace("₽", "").replace("руб", "")
+    try:
+        price = int(raw)
+        if price < 0 or price > 1_000_000:
+            raise ValueError
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число (например, 2500):")
+        return
+
+    await state.update_data(srv_price=price)
+    await state.set_state(ManagerServiceStates.waiting_for_duration)
+    data = await state.get_data()
+    master_id = data.get("srv_master_id", 0)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:services:{master_id}")]]
+    )
+    await message.answer(f"Стоимость: <b>{price} ₽</b>\n\n⏱ <b>Укажите длительность процедуры в минутах (например: 60, 90, 120):</b>", reply_markup=cancel_kb)
+
+
+@manager_router.message(ManagerServiceStates.waiting_for_duration)
+async def msg_manager_service_add_duration(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Receive duration, create service and display card."""
+    raw = (message.text or "").strip().replace("мин", "")
+    try:
+        dur = int(raw)
+        if dur <= 0 or dur > 1440:
+            raise ValueError
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число минут (от 10 до 720):")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("srv_master_id")
+    if not master_id:
+        await state.clear()
+        await message.answer("Ошибка сессии.", reply_markup=main_menu_keyboard())
+        return
+
+    title = data.get("srv_title", "Услуга")
+    price = data.get("srv_price", 2000)
+
+    srv_repo = ServiceRepository(session)
+    service = await srv_repo.create_service(
+        master_id=master_id,
+        title=title,
+        price=price,
+        duration_min=dur,
+        buffer_min=15,
+        deposit_type=DepositType.PERCENT,
+        deposit_value=0,
+        is_active=True,
+    )
+    await state.clear()
+
+    text = f"✅ Услуга <b>«{escape(title)}»</b> успешно создана!\nСтоимость: {price} ₽, длительность: {dur} мин."
+    await message.answer(text, reply_markup=manager_service_detail_keyboard(master_id, service))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:srv:edit:"))
+async def cb_manager_service_edit(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Prompt for editing a specific service field."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    service_id = int(parts[4])
+    field = parts[5]
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    srv_repo = ServiceRepository(session)
+    service = await srv_repo.get_by_id(service_id, master_id)
+    if not service:
+        await callback.answer("Услуга не найдена.", show_alert=True)
+        return
+
+    await state.update_data(srv_master_id=master_id, srv_id=service_id, srv_field=field)
+    await state.set_state(ManagerServiceStates.waiting_for_edit_field_value)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:srv:card:{master_id}:{service_id}")]]
+    )
+
+    prompts = {
+        "title": "Введите новое название услуги:",
+        "price": "Введите новую стоимость услуги в рублях (число):",
+        "duration": "Введите длительность услуги в минутах (например: 60):",
+        "buffer": "Введите буферное время после услуги в минутах (например: 15):",
+        "deposit": "Введите процент предоплаты от 0 до 100% (например: 30) или 0 для отключения:",
+    }
+    await callback.message.edit_text(prompts.get(field, "Введите новое значение:"), reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerServiceStates.waiting_for_edit_field_value)
+async def msg_manager_service_edit_value(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save edited service field."""
+    data = await state.get_data()
+    master_id = data.get("srv_master_id")
+    service_id = data.get("srv_id")
+    field = data.get("srv_field")
+
+    if not master_id or not service_id or not field:
+        await state.clear()
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        await message.answer("Ошибка доступа.")
+        return
+
+    srv_repo = ServiceRepository(session)
+    raw = (message.text or "").strip()
+
+    updates: Dict[str, Any] = {}
+    try:
+        if field == "title":
+            if not raw or len(raw) > 255:
+                raise ValueError("Название должно быть от 2 до 255 символов")
+            updates["title"] = raw
+        elif field == "price":
+            val = int(raw.replace(" ", "").replace("₽", "").replace("руб", ""))
+            if val < 0 or val > 1_000_000:
+                raise ValueError("Цена должна быть от 0 до 1 000 000 ₽")
+            updates["price"] = val
+        elif field == "duration":
+            val = int(raw.replace("мин", ""))
+            if val <= 0 or val > 1440:
+                raise ValueError("Длительность должна быть от 10 до 720 минут")
+            updates["duration_min"] = val
+        elif field == "buffer":
+            val = int(raw.replace("мин", ""))
+            if val < 0 or val > 240:
+                raise ValueError("Буфер должен быть от 0 до 240 минут")
+            updates["buffer_min"] = val
+        elif field == "deposit":
+            val = int(raw.replace("%", "").strip())
+            if val < 0 or val > 100:
+                raise ValueError("Процент предоплаты должен быть от 0 до 100%")
+            updates["deposit_type"] = DepositType.PERCENT
+            updates["deposit_value"] = val
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}. Попробуйте ещё раз:")
+        return
+
+    updated_srv = await srv_repo.update_service(service_id, master_id, **updates)
+    await state.clear()
+    await message.answer("✅ Услуга успешно обновлена!", reply_markup=manager_service_detail_keyboard(master_id, updated_srv))
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Portfolio Management
+# ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.startswith("mgr:portfolio:"))
+async def cb_manager_portfolio(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Portfolio categories list."""
+    await state.clear()
+    master_id = int(callback.data.split(":")[2])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    port_repo = PortfolioRepository(session)
+    categories = await port_repo.list_categories(master_id, active_only=False)
+
+    text = (
+        f"🖼 <b>Портфолио проекта «{escape(master.display_name)}»</b>\n\n"
+        "Категории позволяют клиентам быстро находить примеры работ.\n\n"
+        "Выберите категорию для добавления или просмотра фотографий:"
+    )
+    await callback.message.edit_text(text, reply_markup=manager_portfolio_categories_keyboard(master_id, categories))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:port:cat:add:"))
+async def cb_manager_portfolio_cat_add(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Prompt for adding a portfolio category."""
+    master_id = int(callback.data.split(":")[4])
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    await state.update_data(port_master_id=master_id)
+    await state.set_state(ManagerPortfolioStates.waiting_for_category_title)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:portfolio:{master_id}")]]
+    )
+    text = "📁 <b>Новая категория портфолио</b>\n\nВведите название категории (например: <i>Свадебный макияж</i>):"
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerPortfolioStates.waiting_for_category_title)
+async def msg_manager_portfolio_cat_add(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Save new portfolio category."""
+    title = (message.text or "").strip()
+    if not title or len(title) > 128:
+        await message.answer("Название категории должно содержать от 2 до 128 символов:")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("port_master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    port_repo = PortfolioRepository(session)
+    await port_repo.create_category(master_id, title)
+    await state.clear()
+
+    categories = await port_repo.list_categories(master_id, active_only=False)
+    text = f"✅ Категория <b>«{escape(title)}»</b> успешно создана!\n\nВыберите категорию для добавления фото:"
+    await message.answer(text, reply_markup=manager_portfolio_categories_keyboard(master_id, categories))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:port:cat:del:"))
+async def cb_manager_portfolio_cat_del(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Delete a portfolio category."""
+    parts = callback.data.split(":")
+    master_id = int(parts[4])
+    cat_id = int(parts[5])
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    port_repo = PortfolioRepository(session)
+    await port_repo.delete_category(cat_id, master_id)
+    await callback.answer("Категория удалена.")
+
+    categories = await port_repo.list_categories(master_id, active_only=False)
+    await callback.message.edit_text(
+        f"🖼 <b>Портфолио проекта «{escape(master.display_name)}»</b>\n\nКатегория успешно удалена:",
+        reply_markup=manager_portfolio_categories_keyboard(master_id, categories),
+    )
+
+
+@manager_router.callback_query(F.data.startswith("mgr:port:cat:"))
+async def cb_manager_portfolio_category(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """View photos inside a category."""
+    await state.clear()
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    cat_id = int(parts[4])
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    port_repo = PortfolioRepository(session)
+    category = await port_repo.get_category_by_id(cat_id, master_id)
+    if not category:
+        await callback.answer("Категория не найдена.", show_alert=True)
+        return
+
+    items = await port_repo.list_items(cat_id, master_id, active_only=False)
+    text = (
+        f"📁 <b>Категория: {escape(category.title)}</b>\n\n"
+        f"Всего фотографий: <b>{len(items)}</b>\n\n"
+        "Нажмите «Добавить фото», чтобы загрузить новую работу:"
+    )
+    await callback.message.edit_text(text, reply_markup=manager_portfolio_items_keyboard(master_id, cat_id, items))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:port:item:add:"))
+async def cb_manager_portfolio_item_add(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Prompt master to send a photo."""
+    parts = callback.data.split(":")
+    master_id = int(parts[4])
+    cat_id = int(parts[5])
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    await state.update_data(port_master_id=master_id, port_cat_id=cat_id)
+    await state.set_state(ManagerPortfolioStates.waiting_for_photo)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:port:cat:{master_id}:{cat_id}")]]
+    )
+    text = "📸 <b>Загрузка фотографии</b>\n\nПришлите фотографию вашей работы (с описанием или без):"
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerPortfolioStates.waiting_for_photo)
+async def msg_manager_portfolio_item_photo(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Receive photo and save into portfolio."""
+    if not message.photo:
+        await message.answer("Пожалуйста, отправьте именно фотографию (как фото, а не файл):")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("port_master_id")
+    cat_id = data.get("port_cat_id")
+    if not master_id or not cat_id:
+        await state.clear()
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        return
+
+    photo = message.photo[-1]
+    caption = (message.caption or "").strip() or None
+
+    port_repo = PortfolioRepository(session)
+    await port_repo.add_item(
+        master_id=master_id,
+        category_id=cat_id,
+        telegram_file_id=photo.file_id,
+        telegram_file_unique_id=photo.file_unique_id,
+        caption=caption,
+        title=caption[:100] if caption else None,
+    )
+    await state.clear()
+
+    items = await port_repo.list_items(cat_id, master_id, active_only=False)
+    text = "✅ <b>Фотография успешно добавлена в портфолио!</b>\nКлиенты увидят её в галерее работ."
+    await message.answer(text, reply_markup=manager_portfolio_items_keyboard(master_id, cat_id, items))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:port:item:del:"))
+async def cb_manager_portfolio_item_del(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Delete a photo item from portfolio."""
+    parts = callback.data.split(":")
+    master_id = int(parts[4])
+    item_id = int(parts[5])
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    port_repo = PortfolioRepository(session)
+    item = await port_repo.get_item_by_id(item_id, master_id)
+    cat_id = item.category_id if item else None
+
+    await port_repo.delete_item(item_id, master_id)
+    await callback.answer("Фотография удалена.")
+
+    if cat_id:
+        items = await port_repo.list_items(cat_id, master_id, active_only=False)
+        await callback.message.edit_text(
+            "Фотография удалена из категории.",
+            reply_markup=manager_portfolio_items_keyboard(master_id, cat_id, items),
+        )
+    else:
+        categories = await port_repo.list_categories(master_id, active_only=False)
+        await callback.message.edit_text(
+            "Фотография удалена.",
+            reply_markup=manager_portfolio_categories_keyboard(master_id, categories),
+        )
+
+
+@manager_router.callback_query(F.data.startswith("mgr:port:item:"))
+async def cb_manager_portfolio_item_card(callback: CallbackQuery, session: AsyncSession) -> None:
+    """View photo item details."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    item_id = int(parts[4])
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    port_repo = PortfolioRepository(session)
+    item = await port_repo.get_item_by_id(item_id, master_id)
+    if not item:
+        await callback.answer("Фото не найдено.", show_alert=True)
+        return
+
+    desc = item.caption or "<i>без описания</i>"
+    text = f"🖼 <b>Работа #{item.id}</b>\n\n📝 Описание: {escape(desc)}"
+    await callback.message.edit_text(
+        text, reply_markup=manager_portfolio_item_detail_keyboard(master_id, item.id, item.category_id)
+    )
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Schedule Management
+# ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.startswith("mgr:schedule:"))
+async def cb_manager_schedule(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Display weekly schedule and booking parameters."""
+    await state.clear()
+    master_id = int(callback.data.split(":")[2])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    sch_repo = ScheduleRepository(session)
+    templates = await sch_repo.get_weekly_templates(master_id)
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+
+    day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    tmpl_map = {t.day_of_week: t for t in templates}
+
+    lines = [f"📅 <b>График работы: {escape(master.display_name)}</b>\n"]
+    for d in range(7):
+        t = tmpl_map.get(d)
+        if not t or t.is_day_off:
+            lines.append(f"• <b>{day_names[d]}:</b> <i>Выходной</i>")
+        else:
+            breaks_str = ""
+            if t.breaks:
+                b_texts = [f"{b.break_start.strftime('%H:%M')}–{b.break_end.strftime('%H:%M')}" for b in t.breaks]
+                breaks_str = f" (перерыв: {', '.join(b_texts)})"
+            lines.append(f"• <b>{day_names[d]}:</b> {t.work_start.strftime('%H:%M')} – {t.work_end.strftime('%H:%M')}{breaks_str}")
+
+    adv_h = settings_obj.min_advance_hours if settings_obj else 2
+    horiz_d = settings_obj.booking_horizon_days if settings_obj else 30
+    lines.append(f"\n⏱ <b>Минимум до записи:</b> {adv_h} ч.")
+    lines.append(f"📆 <b>Горизонт записи:</b> {horiz_d} дней")
+
+    await callback.message.edit_text("\n".join(lines), reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:sch:hours:"))
+async def cb_manager_schedule_hours(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt to set standard working hours."""
+    master_id = int(callback.data.split(":")[3])
+    await state.update_data(sch_master_id=master_id)
+    await state.set_state(ManagerScheduleStates.waiting_for_hours)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:schedule:{master_id}")]]
+    )
+    text = (
+        "🕒 <b>Настройка рабочих часов</b>\n\n"
+        "Введите время начала и окончания рабочего дня для будней (Пн–Пт) через дефис\n"
+        "(например: <code>10:00-19:00</code> или <code>09:00-18:00</code>):"
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerScheduleStates.waiting_for_hours)
+async def msg_manager_schedule_hours(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save standard working hours."""
+    from datetime import time as dt_time
+    raw = (message.text or "").strip().replace(" ", "")
+    if "-" not in raw:
+        await message.answer("Пожалуйста, введите время в формате <code>10:00-19:00</code>:")
+        return
+
+    try:
+        s_part, e_part = raw.split("-", 1)
+        sh, sm = map(int, s_part.split(":"))
+        eh, em = map(int, e_part.split(":"))
+        start_t = dt_time(sh, sm)
+        end_t = dt_time(eh, em)
+        if start_t >= end_t:
+            raise ValueError
+    except Exception:
+        await message.answer("Некорректное время. Введите в формате <code>10:00-19:00</code>:")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("sch_master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        return
+
+    sch_repo = ScheduleRepository(session)
+    for day in range(5):
+        await sch_repo.set_template(
+            weekday=day,
+            is_day_off=False,
+            work_start=start_t,
+            work_end=end_t,
+            breaks=[(dt_time(14, 0), dt_time(15, 0))],
+            master_id=master_id,
+        )
+    await state.clear()
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    await message.answer(f"✅ Рабочие часы обновлены: <b>{start_t.strftime('%H:%M')} – {end_t.strftime('%H:%M')}</b>!", reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:sch:breaks:"))
+async def cb_manager_schedule_breaks(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt to set break time."""
+    master_id = int(callback.data.split(":")[3])
+    await state.update_data(sch_master_id=master_id)
+    await state.set_state(ManagerScheduleStates.waiting_for_break)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:schedule:{master_id}")]]
+    )
+    text = (
+        "☕️ <b>Настройка регулярного перерыва</b>\n\n"
+        "Введите время перерыва через дефис (например: <code>14:00-15:00</code>)\n"
+        "или отправьте <code>0</code>, чтобы убрать перерыв:"
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerScheduleStates.waiting_for_break)
+async def msg_manager_schedule_breaks(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save break hours."""
+    from datetime import time as dt_time
+    raw = (message.text or "").strip().replace(" ", "")
+
+    breaks_list = []
+    if raw != "0":
+        try:
+            s_part, e_part = raw.split("-", 1)
+            sh, sm = map(int, s_part.split(":"))
+            eh, em = map(int, e_part.split(":"))
+            b_start = dt_time(sh, sm)
+            b_end = dt_time(eh, em)
+            if b_start >= b_end:
+                raise ValueError
+            breaks_list.append((b_start, b_end))
+        except Exception:
+            await message.answer("Некорректное время. Введите в формате <code>14:00-15:00</code> или <code>0</code>:")
+            return
+
+    data = await state.get_data()
+    master_id = data.get("sch_master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        return
+
+    sch_repo = ScheduleRepository(session)
+    templates = await sch_repo.get_weekly_templates(master_id)
+    for t in templates:
+        if not t.is_day_off:
+            await sch_repo.set_template(
+                weekday=t.day_of_week,
+                is_day_off=False,
+                work_start=t.work_start,
+                work_end=t.work_end,
+                breaks=breaks_list,
+                master_id=master_id,
+            )
+    await state.clear()
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    msg = "Перерыв убран." if not breaks_list else f"Перерыв установлен: <b>{raw}</b>!"
+    await message.answer(f"✅ {msg}", reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:sch:dayoff:"))
+async def cb_manager_schedule_dayoff(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt to add a holiday / day off for a specific date."""
+    master_id = int(callback.data.split(":")[3])
+    await state.update_data(sch_master_id=master_id)
+    await state.set_state(ManagerScheduleStates.waiting_for_day_off_date)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:schedule:{master_id}")]]
+    )
+    text = (
+        "🏖 <b>Добавить выходной день или отпуск</b>\n\n"
+        "Введите дату в формате ДД.ММ.ГГГГ (например: <code>15.11.2026</code>):"
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerScheduleStates.waiting_for_day_off_date)
+async def msg_manager_schedule_dayoff(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save date exception as day off."""
+    from datetime import datetime as dt_datetime
+    raw = (message.text or "").strip()
+    try:
+        t_date = dt_datetime.strptime(raw, "%d.%m.%Y").date()
+    except ValueError:
+        await message.answer("Некорректная дата. Введите в формате <code>ДД.ММ.ГГГГ</code> (например: <code>15.11.2026</code>):")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("sch_master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        return
+
+    sch_repo = ScheduleRepository(session)
+    await sch_repo.set_date_exception(
+        target_date=t_date,
+        is_day_off=True,
+        comment="Выходной день мастера",
+        master_id=master_id,
+    )
+    await state.clear()
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    await message.answer(
+        f"✅ Дата <b>{raw}</b> успешно отмечена как выходной! Запись на этот день заблокирована.",
+        reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj),
+    )
+
+
+@manager_router.callback_query(F.data.startswith("mgr:sch:advance:"))
+async def cb_manager_schedule_advance(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt to edit min advance hours."""
+    master_id = int(callback.data.split(":")[3])
+    await state.update_data(sch_master_id=master_id)
+    await state.set_state(ManagerScheduleStates.waiting_for_advance_hours)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:schedule:{master_id}")]]
+    )
+    text = (
+        "⏱ <b>Минимальное время до записи</b>\n\n"
+        "За сколько часов до визита клиент может записаться онлайн?\n"
+        "Введите число часов (например: <code>2</code>, <code>4</code>, <code>12</code>, <code>24</code>):"
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerScheduleStates.waiting_for_advance_hours)
+async def msg_manager_schedule_advance(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save min advance hours."""
+    raw = (message.text or "").strip()
+    try:
+        hours = int(raw)
+        if hours < 1 or hours > 168:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите число от 1 до 168 часов:")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("sch_master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    await MasterSettingsRepository(session).update(master_id, min_advance_hours=hours)
+    await state.clear()
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    await message.answer(f"✅ Минимальное время до записи установлено: <b>{hours} ч.</b>", reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:sch:horizon:"))
+async def cb_manager_schedule_horizon(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt to edit booking horizon days."""
+    master_id = int(callback.data.split(":")[3])
+    await state.update_data(sch_master_id=master_id)
+    await state.set_state(ManagerScheduleStates.waiting_for_horizon_days)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:schedule:{master_id}")]]
+    )
+    text = (
+        "📆 <b>Горизонт записи</b>\n\n"
+        "На сколько дней вперёд открыта запись в календаре?\n"
+        "Введите число дней (например: <code>14</code>, <code>30</code>, <code>60</code>):"
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerScheduleStates.waiting_for_horizon_days)
+async def msg_manager_schedule_horizon(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Save booking horizon days."""
+    raw = (message.text or "").strip()
+    try:
+        days = int(raw)
+        if days < 1 or days > 365:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите число от 1 до 365 дней:")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("sch_master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    await MasterSettingsRepository(session).update(master_id, booking_horizon_days=days)
+    await state.clear()
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    await message.answer(f"✅ Горизонт записи установлен: <b>{days} дней</b>", reply_markup=manager_schedule_menu_keyboard(master_id, settings_obj))
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Settings Hub
+# ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.startswith("mgr:settings:"))
+async def cb_manager_settings(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Master project settings hub."""
+    await state.clear()
+    master_id = int(callback.data.split(":")[2])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    text = (
+        f"⚙️ <b>Настройки проекта «{escape(master.display_name)}»</b>\n\n"
+        "Здесь собраны все параметры вашего бизнеса:\n"
+        "• Контакты, адрес и рабочие часы\n"
+        "• Услуги, прайс и портфолио\n"
+        "• Уведомления и правила предоплаты\n\n"
+        "Выберите нужный раздел:"
+    )
+    await callback.message.edit_text(text, reply_markup=manager_settings_menu_keyboard(master_id, settings_obj))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:set:name:"))
+async def cb_manager_set_name(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt to edit project name."""
+    master_id = int(callback.data.split(":")[3])
+    await state.update_data(set_master_id=master_id)
+    await state.set_state(ManagerSettingsStates.waiting_for_name)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:settings:{master_id}")]]
+    )
+    text = "🏷 <b>Изменение названия проекта</b>\n\nВведите новое название студии или профиля:"
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerSettingsStates.waiting_for_name)
+async def msg_manager_set_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Save new project name."""
+    name = (message.text or "").strip()
+    if not name or len(name) < 2 or len(name) > 128:
+        await message.answer("Название должно содержать от 2 до 128 символов:")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("set_master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    user = await _get_or_create_user(session, message.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await state.clear()
+        return
+
+    master.display_name = name
+    await session.flush()
+    await state.clear()
+
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    await message.answer(f"✅ Название проекта изменено на: <b>«{escape(name)}»</b>!", reply_markup=manager_settings_menu_keyboard(master_id, settings_obj))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:set:about:"))
+async def cb_manager_set_about(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt to edit about text."""
+    master_id = int(callback.data.split(":")[3])
+    await state.update_data(set_master_id=master_id)
+    await state.set_state(ManagerSettingsStates.waiting_for_description)
+
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:settings:{master_id}")]]
+    )
+    text = "📝 <b>Описание проекта / О мастере</b>\n\nВведите текст о себе, вашем опыте и материалах:"
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(ManagerSettingsStates.waiting_for_description)
+async def msg_manager_set_about(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Save about text."""
+    desc = (message.text or "").strip()
+    if len(desc) > 2000:
+        await message.answer("Описание слишком длинное (максимум 2000 символов):")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("set_master_id")
+    if not master_id:
+        await state.clear()
+        return
+
+    await MasterSettingsRepository(session).update(master_id, about_text=desc)
+    await state.clear()
+
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    await message.answer("✅ Описание успешно обновлено!", reply_markup=manager_settings_menu_keyboard(master_id, settings_obj))
+
+
+@manager_router.callback_query(F.data.startswith("mgr:set:notif:"))
+async def cb_manager_set_notif(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Notification settings."""
+    master_id = int(callback.data.split(":")[3])
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    r24 = settings_obj.reminder_24h_enabled if settings_obj else True
+    r3 = settings_obj.reminder_3h_enabled if settings_obj else True
+
+    text = (
+        "🔔 <b>Настройка автоматических напоминаний</b>\n\n"
+        "Бот автоматически отправляет напоминания клиентам перед визитом:\n"
+        "• <b>За 24 часа</b> — подтверждение визита\n"
+        "• <b>За 3 часа</b> — напоминание в день визита\n\n"
+        "Нажмите на кнопку, чтобы включить или отключить:"
+    )
+    await callback.message.edit_text(text, reply_markup=manager_notification_settings_keyboard(master_id, r24, r3))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:notif:toggle:"))
+async def cb_manager_notif_toggle(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Toggle reminder setting."""
+    parts = callback.data.split(":")
+    master_id = int(parts[3])
+    r_type = parts[4]
+
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    settings_repo = MasterSettingsRepository(session)
+    settings_obj = await settings_repo.get_by_master_id(master_id)
+    if not settings_obj:
+        settings_obj = MasterSettings(master_id=master_id)
+        session.add(settings_obj)
+        await session.flush()
+
+    if r_type == "24h":
+        settings_obj.reminder_24h_enabled = not settings_obj.reminder_24h_enabled
+    elif r_type == "3h":
+        settings_obj.reminder_3h_enabled = not settings_obj.reminder_3h_enabled
+    await session.flush()
+
+    await callback.answer("Настройка обновлена.")
+    await cb_manager_set_notif(callback, session)
+
+
+@manager_router.callback_query(F.data.startswith("mgr:set:prepay:"))
+async def cb_manager_set_prepay(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Prepayment rules."""
+    master_id = int(callback.data.split(":")[3])
+    user = await _get_or_create_user(session, callback.from_user)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    settings_obj = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    hold_m = settings_obj.hold_duration_minutes if settings_obj else 30
+    cancel_h = settings_obj.cancel_policy_hours if settings_obj else 24
+
+    text = (
+        "💳 <b>Правила предоплаты и удержания</b>\n\n"
+        f"• <b>Время на оплату чека:</b> {hold_m} мин. (после этого бронь аннулируется)\n"
+        f"• <b>Бесплатная отмена за:</b> {cancel_h} ч. до визита\n\n"
+        "<i>Размер предоплаты (процент или фиксированная сумма) настраивается индивидуально в каждой услуге в разделе «Услуги и прайс».</i>"
+    )
+    await callback.message.edit_text(text, reply_markup=manager_prepayment_settings_keyboard(master_id, settings_obj))
+    await callback.answer()

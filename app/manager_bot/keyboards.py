@@ -5,7 +5,9 @@ from typing import Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config.settings import settings
-from app.database.models.master import BotInstance, BotInstanceStatus, Master
+from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterSettings
+from app.database.models.portfolio import PortfolioCategory, PortfolioItem
+from app.database.models.service import DepositType, Service
 from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPlan
 
 
@@ -141,15 +143,18 @@ def project_card_keyboard(
 
     # Business & CRM features
     rows.append([
+        InlineKeyboardButton(text="📅 Расписание", callback_data=f"mgr:schedule:{master.id}"),
         InlineKeyboardButton(text="👥 Клиенты CRM", callback_data=f"mgr:crm:{master.id}"),
-        InlineKeyboardButton(text="📊 Статистика", callback_data=f"mgr:stats:{master.id}"),
+        InlineKeyboardButton(text="💰 Финансы", callback_data=f"mgr:finances:{master.id}"),
     ])
     rows.append([
-        InlineKeyboardButton(text="💰 Финансы", callback_data=f"mgr:finances:{master.id}"),
+        InlineKeyboardButton(text="💅 Услуги", callback_data=f"mgr:services:{master.id}"),
+        InlineKeyboardButton(text="🖼 Портфолио", callback_data=f"mgr:portfolio:{master.id}"),
         InlineKeyboardButton(text="⭐ Отзывы", callback_data=f"mgr:reviews:{master.id}"),
     ])
     rows.append([
-        InlineKeyboardButton(text="📞 Контакты", callback_data=f"mgr:contacts:{master.id}"),
+        InlineKeyboardButton(text="📊 Статистика", callback_data=f"mgr:stats:{master.id}"),
+        InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"mgr:settings:{master.id}"),
     ])
 
     # Subscription management
@@ -651,6 +656,7 @@ def crm_menu_keyboard(master_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🆕 Новые клиенты (до 30 дн.)", callback_data=f"mgr:crm:seg:{master_id}:new:1")],
         [InlineKeyboardButton(text="⏰ Давно не были (30+ дней)", callback_data=f"mgr:crm:seg:{master_id}:inactive30:1")],
         [InlineKeyboardButton(text="⏰ Давно не были (60+ дней)", callback_data=f"mgr:crm:seg:{master_id}:inactive60:1")],
+        [InlineKeyboardButton(text="📤 Экспорт клиентов (CSV)", callback_data=f"mgr:crm:export:{master_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -873,5 +879,304 @@ def manager_contact_cancel_keyboard(master_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:contacts:{master_id}")]
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Product Polish, Onboarding & Master Features Keyboards
+# ---------------------------------------------------------------------------
+
+ACTIVITY_TYPE_NAMES = {
+    "nails": "💅 Маникюр",
+    "lashes": "👁 Ресницы",
+    "brows": "✨ Брови",
+    "barber": "💇 Барбер",
+    "hair": "💇‍♀️ Парикмахер",
+    "makeup": "💄 Визаж",
+    "cosmetology": "🧴 Косметология",
+    "other": "📋 Другое",
+}
+
+
+def onboarding_activity_type_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Activity type picker during onboarding."""
+    buttons = [
+        [
+            InlineKeyboardButton(text="💅 Маникюр", callback_data=f"mgr:ob:act:{master_id}:nails"),
+            InlineKeyboardButton(text="👁 Ресницы", callback_data=f"mgr:ob:act:{master_id}:lashes"),
+        ],
+        [
+            InlineKeyboardButton(text="✨ Брови", callback_data=f"mgr:ob:act:{master_id}:brows"),
+            InlineKeyboardButton(text="💇 Барбер", callback_data=f"mgr:ob:act:{master_id}:barber"),
+        ],
+        [
+            InlineKeyboardButton(text="💇‍♀️ Парикмахер", callback_data=f"mgr:ob:act:{master_id}:hair"),
+            InlineKeyboardButton(text="💄 Визаж", callback_data=f"mgr:ob:act:{master_id}:makeup"),
+        ],
+        [
+            InlineKeyboardButton(text="🧴 Косметология", callback_data=f"mgr:ob:act:{master_id}:cosmetology"),
+            InlineKeyboardButton(text="📋 Другое", callback_data=f"mgr:ob:act:{master_id}:other"),
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="mgr:projects")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def onboarding_skip_keyboard(master_id: int, step: str) -> InlineKeyboardMarkup:
+    """Skip button for optional onboarding steps."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏩ Пропустить этот шаг", callback_data=f"mgr:ob:skip:{master_id}:{step}")],
+            [InlineKeyboardButton(text="❌ Прервать онбординг", callback_data=f"mgr:master:{master_id}")],
+        ]
+    )
+
+
+def onboarding_suggested_service_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Accept or customize suggested service during onboarding."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Добавить предложенную услугу", callback_data=f"mgr:ob:srv:accept:{master_id}")],
+            [InlineKeyboardButton(text="✏️ Ввести другое название", callback_data=f"mgr:ob:srv:custom:{master_id}")],
+            [InlineKeyboardButton(text="⏩ Настроить услуги позже", callback_data=f"mgr:ob:skip:{master_id}:service")],
+        ]
+    )
+
+
+def onboarding_schedule_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Accept standard schedule or skip."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Принять базовый график (Пн–Пт 10:00–19:00)", callback_data=f"mgr:ob:sch:accept:{master_id}")],
+            [InlineKeyboardButton(text="⏩ Настроить график позже", callback_data=f"mgr:ob:skip:{master_id}:schedule")],
+        ]
+    )
+
+
+def onboarding_completion_keyboard(master_id: int, bot_instance: Optional[BotInstance] = None) -> InlineKeyboardMarkup:
+    """Final screen of onboarding with immediate access to bot."""
+    buttons = []
+    if bot_instance and bot_instance.telegram_username and bot_instance.status == BotInstanceStatus.ACTIVE:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🤖 Открыть клиентского бота",
+                url=f"https://t.me/{bot_instance.telegram_username}",
+            )
+        ])
+    elif bot_instance and bot_instance.status == BotInstanceStatus.SETUP_REQUIRED and bot_instance.telegram_username:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🔗 Открыть бота (Admin)",
+                url=f"https://t.me/{bot_instance.telegram_username}?start=admin",
+            )
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🤖 Подключить Telegram-бота",
+                callback_data=f"mgr:bot:connect:{master_id}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="⚙️ Перейти в управление проектом", callback_data=f"mgr:master:{master_id}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def manager_services_list_keyboard(master_id: int, services: Sequence[Service]) -> InlineKeyboardMarkup:
+    """List of services in Manager Bot."""
+    buttons = []
+    for s in services:
+        if s.is_archived:
+            continue
+        status_icon = "🟢" if s.is_active else "🔴"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{status_icon} {s.title} • {int(s.price)} ₽ ({s.duration_min} мин)",
+                callback_data=f"mgr:srv:card:{master_id}:{s.id}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="➕ Добавить услугу", callback_data=f"mgr:srv:add:{master_id}")
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def manager_service_detail_keyboard(master_id: int, service: Service) -> InlineKeyboardMarkup:
+    """Manage single service actions."""
+    toggle_text = "🔴 Выключить услугу" if service.is_active else "🟢 Включить услугу"
+    dep_text = f"💳 Предоплата: {int(service.deposit_value)}%" if service.deposit_type == DepositType.PERCENT else f"💳 Предоплата: {int(service.deposit_value)} ₽"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Название", callback_data=f"mgr:srv:edit:{master_id}:{service.id}:title"),
+                InlineKeyboardButton(text="💰 Цена", callback_data=f"mgr:srv:edit:{master_id}:{service.id}:price"),
+            ],
+            [
+                InlineKeyboardButton(text="⏱ Длительность", callback_data=f"mgr:srv:edit:{master_id}:{service.id}:duration"),
+                InlineKeyboardButton(text="⏳ Буфер", callback_data=f"mgr:srv:edit:{master_id}:{service.id}:buffer"),
+            ],
+            [
+                InlineKeyboardButton(text=dep_text, callback_data=f"mgr:srv:edit:{master_id}:{service.id}:deposit"),
+            ],
+            [
+                InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:srv:toggle:{master_id}:{service.id}"),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"mgr:srv:delete:{master_id}:{service.id}"),
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ К списку услуг", callback_data=f"mgr:services:{master_id}")
+            ],
+        ]
+    )
+
+
+def manager_portfolio_categories_keyboard(
+    master_id: int, categories: Sequence[PortfolioCategory]
+) -> InlineKeyboardMarkup:
+    """List of portfolio categories in Manager Bot."""
+    buttons = []
+    for cat in categories:
+        count = len(cat.items) if hasattr(cat, "items") and cat.items is not None else 0
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"📁 {cat.title} ({count} фото)",
+                callback_data=f"mgr:port:cat:{master_id}:{cat.id}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="➕ Добавить категорию", callback_data=f"mgr:port:cat:add:{master_id}")
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def manager_portfolio_items_keyboard(
+    master_id: int, category_id: int, items: Sequence[PortfolioItem]
+) -> InlineKeyboardMarkup:
+    """Items inside category."""
+    buttons = []
+    for item in items:
+        title = item.title or (item.caption[:25] + "..." if item.caption and len(item.caption) > 25 else item.caption) or f"Фото #{item.id}"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"🖼 {title}",
+                callback_data=f"mgr:port:item:{master_id}:{item.id}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="➕ Добавить фото", callback_data=f"mgr:port:item:add:{master_id}:{category_id}")
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="🗑 Удалить категорию", callback_data=f"mgr:port:cat:del:{master_id}:{category_id}"),
+        InlineKeyboardButton(text="⬅️ К категориям", callback_data=f"mgr:portfolio:{master_id}"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def manager_portfolio_item_detail_keyboard(
+    master_id: int, item_id: int, category_id: int
+) -> InlineKeyboardMarkup:
+    """Portfolio item detail actions."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Удалить это фото", callback_data=f"mgr:port:item:del:{master_id}:{item_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад в категорию", callback_data=f"mgr:port:cat:{master_id}:{category_id}")],
+        ]
+    )
+
+
+def manager_schedule_menu_keyboard(
+    master_id: int, settings_obj: Optional[MasterSettings] = None
+) -> InlineKeyboardMarkup:
+    """Schedule settings menu."""
+    adv_h = settings_obj.min_advance_hours if settings_obj else 2
+    horiz_d = settings_obj.booking_horizon_days if settings_obj else 30
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🕒 Рабочие дни и часы", callback_data=f"mgr:sch:hours:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="☕️ Перерывы", callback_data=f"mgr:sch:breaks:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🏖 Добавить выходной / отпуск", callback_data=f"mgr:sch:dayoff:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text=f"⏱ Минимум за {adv_h} ч.", callback_data=f"mgr:sch:advance:{master_id}"),
+                InlineKeyboardButton(text=f"📆 Горизонт {horiz_d} дн.", callback_data=f"mgr:sch:horizon:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")
+            ],
+        ]
+    )
+
+
+def manager_settings_menu_keyboard(
+    master_id: int, settings_obj: Optional[MasterSettings] = None
+) -> InlineKeyboardMarkup:
+    """Master project settings menu."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🏷 Название проекта", callback_data=f"mgr:set:name:{master_id}"),
+                InlineKeyboardButton(text="📝 Описание / О себе", callback_data=f"mgr:set:about:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="📞 Контакты студии", callback_data=f"mgr:contacts:{master_id}"),
+                InlineKeyboardButton(text="📅 Расписание", callback_data=f"mgr:schedule:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="💅 Услуги и прайс", callback_data=f"mgr:services:{master_id}"),
+                InlineKeyboardButton(text="🖼 Портфолио", callback_data=f"mgr:portfolio:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔔 Уведомления", callback_data=f"mgr:set:notif:{master_id}"),
+                InlineKeyboardButton(text="💳 Предоплата", callback_data=f"mgr:set:prepay:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🤖 Настройки бота", callback_data=f"mgr:master:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"mgr:master:{master_id}")
+            ],
+        ]
+    )
+
+
+def manager_notification_settings_keyboard(
+    master_id: int, reminder_24h: bool, reminder_3h: bool
+) -> InlineKeyboardMarkup:
+    """Toggle 24h / 3h reminders."""
+    t24 = "🟢 Напоминание за 24 ч.: ВКЛ" if reminder_24h else "🔴 Напоминание за 24 ч.: ВЫКЛ"
+    t3 = "🟢 Напоминание за 3 ч.: ВКЛ" if reminder_3h else "🔴 Напоминание за 3 ч.: ВЫКЛ"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t24, callback_data=f"mgr:notif:toggle:{master_id}:24h")],
+            [InlineKeyboardButton(text=t3, callback_data=f"mgr:notif:toggle:{master_id}:3h")],
+            [InlineKeyboardButton(text="⬅️ Назад к настройкам", callback_data=f"mgr:settings:{master_id}")],
+        ]
+    )
+
+
+def manager_prepayment_settings_keyboard(
+    master_id: int, settings_obj: Optional[MasterSettings] = None
+) -> InlineKeyboardMarkup:
+    """Prepayment rules configuration."""
+    cancel_h = settings_obj.cancel_policy_hours if settings_obj else 24
+    hold_m = settings_obj.hold_duration_minutes if settings_obj else 30
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"⏱ Время на оплату чека: {hold_m} мин", callback_data=f"mgr:prepay:hold:{master_id}")],
+            [InlineKeyboardButton(text=f"🚫 Бесплатная отмена за: {cancel_h} ч", callback_data=f"mgr:prepay:cancel:{master_id}")],
+            [InlineKeyboardButton(text="💅 Настроить размер предоплаты в услугах", callback_data=f"mgr:services:{master_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад к настройкам", callback_data=f"mgr:settings:{master_id}")],
         ]
     )

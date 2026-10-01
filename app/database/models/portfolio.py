@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -56,10 +57,17 @@ class PortfolioItem(Base):
     category_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("portfolio_categories.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    service_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("services.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    title: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     telegram_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
     telegram_file_unique_id: Mapped[str] = mapped_column(String(255), nullable=False)
     caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     display_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
