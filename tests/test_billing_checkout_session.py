@@ -36,7 +36,7 @@ def billing_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "yookassa_mode", "test")
     monkeypatch.setattr(settings, "yookassa_test_shop_id", "test-shop")
     monkeypatch.setattr(settings, "yookassa_test_secret_key", SecretStr("test-secret"))
-    monkeypatch.setattr(settings, "billing_return_url", "https://zapisflow.su/billing/success")
+    monkeypatch.setattr(settings, "billing_return_url", "https://pay.zapisflow.su/billing/success")
     monkeypatch.setattr(settings, "yookassa_receipt_vat_code", "1")
     monkeypatch.setattr(settings, "yookassa_receipt_payment_subject", "service")
     monkeypatch.setattr(settings, "yookassa_receipt_payment_mode", "full_payment")
@@ -144,7 +144,7 @@ async def test_web_checkout_ignores_browser_price_plan_and_user_parameters(
     token, order, _ = await issue_link(sessions, owner_id=owner_a, master_id=master_a, code=code_a, fake=fake)
     app = create_app(session_factory=sessions)
     with patch("app.web.app.YooKassaClient", return_value=fake):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="https://zapisflow.su") as web:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="https://pay.zapisflow.su") as web:
             page = await web.get(f"/billing/checkout/{token}")
             assert page.status_code == 200 and "499 ₽" in page.text and "30 дней" in page.text
             assert page.headers["cache-control"].startswith("no-store")
@@ -224,7 +224,7 @@ async def test_manager_pay_callback_creates_link_after_business_commit(
     markup = callback.message.edit_text.call_args.kwargs["reply_markup"]
     buttons = [button for row in markup.inline_keyboard for button in row]
     urls = [button.url for button in buttons if button.url and "/billing/checkout/" in button.url]
-    assert len(urls) == 1 and urls[0].startswith("https://zapisflow.su/billing/checkout/")
+    assert len(urls) == 1 and urls[0].startswith("https://pay.zapisflow.su/billing/checkout/")
     assert urls[0].split("/")[-1] != str(owner_id)
     async with sessions() as session:
         rows = (await session.scalars(select(CheckoutSession).where(CheckoutSession.master_id == master_id))).all()
@@ -244,7 +244,7 @@ async def test_checkout_page_escapes_plan_name_and_uses_configured_support(
     )
     monkeypatch.setattr(settings, "support_telegram_username", "help_zapisflow")
     app = create_app(session_factory=sessions)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://zapisflow.su") as web:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://pay.zapisflow.su") as web:
         response = await web.get(f"/billing/checkout/{token}")
         assert response.status_code == 200
         assert "<script>" not in response.text

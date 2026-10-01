@@ -44,8 +44,8 @@
     }
 }
 
-# The independent ZapisFlow website hosts only the SaaS billing routes here.
-{$BILLING_DOMAIN:zapisflow.su} {
+# The billing subdomain is separate from the existing zapisflow.su website.
+{$BILLING_DOMAIN:pay.zapisflow.su} {
     log {
         output stdout
         format json

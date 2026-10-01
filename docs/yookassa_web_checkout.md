@@ -1,7 +1,8 @@
 # YooKassa SaaS checkout on the ZapisFlow website
 
-The external website at `https://zapisflow.su` serves the checkout page. The
-API host remains `https://api.zapisflow.su`; configure its YooKassa notification
+The dedicated billing host at `https://pay.zapisflow.su` serves the checkout
+page. The existing `https://zapisflow.su` site remains on its current hosting.
+The API host remains `https://api.zapisflow.su`; configure its YooKassa notification
 URL as `https://api.zapisflow.su/billing/yookassa/webhook`. This channel is for
 ZapisFlow SaaS subscriptions only. Customer payments for a master's services
 remain separate. Telegram invoices and Stars are separate payment channels;
@@ -47,8 +48,8 @@ TLS are verified. Never commit real shop secrets. Required when enabled:
 * `YOOKASSA_TEST_SHOP_ID`, `YOOKASSA_TEST_SECRET_KEY` for the test shop
 * `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY` for the live shop
 * `PAYMENT_CURRENCY=RUB`
-* `BILLING_DOMAIN=zapisflow.su` for Caddy
-* `BILLING_RETURN_URL=https://zapisflow.su/billing/success`
+* `BILLING_DOMAIN=pay.zapisflow.su` for Caddy
+* `BILLING_RETURN_URL=https://pay.zapisflow.su/billing/success`
 * `YOOKASSA_RECEIPT_VAT_CODE`
 * `YOOKASSA_RECEIPT_PAYMENT_SUBJECT`
 * `YOOKASSA_RECEIPT_PAYMENT_MODE`
@@ -77,7 +78,8 @@ activation and duplicate notification behavior, then configure the live shop
 and enable `PAYMENT_PROVIDER=yookassa_web`. Do not treat a browser return as
 proof of payment.
 
-Before replacing the VPS Caddyfile, inspect the current `zapisflow.su` site
-configuration. The repository's billing host block serves the billing routes
-and returns 404 for other paths; merge these routes into the existing site
-block if it also serves other pages. Do not overwrite a live website's routes.
+Create an `A` record for `pay.zapisflow.su` pointing to `185.221.23.193`.
+If an `AAAA` record is present, point it to a working IPv6 address on the same
+VPS or remove it. Leave the `zapisflow.su` DNS records and OpenResty hosting
+unchanged. After DNS propagation, Caddy will obtain a separate certificate for
+`pay.zapisflow.su`. Verify TLS and the checkout routes before enabling payment.
