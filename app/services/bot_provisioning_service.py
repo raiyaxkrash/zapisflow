@@ -371,9 +371,11 @@ class BotProvisioningService:
         self,
         bot_instance_id: int,
         actor_user_id: int,
+        *,
+        commit: bool = True,
     ) -> BotInstance:
-        """Disable a customer bot and remove its webhook."""
-        bot_instance = await self.bot_repo.get_by_id_and_owner(bot_instance_id, actor_user_id)
+        """Disable a bot. The caller owns commit when commit=False (webhook flow)."""
+        bot_instance = await self._locked_bot(bot_instance_id, actor_user_id)
         if not bot_instance:
             raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
         if bot_instance.status == BotInstanceStatus.DISABLED:
@@ -397,12 +399,6 @@ class BotProvisioningService:
 
         # 2. Update status in database
         bot_instance.status = BotInstanceStatus.DISABLED
-        await self.session.commit()
-
-        # 3. Invalidate BotRegistry
-        if self.registry:
-            await self.registry.invalidate_bot(bot_instance.id)
-
         await self.audit_service.log_event(
             action=AuditEvent.BOT_DISABLED,
             actor_user_id=actor_user_id,
@@ -410,16 +406,18 @@ class BotProvisioningService:
             entity_id=bot_instance.id,
             payload_after={"status": "DISABLED"},
         )
-        await self.session.commit()
+        await self._finish_state_change(bot_instance.id, "manual", commit=commit)
         return bot_instance
 
     async def enable_bot(
         self,
         bot_instance_id: int,
         actor_user_id: int,
+        *,
+        commit: bool = True,
     ) -> BotInstance:
-        """Re-enable a disabled bot by restoring its webhook."""
-        bot_instance = await self.bot_repo.get_by_id_and_owner(bot_instance_id, actor_user_id)
+        """Re-enable a bot. The caller owns commit when commit=False."""
+        bot_instance = await self._locked_bot(bot_instance_id, actor_user_id)
         if not bot_instance:
             raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
         if bot_instance.status in (BotInstanceStatus.SETUP_REQUIRED, BotInstanceStatus.ACTIVE):
@@ -456,16 +454,12 @@ class BotProvisioningService:
 
             bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
             bot_instance.last_error = None
-            await self.session.commit()
         except Exception as exc:
             bot_instance.status = BotInstanceStatus.ERROR
             bot_instance.last_error = f"Ошибка включения бота: {redact_token(str(exc)[:200])}"
-            await self.session.commit()
+            if commit:
+                await self.session.commit()
             raise ProvisioningWebhookError(bot_instance.last_error) from exc
-
-        # Invalidate BotRegistry so fresh bot instance is used
-        if self.registry:
-            await self.registry.invalidate_bot(bot_instance.id)
 
         await self.audit_service.log_event(
             action=AuditEvent.BOT_ENABLED,
@@ -474,7 +468,7 @@ class BotProvisioningService:
             entity_id=bot_instance.id,
             payload_after={"status": "SETUP_REQUIRED"},
         )
-        await self.session.commit()
+        await self._finish_state_change(bot_instance.id, "manual", commit=commit)
         return bot_instance
 
     async def activate_master_and_bot(
@@ -527,15 +521,16 @@ class BotProvisioningService:
         bot_instance_id: int,
         actor_user_id: int,
         is_platform_admin: bool = False,
+        *,
+        commit: bool = True,
     ) -> BotInstance:
         """Logically delete / unlink a customer bot instance and revoke its webhook."""
-        if is_platform_admin:
-            bot_instance = await self.bot_repo.get_by_id(bot_instance_id)
-        else:
-            bot_instance = await self.bot_repo.get_by_id_and_owner(bot_instance_id, actor_user_id)
+        bot_instance = await self._locked_bot(bot_instance_id, actor_user_id, is_platform_admin)
 
         if not bot_instance:
             raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
+        if bot_instance.status == BotInstanceStatus.DISABLED and not bot_instance.is_current:
+            return bot_instance
 
         # 1. Best-effort deleteWebhook in Telegram
         if bot_instance.encrypted_token and bot_instance.telegram_bot_id:
@@ -562,13 +557,7 @@ class BotProvisioningService:
         if master and master.status == MasterStatus.ACTIVE:
             master.status = MasterStatus.SETUP_REQUIRED
 
-        await self.session.commit()
-
-        # 3. Invalidate BotRegistry runtime pool & redis bus
-        if self.registry:
-            await self.registry.invalidate_bot(bot_instance.id, reason="bot_deleted")
-
-        # 4. Audit log
+        # Audit and state are committed together by the transaction owner.
         await self.audit_service.log_event(
             action=AuditEvent.BOT_DELETED,
             actor_user_id=actor_user_id,
@@ -576,5 +565,33 @@ class BotProvisioningService:
             entity_id=bot_instance.id,
             payload_after={"status": "DISABLED", "is_current": False},
         )
-        await self.session.commit()
+        await self._finish_state_change(bot_instance.id, "bot_deleted", commit=commit)
         return bot_instance
+
+    async def _locked_bot(
+        self, bot_instance_id: int, actor_user_id: int, is_platform_admin: bool = False,
+    ) -> BotInstance | None:
+        """Serialize state changes and refresh any identity-map copy loaded by a handler."""
+        stmt = select(BotInstance).where(BotInstance.id == bot_instance_id)
+        if not is_platform_admin:
+            stmt = stmt.join(Master, BotInstance.master_id == Master.id).where(
+                Master.owner_user_id == actor_user_id
+            )
+        return await self.session.scalar(
+            stmt.with_for_update(of=BotInstance).execution_options(populate_existing=True)
+        )
+
+    async def _finish_state_change(self, bot_id: int, reason: str, *, commit: bool) -> None:
+        await self.session.flush()
+        async def invalidate() -> None:
+            if self.registry:
+                if reason == "manual":
+                    await self.registry.invalidate_bot(bot_id)
+                else:
+                    await self.registry.invalidate_bot(bot_id, reason=reason)
+        if commit:
+            await self.session.commit()
+            await invalidate()
+        elif self.registry:
+            # Publish only after the middleware has committed state and its update ledger.
+            self.session.info.setdefault("post_commit", []).append(invalidate)

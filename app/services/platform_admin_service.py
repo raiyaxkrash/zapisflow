@@ -390,29 +390,32 @@ class PlatformAdminService:
         offset = max(0, (page - 1) * per_page)
 
         query = (
-            select(BotInstance)
-            .options(selectinload(BotInstance.master))
+            select(
+                BotInstance.id, BotInstance.telegram_username, BotInstance.telegram_bot_id,
+                BotInstance.status, BotInstance.is_current, BotInstance.master_id,
+                BotInstance.last_error, BotInstance.created_at, Master.display_name,
+                User.username,
+            )
+            .join(Master, Master.id == BotInstance.master_id)
+            .join(User, User.id == Master.owner_user_id)
             .order_by(desc(BotInstance.created_at))
             .offset(offset)
             .limit(per_page)
         )
         res = await self.session.execute(query)
-        bots = res.scalars().all()
+        bots = res.all()
 
         items = []
         for b in bots:
-            owner = None
-            if b.master:
-                owner = await self.session.get(User, b.master.owner_user_id)
             items.append({
                 "id": b.id,
                 "telegram_username": b.telegram_username,
                 "telegram_bot_id": b.telegram_bot_id,
                 "status": b.status.value,
                 "is_current": b.is_current,
-                "master_name": b.master.display_name if b.master else "Без проекта",
+                "master_name": b.display_name,
                 "master_id": b.master_id,
-                "owner_username": owner.username if owner else None,
+                "owner_username": b.username,
                 "last_error": b.last_error,
                 "created_at": b.created_at,
             })
@@ -420,33 +423,42 @@ class PlatformAdminService:
         return items, total, total_pages
 
     async def get_bot_details(self, bot_id: int) -> Optional[Dict[str, Any]]:
-        """Fetch bot instance configuration without exposing raw tokens."""
-        bot = await self.bot_repo.get_by_id(bot_id)
-        if not bot:
+        """Build a DTO from explicit scalar SQL; never lazy-load expired ORM fields."""
+        row = (await self.session.execute(
+            select(
+                BotInstance.id, BotInstance.public_id, BotInstance.telegram_bot_id,
+                BotInstance.telegram_username, BotInstance.telegram_first_name,
+                BotInstance.master_id, BotInstance.status, BotInstance.is_current,
+                BotInstance.token_version, BotInstance.last_error,
+                BotInstance.created_at, BotInstance.updated_at,
+                Master.display_name, User.username,
+            )
+            .join(Master, Master.id == BotInstance.master_id)
+            .join(User, User.id == Master.owner_user_id)
+            .where(BotInstance.id == bot_id)
+        )).one_or_none()
+        if row is None:
             return None
 
-        master = await self.master_repo.get_by_id(bot.master_id)
-        owner = await self.session.get(User, master.owner_user_id) if master else None
-
         base_url = settings.webhook_base_url.rstrip("/")
-        webhook_url = f"{base_url}/telegram/webhook/{bot.public_id}"
+        webhook_url = f"{base_url}/telegram/webhook/{row.public_id}"
 
         return {
-            "id": bot.id,
-            "public_id": str(bot.public_id),
-            "telegram_bot_id": bot.telegram_bot_id,
-            "telegram_username": bot.telegram_username,
-            "telegram_first_name": bot.telegram_first_name,
-            "master_id": bot.master_id,
-            "master_name": master.display_name if master else "Удалён",
-            "owner_username": owner.username if owner else None,
-            "status": bot.status.value,
-            "is_current": bot.is_current,
-            "token_version": bot.token_version,
-            "last_error": bot.last_error,
+            "id": row.id,
+            "public_id": str(row.public_id),
+            "telegram_bot_id": row.telegram_bot_id,
+            "telegram_username": row.telegram_username,
+            "telegram_first_name": row.telegram_first_name,
+            "master_id": row.master_id,
+            "master_name": row.display_name,
+            "owner_username": row.username,
+            "status": row.status.value,
+            "is_current": row.is_current,
+            "token_version": row.token_version,
+            "last_error": row.last_error,
             "webhook_url": webhook_url,
-            "created_at": bot.created_at,
-            "updated_at": bot.updated_at,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
         }
 
     async def list_subscriptions(

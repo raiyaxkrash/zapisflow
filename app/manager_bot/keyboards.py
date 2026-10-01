@@ -544,10 +544,11 @@ def admin_bots_keyboard(
 def admin_bot_detail_keyboard(bot_id: int, is_active: bool) -> InlineKeyboardMarkup:
     """Bot instance detail actions."""
     toggle_text = "⏸ Отключить бота" if is_active else "▶️ Включить бота"
+    action = "disable" if is_active else "enable"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Проверить webhook", callback_data=f"mgr:admin:bot:webhook:{bot_id}")],
-            [InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:admin:bot:toggle:{bot_id}")],
+            [InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:admin:bot:{action}:{bot_id}")],
             [InlineKeyboardButton(text="🗑 Удалить бота", callback_data=f"mgr:admin:bot:delete:{bot_id}")],
             [InlineKeyboardButton(text="⬅️ К списку ботов", callback_data="mgr:admin:bots")],
         ]

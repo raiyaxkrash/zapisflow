@@ -1334,7 +1334,7 @@ async def cb_confirm_disable_bot(
 
     service = BotProvisioningService(session=session, registry=registry)
     try:
-        await service.disable_bot(bot.id, user.id)
+        await service.disable_bot(bot.id, user.id, commit=False)
         updated_master = await master_repo.get_by_id(master_id)
         updated_bot = await bot_repo.get_current_for_master(master_id)
         text = (
@@ -1348,8 +1348,9 @@ async def cb_confirm_disable_bot(
         )
     except Exception as exc:
         logger.error("Failed to disable bot %s for master %s: %s", bot.id, master_id, exc)
-        await callback.answer("Ошибка при отключении. Обратитесь в поддержку.", show_alert=True)
-    await callback.answer()
+        await _answer_bot_callback(callback, "Ошибка при отключении. Обратитесь в поддержку.", show_alert=True)
+        raise
+    await _answer_bot_callback(callback)
 
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:enable:"))
@@ -1376,7 +1377,7 @@ async def cb_enable_bot(
 
     service = BotProvisioningService(session=session, registry=registry)
     try:
-        await service.enable_bot(bot.id, user.id)
+        await service.enable_bot(bot.id, user.id, commit=False)
         updated_master = await master_repo.get_by_id(master_id)
         updated_bot = await bot_repo.get_current_for_master(master_id)
         readiness_service = MasterReadinessService(session)
@@ -1385,12 +1386,13 @@ async def cb_enable_bot(
             "▶️ <b>Бот успешно включён!</b> Вебхук восстановлен.",
             reply_markup=project_card_keyboard(updated_master or master, updated_bot, is_ready),
         )
-    except Exception as exc:
+    except Exception:
         await callback.message.edit_text(
             "❌ <b>Не удалось включить бота.</b> Обратитесь в поддержку.",
             reply_markup=project_card_keyboard(master, bot),
         )
-    await callback.answer()
+        raise
+    await _answer_bot_callback(callback)
 
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:rotate:"))
@@ -1947,13 +1949,13 @@ async def cb_bot_delete_confirm(
 
     bot_svc = BotProvisioningService(session, registry=bot_registry)
     try:
-        await bot_svc.delete_bot(bot.id, actor_user_id=user.id)
+        await bot_svc.delete_bot(bot.id, actor_user_id=user.id, commit=False)
     except Exception as exc:
         logger.exception("Error deleting bot: %s", exc)
-        await callback.answer("Не удалось удалить бота. Попробуйте позже.", show_alert=True)
-        return
+        await _answer_bot_callback(callback, "Не удалось удалить бота. Попробуйте позже.", show_alert=True)
+        raise
 
-    await callback.answer("✅ Бот успешно отключён и удалён из проекта.", show_alert=True)
+    await _answer_bot_callback(callback, "✅ Бот успешно отключён и удалён из проекта.", show_alert=True)
     master = await master_repo.get_by_id(master_id)
     text = (
         f"🏢 Проект: <b>{escape(master.display_name)}</b>\n\n"
@@ -2266,16 +2268,40 @@ async def cb_admin_bot_webhook(callback: CallbackQuery, session: AsyncSession) -
     await callback.answer(msg, show_alert=True)
 
 
+async def _answer_bot_callback(callback: CallbackQuery, text: str = "", *, show_alert: bool = False) -> None:
+    """An expired answerCallbackQuery must not roll back a successful state change."""
+    try:
+        await callback.answer(text, show_alert=show_alert)
+    except TelegramBadRequest as exc:
+        message = str(exc).lower()
+        if "query is too old" not in message and "query id is invalid" not in message:
+            raise
+
+
 @manager_router.callback_query(F.data.startswith("mgr:admin:bot:toggle:"))
-async def cb_admin_bot_toggle(
+async def cb_admin_bot_toggle(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Legacy button is read-only: a replay must never invert the current state."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    await _answer_bot_callback(callback, "Кнопка устарела. Откройте карточку бота заново.", show_alert=True)
+
+
+@manager_router.callback_query(F.data.startswith("mgr:admin:bot:disable:"))
+@manager_router.callback_query(F.data.startswith("mgr:admin:bot:enable:"))
+async def cb_admin_bot_set_state(
     callback: CallbackQuery, session: AsyncSession, bot_registry: Optional[BotRegistry] = None
 ) -> None:
-    """Toggle bot disabled/enabled status."""
+    """Apply an explicit desired state within the webhook transaction."""
     is_admin, user = await _ensure_platform_admin(session, callback)
     if not is_admin:
         return
 
-    bot_id = int(callback.data.split(":")[-1])
+    parts = callback.data.split(":")
+    if len(parts) != 5 or parts[3] not in {"enable", "disable"} or not parts[4].isdigit():
+        await _answer_bot_callback(callback, "Некорректная кнопка.", show_alert=True)
+        return
+    desired_action, bot_id = parts[3], int(parts[4])
     bot_svc = BotProvisioningService(session, registry=bot_registry)
     bot_repo = BotInstanceRepository(session)
     bot = await bot_repo.get_by_id(bot_id)
@@ -2287,32 +2313,26 @@ async def cb_admin_bot_toggle(
     master = await master_repo.get_by_id(bot.master_id)
     actor_id = master.owner_user_id if master else user.id
 
-    try:
-        if bot.status == BotInstanceStatus.DISABLED:
-            await bot_svc.enable_bot(bot.id, actor_user_id=actor_id)
-            await callback.answer("Бот успешно включён.", show_alert=True)
-        else:
-            await bot_svc.disable_bot(bot.id, actor_user_id=actor_id)
-            await callback.answer("Бот успешно отключён.", show_alert=True)
-    except Exception as exc:
-        logger.exception("Error toggling bot status: %s", exc)
-        await callback.answer(f"Ошибка: {str(exc)[:150]}", show_alert=True)
+    if desired_action == "enable":
+        await bot_svc.enable_bot(bot.id, actor_user_id=actor_id, commit=False)
+    else:
+        await bot_svc.disable_bot(bot.id, actor_user_id=actor_id, commit=False)
 
-    # Refresh
     admin_svc = PlatformAdminService(session)
     b = await admin_svc.get_bot_details(bot_id)
     if b:
-        is_active = b["status"] == "ACTIVE"
+        is_active = b["status"] in {"ACTIVE", "SETUP_REQUIRED"}
         text = (
             f"🤖 <b>Бот #{b['id']}</b>\n\n"
-            f"Username: @{b['telegram_username'] or '-'}\n"
+            f"Username: @{escape(b['telegram_username'] or '-')}\n"
             f"Имя: {escape(b['telegram_first_name'] or '-')}\n"
             f"Статус: <b>{b['status']}</b>\n"
             f"Проект: <b>{escape(b['master_name'])}</b>\n"
             f"Версия токена: v{b['token_version']}\n"
-            f"Ошибка: {b['last_error'] or 'Нет'}\n"
+            f"Ошибка: {escape(b['last_error'] or 'Нет')}\n"
         )
         await callback.message.edit_text(text, reply_markup=admin_bot_detail_keyboard(bot_id, is_active))
+    await _answer_bot_callback(callback)
 
 
 @manager_router.callback_query(F.data.startswith("mgr:admin:bot:delete:"))
@@ -2327,12 +2347,12 @@ async def cb_admin_bot_delete(
     bot_id = int(callback.data.split(":")[-1])
     bot_svc = BotProvisioningService(session, registry=bot_registry)
     try:
-        await bot_svc.delete_bot(bot_id, actor_user_id=user.id, is_platform_admin=True)
-        await callback.answer("Бот успешно удалён из платформы.", show_alert=True)
+        await bot_svc.delete_bot(bot_id, actor_user_id=user.id, is_platform_admin=True, commit=False)
+        await _answer_bot_callback(callback, "Бот успешно удалён из платформы.", show_alert=True)
     except Exception as exc:
         logger.exception("Error deleting bot: %s", exc)
-        await callback.answer("Не удалось удалить бота.", show_alert=True)
-        return
+        await _answer_bot_callback(callback, "Не удалось удалить бота.", show_alert=True)
+        raise
 
     # Return to bots list
     admin_svc = PlatformAdminService(session)
@@ -2358,7 +2378,7 @@ async def cb_admin_bot_detail(callback: CallbackQuery, session: AsyncSession) ->
         await callback.answer("Бот не найден.", show_alert=True)
         return
 
-    is_active = b["status"] == "ACTIVE"
+    is_active = b["status"] in {"ACTIVE", "SETUP_REQUIRED"}
     text = (
         f"🤖 <b>Бот #{b['id']}</b>\n\n"
         f"Username: @{b['telegram_username'] or '-'}\n"
