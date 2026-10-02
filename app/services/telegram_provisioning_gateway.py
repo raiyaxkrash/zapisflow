@@ -28,6 +28,11 @@ from app.services.exceptions import (
 
 logger = logging.getLogger(__name__)
 
+# Telegram keeps the previous allowed_updates value when setWebhook omits the
+# parameter. Always subscribe client bots to both messages and inline callbacks
+# so a bot previously configured for message-only updates can recover safely.
+REQUIRED_WEBHOOK_UPDATES = ("message", "callback_query")
+
 
 @dataclass(frozen=True)
 class BotIdentity:
@@ -95,13 +100,18 @@ class TelegramProvisioningGateway:
 
         Always closes the temporary bot session in a finally block.
         """
+        configured_updates = list(allowed_updates or ())
+        for update_type in REQUIRED_WEBHOOK_UPDATES:
+            if update_type not in configured_updates:
+                configured_updates.append(update_type)
+
         bot = self._create_temp_bot(token)
         try:
             result = await asyncio.wait_for(
                 bot.set_webhook(
                     url=url,
                     secret_token=secret_token,
-                    allowed_updates=allowed_updates,
+                    allowed_updates=configured_updates,
                     drop_pending_updates=drop_pending_updates,
                 ),
                 timeout=self.request_timeout,
