@@ -46,6 +46,7 @@ from app.services.telegram_outbox import (
 from app.services.exceptions import (
     PaymentRequisitesMissingError,
     SlotAlreadyBookedError,
+    StaffServiceUnavailableError,
     SubscriptionExpiredError,
 )
 from app.services.slot_engine import SlotEngine
@@ -625,6 +626,13 @@ async def cb_agree_policy(
         )
         return
     except PaymentRequisitesMissingError as exc:
+        await callback.answer(exc.message, show_alert=True)
+        return
+    except StaffServiceUnavailableError as exc:
+        # A staff/service assignment can change while the client is in the
+        # booking flow. Treat this as a completed business rejection so the
+        # update is acknowledged and Telegram cannot retry the mutation.
+        await state.clear()
         await callback.answer(exc.message, show_alert=True)
         return
     except SubscriptionExpiredError as exc:

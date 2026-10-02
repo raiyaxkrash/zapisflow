@@ -16,6 +16,7 @@ from app.services.exceptions import (
     PaymentRequisitesMissingError,
     ServiceNotFoundError,
     SlotAlreadyBookedError,
+    StaffServiceUnavailableError,
     UserNotFoundError,
 )
 
@@ -114,9 +115,12 @@ async def test_zero_deposit_client_booking_is_confirmed_without_payment_or_requi
     )
     from app.database.models.staff import StaffMember
     service.staff_repo = AsyncMock()
-    service.staff_repo.get_primary_or_default.return_value = StaffMember(
+    unconfigured_staff = StaffMember(
         id=1, master_id=1, display_name="Staff", is_active=True
     )
+    service.staff_repo.get_primary_or_default.return_value = unconfigured_staff
+    service.staff_repo.get_by_id.return_value = unconfigured_staff
+    service.staff_repo.list_services_for_staff.return_value = []
     service.appointment_repo = AsyncMock()
     service.appointment_repo.get_active_overlapping.return_value = []
     service.master_settings_repo = AsyncMock()
@@ -131,12 +135,54 @@ async def test_zero_deposit_client_booking_is_confirmed_without_payment_or_requi
             user_id=1,
             service_id=10,
             start_time=datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc),
+            staff_id=1,
         )
 
     assert appointment.status == AppointmentStatus.CONFIRMED
     assert appointment.hold_until is None
     assert payment is None
     service.payment_repo.create_payment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_booking_rejects_service_outside_configured_staff_allow_list() -> None:
+    session = AsyncMock()
+    session.add = MagicMock()
+    service = BookingService(session)
+    service.access_policy = AsyncMock()
+    service.access_policy.can_create_hold.return_value = True
+    service.user_repo = AsyncMock()
+    service.user_repo.get_by_id.return_value = User(id=1, telegram_id=123, first_name="Client")
+    service.service_repo = AsyncMock()
+    service.service_repo.get_by_id.return_value = Service(
+        id=10,
+        master_id=1,
+        title="Haircut",
+        price=Decimal("1000"),
+        duration_min=60,
+        buffer_min=0,
+        deposit_type=DepositType.FIXED,
+        deposit_value=Decimal("0"),
+        is_active=True,
+        is_archived=False,
+    )
+    from app.database.models.staff import StaffMember
+    service.staff_repo = AsyncMock()
+    service.staff_repo.get_by_id.return_value = StaffMember(
+        id=1, master_id=1, display_name="Staff", is_active=True
+    )
+    service.staff_repo.list_services_for_staff.return_value = [11]
+
+    with pytest.raises(StaffServiceUnavailableError):
+        await service.create_hold_booking(
+            master_id=1,
+            user_id=1,
+            service_id=10,
+            start_time=datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc),
+            staff_id=1,
+        )
+
+    session.add.assert_not_called()
 
 
 @pytest.mark.asyncio

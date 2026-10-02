@@ -4,7 +4,7 @@ import pytest
 from aiogram import F
 from aiogram.types import CallbackQuery, User as TelegramUser
 
-from app.bot.handlers.client.booking import cb_start_booking
+from app.bot.handlers.client.booking import cb_agree_policy, cb_start_booking
 from app.bot.handlers.client.callback_fallback import cb_unhandled_client_callback
 from app.bot.handlers.client import client_router
 from app.bot.handlers.client.about import router as about_router
@@ -14,6 +14,7 @@ from app.bot.handlers.client.portfolio import router as portfolio_router
 from app.bot.handlers.client.services import router as services_router
 from app.bot.keyboards.client.callbacks import MenuCallback
 from app.bot.keyboards.client.menu import get_main_menu_keyboard
+from app.services.exceptions import StaffServiceUnavailableError
 
 
 @pytest.mark.asyncio
@@ -135,5 +136,36 @@ async def test_unknown_client_callback_is_acknowledged_with_visible_alert():
 
     callback.answer.assert_awaited_once_with(
         "Эта кнопка устарела. Откройте меню командой /start и попробуйте снова.",
+        show_alert=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agree_policy_acknowledges_staff_service_change_and_clears_stale_flow():
+    callback = AsyncMock()
+    state = AsyncMock()
+    state.get_data.return_value = {"service_id": 10, "slot_timestamp": 1_800_000_000}
+    session = AsyncMock()
+    session.info = {}
+    booking_service = AsyncMock()
+    booking_service.create_hold_booking.side_effect = StaffServiceUnavailableError(
+        "Выбранный специалист больше не оказывает эту услугу. Начните запись заново."
+    )
+
+    with patch(
+        "app.bot.handlers.client.booking.BookingService",
+        return_value=booking_service,
+    ):
+        await cb_agree_policy(
+            callback=callback,
+            state=state,
+            db_user=AsyncMock(id=1),
+            session=session,
+            master_id=7,
+        )
+
+    state.clear.assert_awaited_once()
+    callback.answer.assert_awaited_once_with(
+        "Выбранный специалист больше не оказывает эту услугу. Начните запись заново.",
         show_alert=True,
     )

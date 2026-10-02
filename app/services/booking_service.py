@@ -26,6 +26,7 @@ from app.services.exceptions import (
     InvalidBookingStatusError,
     PaymentRequisitesMissingError,
     ServiceNotFoundError,
+    StaffServiceUnavailableError,
     SlotAlreadyBookedError,
     SubscriptionExpiredError,
     UserNotFoundError,
@@ -112,11 +113,18 @@ class BookingService:
         else:
             staff = await self.staff_repo.get_by_id(staff_id, master_id=master_id)
             if not staff or not staff.is_active:
-                raise ValueError("Выбранный специалист не найден или недоступен")
-            # Verify that this staff member actually provides this service
+                raise StaffServiceUnavailableError(
+                    "Выбранный специалист недоступен. Начните запись заново."
+                )
+            # An empty active mapping preserves the product's existing fallback:
+            # an unconfigured specialist can perform all active project services.
+            # Once any mappings are active, enforce the configured allow-list.
             staff_services = await self.staff_repo.list_services_for_staff(staff_id, master_id=master_id)
-            if service_id not in staff_services:
-                raise ValueError(f"Специалист {staff.display_name} не оказывает данную услугу")
+            if staff_services and service_id not in staff_services:
+                raise StaffServiceUnavailableError(
+                    "Выбранный специалист больше не оказывает эту услугу. "
+                    "Начните запись заново."
+                )
 
         # 3. Calculate time intervals using service parameters
         duration = timedelta(minutes=service.duration_min)

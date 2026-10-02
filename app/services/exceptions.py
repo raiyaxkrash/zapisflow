@@ -33,6 +33,12 @@ class ServiceNotFoundError(AppException):
     pass
 
 
+class StaffServiceUnavailableError(AppException):
+    """Raised when a selected staff member cannot perform a requested service."""
+
+    pass
+
+
 class UserNotFoundError(AppException):
     """
     Raised when a user profile is not found.
