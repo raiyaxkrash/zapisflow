@@ -37,6 +37,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
 from app.config.settings import settings
+from app.config.url_validation import miniapp_origin
 from app.core.token_crypto import TokenCrypto
 from app.database.models import (
     Appointment,
@@ -77,7 +78,6 @@ from app.services.master_contacts import CONTACT_FIELD_LABELS, normalize_contact
 from app.services.miniapp_auth import (
     MiniAppError,
     digest,
-    miniapp_origin,
     validate_init_data,
 )
 from app.services.payment_service import PaymentService

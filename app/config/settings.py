@@ -11,6 +11,8 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
+from app.config.url_validation import miniapp_origin
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -93,7 +95,6 @@ class Settings(BaseSettings):
     def validate_miniapp_url(cls, value: str) -> str:
         if not value:
             return value
-        from app.services.miniapp_auth import miniapp_origin
         return miniapp_origin(value)
     trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
 

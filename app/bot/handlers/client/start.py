@@ -13,7 +13,7 @@ from app.bot.keyboards.client import MenuCallback, get_main_menu_keyboard
 from app.database.models.master import BotInstance, BotInstanceStatus
 from app.database.models.user import User
 from app.config.settings import settings
-from app.services.miniapp_auth import miniapp_origin
+from app.config.url_validation import miniapp_origin
 
 router = Router(name="client_start")
 

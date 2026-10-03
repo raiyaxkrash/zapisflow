@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
+from app.config.url_validation import miniapp_origin
 from app.core.security import redact_token
 from app.core.token_crypto import TokenCrypto
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterStatus
@@ -354,7 +355,6 @@ class BotProvisioningService:
             # Mini App Menu Button (if configured)
             if settings.mini_app_base_url:
                 try:
-                    from app.services.miniapp_auth import miniapp_origin
                     menu_url = f"{miniapp_origin(settings.mini_app_base_url)}/b/{bot_instance.public_id}"
                     await self.gateway.set_chat_menu_button(clean_token, mini_app_url=menu_url)
                 except Exception as btn_exc:
