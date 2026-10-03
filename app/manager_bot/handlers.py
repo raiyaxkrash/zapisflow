@@ -145,6 +145,7 @@ from app.manager_bot.states import (
 )
 from app.database.models.staff import StaffMember
 from app.repositories.bot_instance_repository import BotInstanceRepository
+from app.repositories.managed_bot_request_repository import ManagedBotRequestRepository
 from app.repositories.master_repository import MasterRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.portfolio_repository import PortfolioRepository
@@ -1053,10 +1054,52 @@ async def cb_managed_bot_prepare(callback: CallbackQuery, state: FSMContext, ses
         except Exception:
             manager_username = ""
 
+    gateway = TelegramProvisioningGateway()
+    manager_token = settings.manager_bot_token.strip()
+
+    # Check manager bot mode if token is present
+    can_manage = True
+    if manager_token:
+        try:
+            can_manage = await gateway.check_manager_bot_mode(manager_token)
+        except Exception as exc:
+            logger.warning("Could not query check_manager_bot_mode: %s", exc)
+            can_manage = True
+
+    if not manager_username or not can_manage:
+        logger.warning(
+            "Manager bot not ready for managed bot creation (username=%s, can_manage=%s)",
+            manager_username,
+            can_manage,
+        )
+        text = (
+            "⚠️ <b>Создание бота через Telegram временно недоступно</b>\n\n"
+            "Платформенный бот ещё не настроен для автоматического создания ботов. "
+            "Вы можете быстро подключить своего бота по токену из BotFather."
+        )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔑 Подключить по токену", callback_data=f"mgr:bot:token:start:{master_id}")],
+                [InlineKeyboardButton(text="« Назад", callback_data=f"mgr:bot:connect:{master_id}")],
+            ]
+        )
+        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.answer()
+        return
+
     creation_url = managed_svc.build_managed_bot_deep_link(
         manager_bot_username=manager_username,
         suggested_username=suggested_username,
         suggested_name=suggested_name,
+    )
+
+    req_repo = ManagedBotRequestRepository(session)
+    await req_repo.create_or_renew_request(
+        owner_user_id=user.id,
+        telegram_owner_user_id=callback.from_user.id,
+        master_id=master_id,
+        suggested_name=suggested_name,
+        suggested_username=suggested_username,
     )
 
     await state.set_state(ManagedBotStates.waiting_for_creation)
@@ -1162,6 +1205,16 @@ async def msg_receive_custom_bot_username(message: Message, state: FSMContext, s
         suggested_name=suggested_name,
     )
 
+    user = await _get_or_create_user(session, message.from_user)
+    req_repo = ManagedBotRequestRepository(session)
+    await req_repo.create_or_renew_request(
+        owner_user_id=user.id,
+        telegram_owner_user_id=message.from_user.id,
+        master_id=master_id,
+        suggested_name=suggested_name,
+        suggested_username=norm_username,
+    )
+
     await state.set_state(ManagedBotStates.waiting_for_creation)
     await state.update_data(
         master_id=master_id,
@@ -1202,38 +1255,52 @@ async def _handle_managed_bot_provisioning(
     if not user:
         return None, "Пользователь не найден в системе."
 
-    master_id = None
-    if state:
-        data = await state.get_data()
-        master_id = data.get("master_id")
-
-    master_repo = MasterRepository(session)
     bot_repo = BotInstanceRepository(session)
+    existing_bot = await bot_repo.get_by_telegram_bot_id(created_bot_user.id)
+    if existing_bot:
+        logger.info(
+            "Bot %s already provisioned for master %s (idempotent event)",
+            created_bot_user.id,
+            existing_bot.master_id,
+        )
+        if state:
+            await state.clear()
+        return existing_bot, None
 
-    if not master_id:
-        masters = await master_repo.get_by_owner_id(user.id)
-        if not masters:
-            return None, "У вас нет активных проектов для подключения бота."
-        for m in masters:
-            cur_bot = await bot_repo.get_current_for_master(m.id)
-            if not cur_bot or cur_bot.status in (BotInstanceStatus.DISABLED, BotInstanceStatus.ERROR):
-                master_id = m.id
-                break
-        if not master_id:
-            master_id = masters[0].id
+    req_repo = ManagedBotRequestRepository(session)
+    pending_req = await req_repo.get_active_pending_request(
+        telegram_owner_user_id=telegram_owner_user_id,
+        for_update=True,
+    )
+    if not pending_req:
+        return None, "Не удалось определить проект, для которого создавался бот. Начните подключение заново."
+
+    master_id = pending_req.master_id
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await req_repo.fail_request(pending_req.id)
+        return None, "Проект не найден или доступ к нему запрещён."
 
     gateway = TelegramProvisioningGateway()
     manager_token = settings.manager_bot_token.strip()
     if not manager_token:
+        await req_repo.fail_request(pending_req.id)
         return None, "Токен платформенного бота не настроен на сервере."
 
     try:
         token = await gateway.get_managed_bot_token(
             manager_token=manager_token,
-            user_id=telegram_owner_user_id,
+            bot_id=created_bot_user.id,
         )
     except Exception as exc:
-        logger.error("Failed to get managed bot token for user %s: %s", telegram_owner_user_id, exc)
+        await req_repo.fail_request(pending_req.id)
+        logger.error(
+            "Failed to get managed bot token for bot %s (owner %s): %s",
+            created_bot_user.id,
+            telegram_owner_user_id,
+            exc,
+        )
         return None, f"Не удалось получить токен созданного бота от Telegram: {exc}"
 
     service = BotProvisioningService(session=session, gateway=gateway, registry=registry)
@@ -1251,12 +1318,15 @@ async def _handle_managed_bot_provisioning(
             token=token,
             telegram_owner_user_id=telegram_owner_user_id,
         )
+        await req_repo.complete_request(pending_req.id, telegram_bot_id=created_bot_user.id)
         if state:
             await state.clear()
         return bot_instance, None
     except DuplicateBotError as exc:
+        await req_repo.fail_request(pending_req.id)
         return None, str(exc)
     except Exception as exc:
+        await req_repo.fail_request(pending_req.id)
         logger.error("Error provisioning managed bot %s: %s", created_bot_user.id, exc)
         return None, f"Ошибка подключения бота: {exc}"
 

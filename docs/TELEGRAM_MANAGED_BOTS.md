@@ -47,13 +47,23 @@
 
 ## 3. Модели базы данных и миграции
 
-В таблицу `bot_instances` добавлена миграция Alembic:
-`alembic/versions/2026_10_03_0023_managed_bots_support.py`
-
-Новые поля сущности `BotInstance`:
+### 3.1. Расширение таблицы `bot_instances`
+Миграция: `alembic/versions/2026_10_03_0023_managed_bots_support.py`
 - `provisioning_source` (`VARCHAR(32)`, по умолчанию `'manual_token'`) — источник подключения (`'manual_token'` или `'managed_bot'`).
 - `managed_by_platform` (`BOOLEAN`, по умолчанию `false`) — признак бота, созданного через механизм Telegram Managed Bots.
-- `telegram_owner_user_id` (`BIGINT`, `nullable`, индекс `ix_bot_instances_telegram_owner_user_id`) — Telegram User ID владельца бота (необходим для Bot API вызовов `getManagedBotToken` и `replaceManagedBotToken`).
+- `telegram_owner_user_id` (`BIGINT`, `nullable`, индекс `ix_bot_instances_telegram_owner_user_id`) — Telegram User ID человека-владельца бота (используется строго для аудита, авторизации и разграничения прав доступа; **не** передаётся в вызовы токенов Bot API).
+
+### 3.2. Таблица запросов на создание ботов `managed_bot_creation_requests`
+Миграция: `alembic/versions/2026_10_03_0024_managed_bot_creation_requests.py`
+Для надёжной, устойчивой к сбоям привязки создаваемого бота к конкретному проекту мастера (особенно когда у мастера несколько проектов или сессия FSM была очищена) используется специальная таблица запросов:
+- `owner_user_id` (`BIGINT`) — внутренний ID пользователя.
+- `telegram_owner_user_id` (`BIGINT`, индекс `ix_managed_bot_requests_telegram_owner`) — Telegram ID мастера.
+- `master_id` (`BIGINT`) — ID целевого проекта.
+- `request_id` (`BIGINT`, по умолчанию `1`) — ID запроса кнопки Telegram.
+- `status` (`managed_bot_request_status`: `PENDING`, `COMPLETED`, `EXPIRED`, `FAILED`).
+- `telegram_bot_id` (`BIGINT`, nullable) — ID созданного бота после завершения.
+- `expires_at` (`TIMESTAMPTZ`) — время жизни запроса (по умолчанию 2 часа).
+- **Частичный уникальный индекс:** `uq_pending_managed_bot_request_per_user` (`WHERE status = 'PENDING'`), гарантирующий наличие строго одного активного запроса на пользователя и предотвращающий состояние гонки.
 
 ---
 
@@ -76,14 +86,15 @@
 
 ### 4.3. Обработка создания бота
 1. Telegram передаёт в управляющий бот сервисное обновление (`message.managed_bot_created` или `ManagedBotUpdated`).
-2. Менеджер-бот через метод Bot API `getManagedBotToken(user_id=...)` запрашивает выданный токен.
-3. Происходит шифрование и привязка к проекту мастера со статусом `SETUP_REQUIRED`.
-4. Устанавливается вебхук, команды и кнопка меню.
-5. Мастер получает поздравление и кнопки прямого перехода в своего бота (`https://t.me/{username}?start=admin`).
+2. Система находит активный запрос мастера в таблице `managed_bot_creation_requests` и валидирует права на проект (никаких эвристик `masters[0]`).
+3. Менеджер-бот через метод Bot API `getManagedBotToken(user_id=created_bot_user.id)` запрашивает выданный токен (в Bot API передаётся именно Telegram User ID созданного бота!).
+4. Происходит шифрование токена и привязка к проекту мастера со статусом `SETUP_REQUIRED`. Запрос помечается как `COMPLETED`.
+5. Устанавливается вебхук, команды и кнопка меню.
+6. Мастер получает поздравление и кнопки прямого перехода в своего бота (`https://t.me/{username}?start=admin`).
 
 ### 4.4. Автоматическая ротация токена
 Для ботов с флагом `managed_by_platform = True` в меню ротации доступна кнопка:
-- **♻️ Обновить токен автоматически:** вызывает `replaceManagedBotToken` через платформенного бота, шифрует новый токен, увеличивает `token_version` и обновляет вебхук без ручных действий мастера.
+- **♻️ Обновить токен автоматически:** вызывает `replaceManagedBotToken(user_id=bot_instance.telegram_bot_id)` через платформенного бота, шифрует новый токен, увеличивает `token_version` и обновляет вебхук без ручных действий мастера.
 
 ---
 
@@ -102,7 +113,7 @@ MANAGER_BOT_TOKEN=123456789:ABCdefGHI...
 BOT_TOKEN_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 # Опционально: URL Mini App для кнопки меню клиентов
-MINI_APP_URL=https://zapisflow.ru/app
+MINI_APP_URL=https://app.zapisflow.su
 ```
 
 ### Настройка в @BotFather для Manager Bot:

@@ -489,7 +489,7 @@ class BotProvisioningService:
 
         # 4. Advance version and save ciphertext
         bot_instance.encrypted_token = new_encrypted
-        bot_instance.token_version += 1
+        bot_instance.token_version = (bot_instance.token_version or 0) + 1
         bot_instance.telegram_username = identity.username
         bot_instance.telegram_first_name = identity.first_name
         await self.session.commit()
@@ -547,14 +547,16 @@ class BotProvisioningService:
         if not bot_instance.managed_by_platform:
             raise AccessDeniedError("Данный бот не является управляемым платформой (Managed Bot).")
 
-        owner_uid = bot_instance.telegram_owner_user_id or actor_user_id
+        if not bot_instance.telegram_bot_id:
+            raise ProvisioningWebhookError("Управляемый бот не имеет Telegram ID.")
+
         if not settings.manager_bot_token:
             raise ProvisioningWebhookError("Токен платформенного бота не сконфигурирован.")
 
-        # Request new token from Telegram via Platform Manager Bot
+        # Request new token from Telegram via Platform Manager Bot using the managed bot ID (NOT owner ID)
         new_token = await self.gateway.replace_managed_bot_token(
             manager_token=settings.manager_bot_token.strip(),
-            user_id=owner_uid,
+            bot_id=bot_instance.telegram_bot_id,
         )
 
         return await self.rotate_token(bot_instance_id, actor_user_id, new_token)

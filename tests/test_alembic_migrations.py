@@ -56,8 +56,9 @@ def test_alembic_revision_graph_consistency() -> None:
     assert "2026_10_01_0021" in rev_ids
     assert "2026_10_01_0022" in rev_ids
     assert "2026_10_03_0023" in rev_ids
-    # 0023 is head, 0001 is base
-    assert rev_ids[0] == "2026_10_03_0023"
+    assert "2026_10_03_0024" in rev_ids
+    # 0024 is head, 0001 is base
+    assert rev_ids[0] == "2026_10_03_0024"
     assert rev_ids[-1] == "2026_09_30_0001"
 
 
@@ -83,6 +84,22 @@ def test_bot_instance_managed_bots_columns_exist() -> None:
     assert "telegram_owner_user_id" in table.c
     assert table.c.telegram_owner_user_id.nullable is True
 
+
+def test_managed_bot_creation_request_table_exists() -> None:
+    """Verify that ManagedBotCreationRequest table exists with all required columns and constraints."""
+    from app.database.models.managed_bot_request import ManagedBotCreationRequest
+    table = ManagedBotCreationRequest.__table__
+    assert "owner_user_id" in table.c
+    assert table.c.owner_user_id.nullable is False
+    assert "telegram_owner_user_id" in table.c
+    assert table.c.telegram_owner_user_id.nullable is False
+    assert "master_id" in table.c
+    assert table.c.master_id.nullable is False
+    assert "status" in table.c
+    assert table.c.status.nullable is False
+    assert "expires_at" in table.c
+    assert table.c.expires_at.nullable is False
+    assert "telegram_bot_id" in table.c
 
 
 @requires_postgres

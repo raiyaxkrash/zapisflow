@@ -9,7 +9,9 @@ from app.config.settings import settings
 from app.core.token_crypto import TokenCrypto
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterStatus, SubscriptionStatus
 from app.database.models.user import User
+from app.database.models.managed_bot_request import ManagedBotCreationRequest, ManagedBotRequestStatus
 from app.repositories.bot_instance_repository import BotInstanceRepository
+from app.repositories.managed_bot_request_repository import ManagedBotRequestRepository
 from app.repositories.master_repository import MasterRepository
 from app.services.audit_service import AuditEvent, AuditService
 from app.services.bot_provisioning_service import BotProvisioningService
@@ -496,5 +498,249 @@ class TestManagerBotHandlersMocked:
         text = callback.message.edit_text.call_args[0][0]
         assert "Создание нового бота для записи клиентов" in text
         assert "Студия" in text
+
+    @pytest.mark.asyncio
+    async def test_cb_managed_bot_prepare_fallback_when_disabled(self):
+        from app.manager_bot.handlers import cb_managed_bot_prepare
+
+        callback = AsyncMock()
+        callback.data = "mgr:bot:mg:prep:1"
+        callback.from_user.id = 100
+        callback.bot.get_me = AsyncMock()
+        callback.bot.get_me.return_value.username = "zapisflow_mgr_bot"
+
+        state = AsyncMock()
+        session = AsyncMock()
+
+        master = Master(id=1, owner_user_id=1, display_name="Студия")
+        user = User(id=1, telegram_id=100, first_name="Owner")
+
+        with patch("app.manager_bot.handlers._get_or_create_user", AsyncMock(return_value=user)), \
+             patch("app.manager_bot.handlers.MasterRepository.get_by_id", AsyncMock(return_value=master)), \
+             patch("app.manager_bot.handlers.TelegramProvisioningGateway.check_manager_bot_mode", AsyncMock(return_value=False)), \
+             patch.object(settings, "manager_bot_token", "fake_manager_token"):
+            await cb_managed_bot_prepare(callback, state, session)
+
+        callback.message.edit_text.assert_awaited_once()
+        text = callback.message.edit_text.call_args[0][0]
+        assert "временно недоступно" in text
+        assert "BotFather" in text
+
+    @pytest.mark.asyncio
+    async def test_handle_managed_bot_provisioning_passes_bot_id_and_completes_request(self):
+        from app.manager_bot.handlers import _handle_managed_bot_provisioning
+
+        session = AsyncMock()
+        user = User(id=10, telegram_id=777, first_name="Owner")
+        master = Master(id=2, owner_user_id=10, display_name="Студия 2")
+        created_bot_user = MagicMock(id=888999, username="test_new_bot", first_name="Test New Bot")
+
+        pending_req = ManagedBotCreationRequest(
+            id=55,
+            owner_user_id=10,
+            telegram_owner_user_id=777,
+            master_id=2,
+            status=ManagedBotRequestStatus.PENDING,
+        )
+
+        mock_gateway = AsyncMock()
+        mock_gateway.get_managed_bot_token.return_value = "888999:Secr3tToken"
+
+        bot_instance = BotInstance(id=99, master_id=2, telegram_bot_id=888999)
+
+        with patch("app.manager_bot.handlers.UserRepository.get_by_telegram_id", AsyncMock(return_value=user)), \
+             patch("app.manager_bot.handlers.BotInstanceRepository.get_by_telegram_bot_id", AsyncMock(return_value=None)), \
+             patch("app.manager_bot.handlers.ManagedBotRequestRepository.get_active_pending_request", AsyncMock(return_value=pending_req)), \
+             patch("app.manager_bot.handlers.ManagedBotRequestRepository.complete_request", AsyncMock()) as mock_complete, \
+             patch("app.manager_bot.handlers.MasterRepository.get_by_id", AsyncMock(return_value=master)), \
+             patch("app.manager_bot.handlers.TelegramProvisioningGateway", return_value=mock_gateway), \
+             patch("app.manager_bot.handlers.BotProvisioningService.provision_managed_bot", AsyncMock(return_value=bot_instance)), \
+             patch.object(settings, "manager_bot_token", "mgr_token_123"), \
+             patch.object(settings, "bot_token_encryption_key", TEST_KEY):
+
+            inst, err = await _handle_managed_bot_provisioning(
+                session=session,
+                created_bot_user=created_bot_user,
+                telegram_owner_user_id=777,
+            )
+
+            assert err is None
+            assert inst == bot_instance
+            # CRITICAL CHECK: get_managed_bot_token MUST receive bot_id=created_bot_user.id (888999), NOT 777!
+            mock_gateway.get_managed_bot_token.assert_awaited_once_with(
+                manager_token="mgr_token_123",
+                bot_id=888999,
+            )
+            mock_complete.assert_awaited_once_with(55, telegram_bot_id=888999)
+
+    @pytest.mark.asyncio
+    async def test_handle_managed_bot_provisioning_multi_project_routing(self):
+        """Ensure bot is routed to the requested master (Master 2), NOT the first master (Master 1)."""
+        from app.manager_bot.handlers import _handle_managed_bot_provisioning
+
+        session = AsyncMock()
+        user = User(id=10, telegram_id=777, first_name="Owner")
+        master2 = Master(id=2, owner_user_id=10, display_name="Студия 2")
+        created_bot_user = MagicMock(id=888999, username="test_new_bot", first_name="Test New Bot")
+
+        # User clicked create for Master 2
+        pending_req = ManagedBotCreationRequest(
+            id=55,
+            owner_user_id=10,
+            telegram_owner_user_id=777,
+            master_id=2,
+            status=ManagedBotRequestStatus.PENDING,
+        )
+
+        mock_gateway = AsyncMock()
+        mock_gateway.get_managed_bot_token.return_value = "888999:Secr3tToken"
+        bot_instance = BotInstance(id=99, master_id=2, telegram_bot_id=888999)
+
+        with patch("app.manager_bot.handlers.UserRepository.get_by_telegram_id", AsyncMock(return_value=user)), \
+             patch("app.manager_bot.handlers.BotInstanceRepository.get_by_telegram_bot_id", AsyncMock(return_value=None)), \
+             patch("app.manager_bot.handlers.ManagedBotRequestRepository.get_active_pending_request", AsyncMock(return_value=pending_req)), \
+             patch("app.manager_bot.handlers.ManagedBotRequestRepository.complete_request", AsyncMock()), \
+             patch("app.manager_bot.handlers.MasterRepository.get_by_id", AsyncMock(return_value=master2)), \
+             patch("app.manager_bot.handlers.TelegramProvisioningGateway", return_value=mock_gateway), \
+             patch("app.manager_bot.handlers.BotProvisioningService.provision_managed_bot", AsyncMock(return_value=bot_instance)) as mock_prov, \
+             patch.object(settings, "manager_bot_token", "mgr_token_123"), \
+             patch.object(settings, "bot_token_encryption_key", TEST_KEY):
+
+            inst, err = await _handle_managed_bot_provisioning(
+                session=session,
+                created_bot_user=created_bot_user,
+                telegram_owner_user_id=777,
+            )
+
+            assert err is None
+            assert inst.master_id == 2
+            mock_prov.assert_awaited_once()
+            assert mock_prov.call_args[1]["master_id"] == 2
+
+    @pytest.mark.asyncio
+    async def test_handle_managed_bot_provisioning_missing_or_expired_rejected(self):
+        """When no pending request exists or it expired, provisioning must fail safely without guessing."""
+        from app.manager_bot.handlers import _handle_managed_bot_provisioning
+
+        session = AsyncMock()
+        user = User(id=10, telegram_id=777, first_name="Owner")
+        created_bot_user = MagicMock(id=888999, username="test_new_bot", first_name="Test New Bot")
+
+        with patch("app.manager_bot.handlers.UserRepository.get_by_telegram_id", AsyncMock(return_value=user)), \
+             patch("app.manager_bot.handlers.BotInstanceRepository.get_by_telegram_bot_id", AsyncMock(return_value=None)), \
+             patch("app.manager_bot.handlers.ManagedBotRequestRepository.get_active_pending_request", AsyncMock(return_value=None)):
+
+            inst, err = await _handle_managed_bot_provisioning(
+                session=session,
+                created_bot_user=created_bot_user,
+                telegram_owner_user_id=777,
+            )
+
+            assert inst is None
+            assert "Не удалось определить проект" in err
+
+    @pytest.mark.asyncio
+    async def test_handle_managed_bot_provisioning_idempotent_duplicate(self):
+        """When bot is already provisioned, return existing instance cleanly without re-requesting token."""
+        from app.manager_bot.handlers import _handle_managed_bot_provisioning
+
+        session = AsyncMock()
+        user = User(id=10, telegram_id=777, first_name="Owner")
+        existing_bot = BotInstance(id=99, master_id=2, telegram_bot_id=888999)
+        created_bot_user = MagicMock(id=888999, username="test_new_bot", first_name="Test New Bot")
+
+        with patch("app.manager_bot.handlers.UserRepository.get_by_telegram_id", AsyncMock(return_value=user)), \
+             patch("app.manager_bot.handlers.BotInstanceRepository.get_by_telegram_bot_id", AsyncMock(return_value=existing_bot)):
+
+            inst, err = await _handle_managed_bot_provisioning(
+                session=session,
+                created_bot_user=created_bot_user,
+                telegram_owner_user_id=777,
+            )
+
+            assert err is None
+            assert inst == existing_bot
+
+    @pytest.mark.asyncio
+    async def test_rotate_managed_bot_token_passes_bot_id(self):
+        """Verify token rotation calls Telegram with telegram_bot_id, not actor or owner id."""
+        session = AsyncMock()
+        bot = BotInstance(
+            id=5,
+            master_id=1,
+            telegram_bot_id=777888999,
+            managed_by_platform=True,
+            status=BotInstanceStatus.ACTIVE,
+            telegram_owner_user_id=123456,
+            token_version=1,
+        )
+        session.get = AsyncMock(return_value=bot)
+        session.scalar.return_value = bot
+
+        crypto = TokenCrypto(master_key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        gateway = AsyncMock()
+        gateway.replace_managed_bot_token.return_value = "777888999:NewRotatedTokenSecret"
+        gateway.validate_token.return_value = BotIdentity(id=777888999, username="rotated_bot", first_name="Rotated Bot")
+        gateway.set_webhook.return_value = True
+
+        webhook_info = MagicMock()
+        webhook_info.url = f"{settings.webhook_base_url.rstrip('/')}/telegram/webhook/{bot.public_id}"
+        gateway.get_webhook_info.return_value = webhook_info
+
+        service = BotProvisioningService(session=session, gateway=gateway, crypto=crypto)
+
+        with patch.object(settings, "manager_bot_token", "mgr_token_abc"):
+            res = await service.rotate_managed_bot_token(bot_instance_id=5, actor_user_id=100)
+
+        assert res.id == 5
+        gateway.replace_managed_bot_token.assert_awaited_once_with(
+            manager_token="mgr_token_abc",
+            bot_id=777888999,
+        )
+
+
+class TestManagedBotRequestRepositoryUnit:
+    @pytest.mark.asyncio
+    async def test_create_or_renew_request_structure(self):
+        session = AsyncMock()
+        repo = ManagedBotRequestRepository(session)
+
+        req = await repo.create_or_renew_request(
+            owner_user_id=1,
+            telegram_owner_user_id=100,
+            master_id=2,
+            suggested_name="Салон",
+            suggested_username="salon_bot",
+        )
+
+        assert req.owner_user_id == 1
+        assert req.telegram_owner_user_id == 100
+        assert req.master_id == 2
+        assert req.status == ManagedBotRequestStatus.PENDING
+        assert req.expires_at > req.created_at
+        session.execute.assert_awaited_once()
+        session.flush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_complete_and_fail_request(self):
+        session = AsyncMock()
+        repo = ManagedBotRequestRepository(session)
+
+        existing_req = ManagedBotCreationRequest(
+            id=10,
+            owner_user_id=1,
+            telegram_owner_user_id=100,
+            master_id=2,
+            status=ManagedBotRequestStatus.PENDING,
+        )
+        session.get.return_value = existing_req
+
+        res = await repo.complete_request(10, telegram_bot_id=999)
+        assert res.status == ManagedBotRequestStatus.COMPLETED
+        assert res.telegram_bot_id == 999
+
+        res_fail = await repo.fail_request(10)
+        assert res_fail.status == ManagedBotRequestStatus.FAILED
+
 
 

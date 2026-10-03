@@ -174,12 +174,17 @@ class TelegramProvisioningGateway:
         finally:
             await bot.session.close()
 
-    async def get_managed_bot_token(self, manager_token: str, user_id: int) -> str:
-        """Call Telegram getManagedBotToken via the platform manager bot session."""
+    async def get_managed_bot_token(self, manager_token: str, bot_id: int) -> str:
+        """Call Telegram getManagedBotToken via the platform manager bot session.
+
+        Args:
+            manager_token: HTTP API token of the platform manager bot.
+            bot_id: Telegram User identifier of the MANAGED BOT (NOT the owner).
+        """
         bot = self._create_temp_bot(manager_token)
         try:
             token = await asyncio.wait_for(
-                bot.get_managed_bot_token(user_id=user_id),
+                bot.get_managed_bot_token(user_id=bot_id),
                 timeout=self.request_timeout,
             )
             return token
@@ -192,12 +197,17 @@ class TelegramProvisioningGateway:
         finally:
             await bot.session.close()
 
-    async def replace_managed_bot_token(self, manager_token: str, user_id: int) -> str:
-        """Call Telegram replaceManagedBotToken to rotate a managed bot token."""
+    async def replace_managed_bot_token(self, manager_token: str, bot_id: int) -> str:
+        """Call Telegram replaceManagedBotToken to rotate a managed bot token.
+
+        Args:
+            manager_token: HTTP API token of the platform manager bot.
+            bot_id: Telegram User identifier of the MANAGED BOT (NOT the owner).
+        """
         bot = self._create_temp_bot(manager_token)
         try:
             token = await asyncio.wait_for(
-                bot.replace_managed_bot_token(user_id=user_id),
+                bot.replace_managed_bot_token(user_id=bot_id),
                 timeout=self.request_timeout,
             )
             return token

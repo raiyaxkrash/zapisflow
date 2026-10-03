@@ -51,6 +51,10 @@ from app.database.models.subscription import (
 )
 from app.database.models.review import Review
 from app.database.models.staff import StaffMember, StaffService
+from app.database.models.managed_bot_request import (
+    ManagedBotCreationRequest,
+    ManagedBotRequestStatus,
+)
 
 __all__ = [
     "Base",
@@ -102,4 +106,6 @@ __all__ = [
     "Review",
     "StaffMember",
     "StaffService",
+    "ManagedBotCreationRequest",
+    "ManagedBotRequestStatus",
 ]
