@@ -10,7 +10,7 @@ authors = [{ name = "Senior Python Developer" }]
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "aiogram>=3.14.0",
+    "aiogram>=3.31.0",
     "pydantic-settings>=2.5.2",
     "pydantic>=2.9.2",
     "sqlalchemy>=2.0.35",

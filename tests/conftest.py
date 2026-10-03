@@ -22,10 +22,23 @@ os.environ.setdefault("PAYMENT_PROVIDER", "manual")
 
 ROOT = Path(__file__).resolve().parents[1]
 
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres_secure_password@localhost:5432/beauty_bot_test",
-)
+def _get_test_db_url() -> str:
+    if os.environ.get("TEST_DATABASE_URL"):
+        return os.environ["TEST_DATABASE_URL"]
+    try:
+        from app.config.settings import settings
+        if settings.database_url:
+            from sqlalchemy.engine import make_url
+            u = make_url(settings.database_url)
+            return u.set(database="beauty_bot_test").render_as_string(hide_password=False)
+    except Exception:
+        pass
+    return "postgresql+asyncpg://postgres:postgres_secure_password@localhost:5432/beauty_bot_test"
+
+
+
+TEST_DATABASE_URL = _get_test_db_url()
+
 
 
 @pytest.fixture(autouse=True)

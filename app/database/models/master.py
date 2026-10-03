@@ -144,12 +144,22 @@ class BotInstance(Base):
     )
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     token_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    provisioning_source: Mapped[str] = mapped_column(
+        String(32), default="manual_token", server_default=text("'manual_token'"), nullable=False
+    )
+    managed_by_platform: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    telegram_owner_user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
 
     # Relationships
     master: Mapped["Master"] = relationship("Master", back_populates="bot_instances")

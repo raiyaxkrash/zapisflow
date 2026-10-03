@@ -17,7 +17,7 @@ from aiogram.exceptions import (
     TelegramNetworkError,
     TelegramUnauthorizedError,
 )
-from aiogram.types import WebhookInfo
+from aiogram.types import BotCommand, MenuButton, WebhookInfo
 
 from app.core.security import mask_token
 from app.services.exceptions import (
@@ -173,3 +173,90 @@ class TelegramProvisioningGateway:
             raise TelegramGatewayError(f"Ошибка удаления вебхука: {exc.message}") from exc
         finally:
             await bot.session.close()
+
+    async def get_managed_bot_token(self, manager_token: str, user_id: int) -> str:
+        """Call Telegram getManagedBotToken via the platform manager bot session."""
+        bot = self._create_temp_bot(manager_token)
+        try:
+            token = await asyncio.wait_for(
+                bot.get_managed_bot_token(user_id=user_id),
+                timeout=self.request_timeout,
+            )
+            return token
+        except TelegramUnauthorizedError as exc:
+            raise InvalidBotTokenError("Токен управляющего бота недействителен.") from exc
+        except (TelegramNetworkError, asyncio.TimeoutError) as exc:
+            raise TelegramGatewayNetworkError("Ошибка сети при получении токена управляемого бота.") from exc
+        except TelegramAPIError as exc:
+            raise TelegramGatewayError(f"Ошибка получения токена: {exc.message}") from exc
+        finally:
+            await bot.session.close()
+
+    async def replace_managed_bot_token(self, manager_token: str, user_id: int) -> str:
+        """Call Telegram replaceManagedBotToken to rotate a managed bot token."""
+        bot = self._create_temp_bot(manager_token)
+        try:
+            token = await asyncio.wait_for(
+                bot.replace_managed_bot_token(user_id=user_id),
+                timeout=self.request_timeout,
+            )
+            return token
+        except TelegramUnauthorizedError as exc:
+            raise InvalidBotTokenError("Токен управляющего бота недействителен.") from exc
+        except (TelegramNetworkError, asyncio.TimeoutError) as exc:
+            raise TelegramGatewayNetworkError("Ошибка сети при смене токена управляемого бота.") from exc
+        except TelegramAPIError as exc:
+            raise TelegramGatewayError(f"Ошибка смены токена: {exc.message}") from exc
+        finally:
+            await bot.session.close()
+
+    async def check_manager_bot_mode(self, manager_token: str) -> bool:
+        """Check if platform manager bot has can_manage_bots enabled in BotFather."""
+        bot = self._create_temp_bot(manager_token)
+        try:
+            me = await asyncio.wait_for(bot.get_me(), timeout=self.request_timeout)
+            return bool(getattr(me, "can_manage_bots", False))
+        except Exception as exc:
+            logger.warning("Could not query getMe for manager bot mode check: %s", exc)
+            return False
+        finally:
+            await bot.session.close()
+
+    async def set_my_commands(
+        self,
+        token: str,
+        commands: list[BotCommand],
+    ) -> bool:
+        """Set default commands for the bot."""
+        bot = self._create_temp_bot(token)
+        try:
+            res = await asyncio.wait_for(
+                bot.set_my_commands(commands=commands),
+                timeout=self.request_timeout,
+            )
+            return bool(res)
+        except Exception as exc:
+            logger.warning("Failed to set commands for bot %s: %s", mask_token(token), exc)
+            return False
+        finally:
+            await bot.session.close()
+
+    async def set_chat_menu_button(
+        self,
+        token: str,
+        menu_button: Optional[MenuButton] = None,
+    ) -> bool:
+        """Set chat menu button for the bot."""
+        bot = self._create_temp_bot(token)
+        try:
+            res = await asyncio.wait_for(
+                bot.set_chat_menu_button(menu_button=menu_button),
+                timeout=self.request_timeout,
+            )
+            return bool(res)
+        except Exception as exc:
+            logger.warning("Failed to set menu button for bot %s: %s", mask_token(token), exc)
+            return False
+        finally:
+            await bot.session.close()
+

@@ -16,6 +16,14 @@ class ConnectBotStates(StatesGroup):
     confirm_connect = State()
 
 
+class ManagedBotStates(StatesGroup):
+    """FSM states for official Telegram Managed Bots onboarding flow."""
+
+    waiting_for_creation = State()
+    waiting_for_custom_username = State()
+
+
+
 class RotateTokenStates(StatesGroup):
     """FSM states for rotating bot API token."""
 

@@ -81,8 +81,11 @@ class Settings(BaseSettings):
 
     # Phase 7: Platform Manager Bot & Onboarding
     manager_bot_token: str = Field(default="", alias="MANAGER_BOT_TOKEN")
+    manager_bot_username: str = Field(default="", alias="MANAGER_BOT_USERNAME")
     manager_webhook_secret: str = Field(default="", alias="MANAGER_WEBHOOK_SECRET")
+    mini_app_url: str = Field(default="", alias="MINI_APP_URL")
     trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
+
     support_telegram_username: str = Field(default="zapisflow", alias="SUPPORT_TELEGRAM_USERNAME")
     payment_provider: str = Field(default="manual", alias="PAYMENT_PROVIDER")
     payment_currency: str = Field(default="RUB", alias="PAYMENT_CURRENCY")

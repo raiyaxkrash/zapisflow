@@ -2,7 +2,13 @@
 
 from collections.abc import Sequence
 from typing import Optional
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestManagedBot,
+    ReplyKeyboardMarkup,
+)
 
 from app.config.settings import settings
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterSettings
@@ -351,6 +357,156 @@ def confirm_connect_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="✅ Подключить", callback_data="mgr:bot:confirm_connect"),
                 InlineKeyboardButton(text="❌ Отмена", callback_data="mgr:cancel"),
             ]
+        ]
+    )
+
+
+def bot_connect_method_choice_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Choose bot connection method: Telegram Managed Bot (1-click) or manual token."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✨ Создать нового бота (1 клик)",
+                    callback_data=f"mgr:bot:mg:prep:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔑 Подключить через токен (BotFather)",
+                    callback_data=f"mgr:bot:token:start:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад к проекту",
+                    callback_data=f"mgr:master:{master_id}",
+                )
+            ],
+        ]
+    )
+
+
+def managed_bot_prepare_keyboard(
+    master_id: int,
+    creation_url: str,
+    suggested_username: str,
+) -> InlineKeyboardMarkup:
+    """Options for creating a managed bot via deep link or reply button."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Создать бота в Telegram",
+                    url=creation_url,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⌨️ Создать через кнопку в чате",
+                    callback_data=f"mgr:bot:mg:reply:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"✏️ Изменить логин (@{suggested_username})",
+                    callback_data=f"mgr:bot:mg:custom:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔑 Подключить токеном вручную",
+                    callback_data=f"mgr:bot:token:start:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад к выбору",
+                    callback_data=f"mgr:bot:connect:{master_id}",
+                )
+            ],
+        ]
+    )
+
+
+def managed_bot_reply_keyboard(
+    suggested_name: str,
+    suggested_username: str,
+    request_id: int = 1,
+) -> ReplyKeyboardMarkup:
+    """Native reply keyboard with request_managed_bot button."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text=f"🤖 Создать @{suggested_username}",
+                    request_managed_bot=KeyboardButtonRequestManagedBot(
+                        request_id=request_id,
+                        suggested_name=suggested_name,
+                        suggested_username=suggested_username,
+                    ),
+                )
+            ],
+            [
+                KeyboardButton(text="❌ Отмена"),
+            ],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def managed_bot_success_keyboard(
+    master_id: int,
+    bot_username: str,
+) -> InlineKeyboardMarkup:
+    """Action buttons after managed bot is successfully created and provisioned."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Открыть бота",
+                    url=f"https://t.me/{bot_username}?start=admin",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📋 Чек-лист готовности",
+                    callback_data=f"mgr:bot:checklist:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏢 Настроить проект",
+                    callback_data=f"mgr:master:{master_id}",
+                )
+            ],
+        ]
+    )
+
+
+def managed_bot_rotate_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Options for rotating token of a managed bot."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="♻️ Обновить токен автоматически",
+                    callback_data=f"mgr:bot:mg:rot_confirm:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔑 Ввести токен вручную",
+                    callback_data=f"mgr:bot:token:start:{master_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Отмена",
+                    callback_data=f"mgr:master:{master_id}",
+                )
+            ],
         ]
     )
 

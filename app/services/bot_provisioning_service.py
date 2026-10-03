@@ -222,6 +222,169 @@ class BotProvisioningService:
                 entity_id=bot_instance.id,
                 payload_after={"status": "ERROR", "error": error_desc},
             )
+    async def provision_managed_bot(
+        self,
+        master_id: int,
+        actor_user_id: int,
+        bot_identity: BotIdentity,
+        token: str,
+        telegram_owner_user_id: Optional[int] = None,
+    ) -> BotInstance:
+        """Provision a managed bot created via Telegram Managed Bots flow.
+
+        Executes full onboarding flow:
+        1. Verifies Master ownership.
+        2. Idempotently checks if this Telegram bot is already provisioned for this master.
+        3. Encrypts token with AES-256-GCM.
+        4. Persists BotInstance with provisioning_source="managed_bot", managed_by_platform=True,
+           and telegram_owner_user_id.
+        5. Sets webhook, default commands, and chat menu button.
+        6. Advances status to SETUP_REQUIRED, writes audit log, invalidates registry.
+        """
+        clean_token = token.strip()
+
+        # 1. Verify Master ownership
+        master = await self.session.scalar(
+            select(Master).where(Master.id == master_id).with_for_update()
+        )
+        if not master or master.owner_user_id != actor_user_id:
+            raise AccessDeniedError("У вас нет прав на управление данным проектом.")
+
+        # 2. Check if this bot ID is already known
+        existing_bot = await self.bot_repo.get_by_telegram_bot_id(bot_identity.id)
+        if existing_bot:
+            if existing_bot.master_id != master_id:
+                raise DuplicateBotError("Этот Telegram-бот уже подключён к платформе.")
+            if existing_bot.status in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED):
+                return existing_bot
+
+        # 3. Check current bot instance for this master
+        existing_current = await self.bot_repo.get_current_for_master(master_id)
+        if existing_current and existing_current.telegram_bot_id != bot_identity.id:
+            await self.bot_repo.deprecate_current_for_master(master_id)
+
+        # 4. Encrypt token via AES-256-GCM
+        encrypted_token = self.crypto.encrypt(clean_token, associated_data=bot_identity.id)
+        webhook_secret = secrets.token_urlsafe(32)
+
+        # 5. Create or reuse BotInstance in PROVISIONING state
+        if existing_bot:
+            bot_instance = existing_bot
+            bot_instance.encrypted_token = encrypted_token
+            bot_instance.webhook_secret = webhook_secret
+            bot_instance.status = BotInstanceStatus.PROVISIONING
+            bot_instance.provisioning_source = "managed_bot"
+            bot_instance.managed_by_platform = True
+            bot_instance.telegram_owner_user_id = telegram_owner_user_id or actor_user_id
+            bot_instance.telegram_username = bot_identity.username
+            bot_instance.telegram_first_name = bot_identity.first_name
+            bot_instance.is_current = True
+            await self.session.commit()
+        else:
+            try:
+                bot_instance = await self.bot_repo.create_bot_instance(
+                    master_id=master_id,
+                    telegram_bot_id=bot_identity.id,
+                    telegram_username=bot_identity.username,
+                    telegram_first_name=bot_identity.first_name,
+                    encrypted_token=encrypted_token,
+                    webhook_secret=webhook_secret,
+                    status=BotInstanceStatus.PROVISIONING,
+                    token_version=1,
+                    is_current=True,
+                    provisioning_source="managed_bot",
+                    managed_by_platform=True,
+                    telegram_owner_user_id=telegram_owner_user_id or actor_user_id,
+                )
+                await self.session.commit()
+            except IntegrityError as exc:
+                await self.session.rollback()
+                orig_str = str(exc.orig) if hasattr(exc, "orig") else str(exc)
+                if "telegram_bot_id" in orig_str:
+                    raise DuplicateBotError("Этот Telegram-бот уже подключён к платформе.") from exc
+                if "current_per_master" in orig_str:
+                    raise DuplicateBotError("Для данного проекта уже выполняется подключение бота.") from exc
+                raise DuplicateBotError("Конфликт при подключении бота.") from exc
+
+        if existing_current and self.registry:
+            await self.registry.invalidate_bot(existing_current.id, reason="bot_reconnected")
+
+        await self.audit_service.log_event(
+            action=AuditEvent.MANAGED_BOT_CREATED,
+            actor_user_id=actor_user_id,
+            master_id=master_id,
+            entity_id=bot_instance.id,
+            payload_after={
+                "telegram_bot_id": bot_identity.id,
+                "telegram_username": bot_identity.username,
+                "provisioning_source": "managed_bot",
+                "managed_by_platform": True,
+            },
+        )
+        await self.session.commit()
+
+        # 6. Configure Telegram Webhook and commands
+        base_url = settings.webhook_base_url.rstrip("/")
+        webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
+
+        try:
+            await self.gateway.set_webhook(
+                token=clean_token,
+                url=webhook_url,
+                secret_token=webhook_secret,
+                drop_pending_updates=False,
+            )
+
+            # Webhook verification
+            info = await self.gateway.get_webhook_info(clean_token)
+            if clean_token in (info.url or "") or (webhook_secret and webhook_secret in (info.url or "")):
+                raise ProvisioningWebhookError("В URL вебхука обнаружены секретные данные.")
+            if info.url != webhook_url:
+                raise ProvisioningWebhookError(f"URL вебхука в Telegram ({info.url}) не совпадает с ожидаемым ({webhook_url}).")
+
+            # Default commands
+            try:
+                await self.gateway.set_my_commands(clean_token)
+            except Exception as cmd_exc:
+                logger.warning("Could not set commands for bot %s: %s", bot_identity.id, cmd_exc)
+
+            # Mini App Menu Button (if configured)
+            if settings.mini_app_url:
+                try:
+                    await self.gateway.set_chat_menu_button(clean_token, mini_app_url=settings.mini_app_url)
+                except Exception as btn_exc:
+                    logger.warning("Could not set menu button for bot %s: %s", bot_identity.id, btn_exc)
+
+            # Success -> advance status to SETUP_REQUIRED
+            bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
+            bot_instance.last_error = None
+            await self.session.commit()
+
+            if self.registry:
+                await self.registry.invalidate_bot(bot_instance.id, reason="managed_bot_provisioned")
+
+            await self.audit_service.log_event(
+                action=AuditEvent.MANAGED_BOT_PROVISIONED,
+                actor_user_id=actor_user_id,
+                master_id=master_id,
+                entity_id=bot_instance.id,
+                payload_after={"status": "SETUP_REQUIRED"},
+            )
+            await self.session.commit()
+            return bot_instance
+        except Exception as exc:
+            error_desc = f"Ошибка подключения управляемого бота: {redact_token(str(exc)[:200])}"
+            bot_instance.status = BotInstanceStatus.ERROR
+            bot_instance.last_error = error_desc
+            await self.session.commit()
+
+            await self.audit_service.log_event(
+                action=AuditEvent.MANAGED_BOT_PROVISION_FAILED,
+                actor_user_id=actor_user_id,
+                master_id=master_id,
+                entity_id=bot_instance.id,
+                payload_after={"status": "ERROR", "error": error_desc},
+            )
             await self.session.commit()
             raise ProvisioningWebhookError(error_desc) from exc
 
@@ -366,6 +529,35 @@ class BotProvisioningService:
         )
         await self.session.commit()
         return bot_instance
+
+    async def rotate_managed_bot_token(
+        self,
+        bot_instance_id: int,
+        actor_user_id: int,
+    ) -> BotInstance:
+        """Rotate token of a managed bot using Telegram replaceManagedBotToken API."""
+        bot_instance = await self.session.scalar(
+            select(BotInstance)
+            .join(Master, BotInstance.master_id == Master.id)
+            .where(BotInstance.id == bot_instance_id, Master.owner_user_id == actor_user_id)
+        )
+        if not bot_instance:
+            raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
+
+        if not bot_instance.managed_by_platform:
+            raise AccessDeniedError("Данный бот не является управляемым платформой (Managed Bot).")
+
+        owner_uid = bot_instance.telegram_owner_user_id or actor_user_id
+        if not settings.manager_bot_token:
+            raise ProvisioningWebhookError("Токен платформенного бота не сконфигурирован.")
+
+        # Request new token from Telegram via Platform Manager Bot
+        new_token = await self.gateway.replace_managed_bot_token(
+            manager_token=settings.manager_bot_token.strip(),
+            user_id=owner_uid,
+        )
+
+        return await self.rotate_token(bot_instance_id, actor_user_id, new_token)
 
     async def disable_bot(
         self,

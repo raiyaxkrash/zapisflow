@@ -12,7 +12,16 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ManagedBotCreated,
+    ManagedBotUpdated,
+    Message,
+    ReplyKeyboardRemove,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
@@ -56,6 +65,7 @@ from app.manager_bot.keyboards import (
     admin_user_projects_keyboard,
     admin_user_subscriptions_keyboard,
     admin_users_keyboard,
+    bot_connect_method_choice_keyboard,
     bot_delete_confirm_keyboard,
     cancel_keyboard,
     confirm_connect_keyboard,
@@ -66,6 +76,10 @@ from app.manager_bot.keyboards import (
     crm_menu_keyboard,
     finances_period_keyboard,
     main_menu_keyboard,
+    managed_bot_prepare_keyboard,
+    managed_bot_reply_keyboard,
+    managed_bot_rotate_keyboard,
+    managed_bot_success_keyboard,
     manager_contact_cancel_keyboard,
     manager_contacts_keyboard,
     manager_notification_settings_keyboard,
@@ -119,6 +133,7 @@ from app.manager_bot.states import (
     CreateMasterStates,
     CrmNoteStates,
     CrmSearchStates,
+    ManagedBotStates,
     ManagerPortfolioStates,
     ManagerScheduleStates,
     ManagerServiceStates,
@@ -150,6 +165,7 @@ from app.services.exceptions import (
     TelegramGatewayError,
     TokenRotationBotMismatchError,
 )
+from app.services.managed_bot_service import ManagedBotService
 from app.services.master_readiness_service import MasterReadinessService
 from app.services.telegram_provisioning_gateway import BotIdentity, TelegramProvisioningGateway
 
@@ -959,8 +975,36 @@ async def cb_project_card(callback: CallbackQuery, state: FSMContext, session: A
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:connect:"))
 async def cb_connect_bot(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
-    """Prompt user with BotFather steps to connect a bot."""
+    """Show bot connection method choice: Managed Bot (1-click) or manual token."""
     master_id = int(callback.data.split(":")[3])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(master_id=master_id)
+
+    text = (
+        f"🤖 <b>Подключение Telegram-бота к проекту «{escape(master.display_name)}»</b>\n\n"
+        "Выберите удобный способ подключения:\n\n"
+        "✨ <b>Создать нового бота в 1 клик (Рекомендуется)</b>\n"
+        "Официальная функция Telegram Managed Bots. Бот регистрируется мгновенно прямо в интерфейсе Telegram — "
+        "не нужно переходить в @BotFather, копировать токены и вводить команды вручную.\n\n"
+        "🔑 <b>Подключить через токен (BotFather)</b>\n"
+        "Традиционный способ: создание бота через диалог с @BotFather и отправка HTTP API токена."
+    )
+    await callback.message.edit_text(text, reply_markup=bot_connect_method_choice_keyboard(master_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:bot:token:start:"))
+async def cb_token_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Prompt user with BotFather steps to connect a bot manually via token."""
+    master_id = int(callback.data.split(":")[4])
     user = await _get_or_create_user(session, callback.from_user)
 
     master_repo = MasterRepository(session)
@@ -984,6 +1028,304 @@ async def cb_connect_bot(callback: CallbackQuery, state: FSMContext, session: As
     )
     await callback.message.edit_text(text, reply_markup=cancel_keyboard())
     await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:bot:mg:prep:"))
+async def cb_managed_bot_prepare(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Prepare Telegram Managed Bot onboarding screen with suggestions and deep link."""
+    master_id = int(callback.data.split(":")[4])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    managed_svc = ManagedBotService()
+    suggested_username, suggested_name = managed_svc.suggest_username_and_name(master.display_name)
+
+    manager_username = settings.manager_bot_username
+    if not manager_username:
+        try:
+            me = await callback.bot.get_me()
+            manager_username = me.username or ""
+        except Exception:
+            manager_username = ""
+
+    creation_url = managed_svc.build_managed_bot_deep_link(
+        manager_bot_username=manager_username,
+        suggested_username=suggested_username,
+        suggested_name=suggested_name,
+    )
+
+    await state.set_state(ManagedBotStates.waiting_for_creation)
+    await state.update_data(
+        master_id=master_id,
+        suggested_username=suggested_username,
+        suggested_name=suggested_name,
+    )
+
+    text = (
+        "✨ <b>Создание нового бота для записи клиентов</b>\n\n"
+        f"🏢 Проект: <b>{escape(master.display_name)}</b>\n"
+        f"🤖 Имя бота: <b>{escape(suggested_name)}</b>\n"
+        f"🔗 Предложенный логин: <code>@{suggested_username}</code>\n\n"
+        "Для создания бота нажмите кнопку <b>«🚀 Создать бота в Telegram»</b> ниже.\n"
+        "Telegram откроет окно создания. После подтверждения бот будет мгновенно зарегистрирован и подключён к платформе ZapisFlow!\n\n"
+        "<i>Вы также можете отправить кнопку прямо в чат или задать собственный логин.</i>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=managed_bot_prepare_keyboard(master_id, creation_url, suggested_username),
+    )
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:bot:mg:reply:"))
+async def cb_managed_bot_reply_btn(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Send reply keyboard with KeyboardButtonRequestManagedBot button."""
+    data = await state.get_data()
+    suggested_name = data.get("suggested_name", "Бот записи")
+    suggested_username = data.get("suggested_username", "zapisflow_bot")
+
+    reply_kb = managed_bot_reply_keyboard(suggested_name, suggested_username)
+    await callback.message.answer(
+        "👇 <b>Нажмите кнопку ниже под строкой ввода</b>, чтобы создать бота через интерфейс Telegram:",
+        reply_markup=reply_kb,
+    )
+    await callback.answer("Кнопка добавлена на панель ввода")
+
+
+@manager_router.callback_query(F.data.startswith("mgr:bot:mg:custom:"))
+async def cb_managed_bot_custom(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Prompt master to input a custom handle for managed bot."""
+    master_id = int(callback.data.split(":")[4])
+    await state.set_state(ManagedBotStates.waiting_for_custom_username)
+    await state.update_data(master_id=master_id)
+    text = (
+        "✏️ <b>Введите желаемый логин для бота:</b>\n\n"
+        "Правила Telegram:\n"
+        "• От 5 до 32 символов (латинские буквы, цифры, подчёркивание)\n"
+        "• Обязательно заканчивается на <code>bot</code> (например, <code>beauty_anna_bot</code>)\n\n"
+        "Отправьте желаемый логин ответным сообщением:"
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_keyboard())
+    await callback.answer()
+
+
+@manager_router.message(ManagedBotStates.waiting_for_custom_username)
+async def msg_receive_custom_bot_username(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Validate and apply custom username for managed bot."""
+    raw_text = (message.text or "").strip()
+    if raw_text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Действие отменено.", reply_markup=ReplyKeyboardRemove())
+        await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+        return
+
+    managed_svc = ManagedBotService()
+    norm_username, err = managed_svc.normalize_username(raw_text)
+    if err or not norm_username:
+        variants = managed_svc.generate_username_variants(raw_text)
+        variants_str = ", ".join(f"<code>@{v}</code>" for v in variants[:3])
+        await message.answer(
+            f"❌ <b>Некорректный логин:</b> {err}\n\n"
+            f"Попробуйте один из вариантов: {variants_str}\n"
+            "Или отправьте другой вариант:",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    if not master_id:
+        await message.answer("Сессия истекла.", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
+
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    suggested_name = master.display_name if master else "Бот записи"
+
+    manager_username = settings.manager_bot_username
+    if not manager_username:
+        try:
+            me = await message.bot.get_me()
+            manager_username = me.username or ""
+        except Exception:
+            manager_username = ""
+
+    creation_url = managed_svc.build_managed_bot_deep_link(
+        manager_bot_username=manager_username,
+        suggested_username=norm_username,
+        suggested_name=suggested_name,
+    )
+
+    await state.set_state(ManagedBotStates.waiting_for_creation)
+    await state.update_data(
+        master_id=master_id,
+        suggested_username=norm_username,
+        suggested_name=suggested_name,
+    )
+
+    text = (
+        "✨ <b>Создание нового бота для записи клиентов</b>\n\n"
+        f"🏢 Проект: <b>{escape(suggested_name)}</b>\n"
+        f"🔗 Выбранный логин: <code>@{norm_username}</code>\n\n"
+        "Нажмите кнопку <b>«🚀 Создать бота в Telegram»</b> для завершения создания в Telegram:"
+    )
+    await message.answer(
+        text,
+        reply_markup=managed_bot_prepare_keyboard(master_id, creation_url, norm_username),
+    )
+
+
+@manager_router.message(F.text == "❌ Отмена")
+async def msg_cancel_reply(message: Message, state: FSMContext) -> None:
+    """Handle cancel button from native reply keyboard."""
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+
+
+async def _handle_managed_bot_provisioning(
+    session: AsyncSession,
+    created_bot_user: Any,
+    telegram_owner_user_id: int,
+    state: Optional[FSMContext] = None,
+    registry: Optional[BotRegistry] = None,
+) -> tuple[Optional[Any], Optional[str]]:
+    """Common logic for provisioning a newly created managed bot."""
+    user_repo = UserRepository(session)
+    user = await user_repo.get_by_telegram_id(telegram_owner_user_id)
+    if not user:
+        return None, "Пользователь не найден в системе."
+
+    master_id = None
+    if state:
+        data = await state.get_data()
+        master_id = data.get("master_id")
+
+    master_repo = MasterRepository(session)
+    bot_repo = BotInstanceRepository(session)
+
+    if not master_id:
+        masters = await master_repo.get_by_owner_id(user.id)
+        if not masters:
+            return None, "У вас нет активных проектов для подключения бота."
+        for m in masters:
+            cur_bot = await bot_repo.get_current_for_master(m.id)
+            if not cur_bot or cur_bot.status in (BotInstanceStatus.DISABLED, BotInstanceStatus.ERROR):
+                master_id = m.id
+                break
+        if not master_id:
+            master_id = masters[0].id
+
+    gateway = TelegramProvisioningGateway()
+    manager_token = settings.manager_bot_token.strip()
+    if not manager_token:
+        return None, "Токен платформенного бота не настроен на сервере."
+
+    try:
+        token = await gateway.get_managed_bot_token(
+            manager_token=manager_token,
+            user_id=telegram_owner_user_id,
+        )
+    except Exception as exc:
+        logger.error("Failed to get managed bot token for user %s: %s", telegram_owner_user_id, exc)
+        return None, f"Не удалось получить токен созданного бота от Telegram: {exc}"
+
+    service = BotProvisioningService(session=session, gateway=gateway, registry=registry)
+    bot_identity = BotIdentity(
+        id=created_bot_user.id,
+        username=created_bot_user.username or "",
+        first_name=created_bot_user.first_name,
+    )
+
+    try:
+        bot_instance = await service.provision_managed_bot(
+            master_id=master_id,
+            actor_user_id=user.id,
+            bot_identity=bot_identity,
+            token=token,
+            telegram_owner_user_id=telegram_owner_user_id,
+        )
+        if state:
+            await state.clear()
+        return bot_instance, None
+    except DuplicateBotError as exc:
+        return None, str(exc)
+    except Exception as exc:
+        logger.error("Error provisioning managed bot %s: %s", created_bot_user.id, exc)
+        return None, f"Ошибка подключения бота: {exc}"
+
+
+@manager_router.message(F.managed_bot_created)
+async def msg_managed_bot_created(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    registry: Optional[BotRegistry] = None,
+) -> None:
+    """Handle native Telegram message update when a managed bot is created."""
+    created_info = message.managed_bot_created
+    if not created_info or not created_info.bot_user:
+        return
+
+    created_bot = created_info.bot_user
+    bot_instance, error = await _handle_managed_bot_provisioning(
+        session=session,
+        created_bot_user=created_bot,
+        telegram_owner_user_id=message.from_user.id,
+        state=state,
+        registry=registry,
+    )
+
+    if error:
+        await message.answer(
+            f"❌ <b>Не удалось подключить созданного бота:</b>\n{error}",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+        return
+
+    text = (
+        "🎉 <b>Ваш Telegram-бот успешно создан и подключён!</b>\n\n"
+        f"🤖 <b>Имя:</b> {escape(created_bot.first_name)}\n"
+        f"🔗 <b>Логин:</b> @{created_bot.username}\n\n"
+        "Вебхук настроен, служебные команды и кнопка меню установлены.\n"
+        "Теперь вы можете открыть бота и завершить настройку услуг и расписания!"
+    )
+    await message.answer(text, reply_markup=ReplyKeyboardRemove())
+    await message.answer(
+        "Управление ботом:",
+        reply_markup=managed_bot_success_keyboard(bot_instance.master_id, created_bot.username or ""),
+    )
+
+
+@manager_router.managed_bot()
+async def update_managed_bot(
+    event: ManagedBotUpdated,
+    session: AsyncSession,
+    registry: Optional[BotRegistry] = None,
+) -> None:
+    """Handle ManagedBotUpdated event from Telegram Bot API."""
+    if not event.user or not event.bot_user:
+        return
+
+    created_bot = event.bot_user
+    bot_instance, error = await _handle_managed_bot_provisioning(
+        session=session,
+        created_bot_user=created_bot,
+        telegram_owner_user_id=event.user.id,
+        state=None,
+        registry=registry,
+    )
+    if error:
+        logger.warning("ManagedBotUpdated provisioning warning: %s", error)
+    else:
+        logger.info("ManagedBotUpdated: bot %s successfully provisioned for master %s", created_bot.id, bot_instance.master_id)
 
 
 @manager_router.message(ConnectBotStates.waiting_for_token)
@@ -1435,6 +1777,17 @@ async def cb_rotate_token_prompt(callback: CallbackQuery, state: FSMContext, ses
         await callback.answer("Бот не найден.", show_alert=True)
         return
 
+    if bot.managed_by_platform:
+        text = (
+            f"♻️ <b>Смена токена для бота @{bot.telegram_username}</b>\n\n"
+            "Этот бот управляется платформой ZapisFlow (Telegram Managed Bot).\n"
+            "Вы можете обновить токен безопасности автоматически в 1 клик через официальный Bot API, "
+            "либо ввести новый токен вручную."
+        )
+        await callback.message.edit_text(text, reply_markup=managed_bot_rotate_keyboard(master_id))
+        await callback.answer()
+        return
+
     await state.set_state(RotateTokenStates.waiting_for_token)
     await state.update_data(master_id=master_id, bot_instance_id=bot.id)
 
@@ -1444,6 +1797,45 @@ async def cb_rotate_token_prompt(callback: CallbackQuery, state: FSMContext, ses
         "<i>⚠️ Сообщение с токеном будет немедленно удалено.</i>"
     )
     await callback.message.edit_text(text, reply_markup=cancel_keyboard())
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.startswith("mgr:bot:mg:rot_confirm:"))
+async def cb_rotate_managed_bot_confirm(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    registry: Optional[BotRegistry] = None,
+) -> None:
+    """Automatically rotate token for a platform-managed bot via replaceManagedBotToken."""
+    master_id = int(callback.data.split(":")[5])
+    user = await _get_or_create_user(session, callback.from_user)
+
+    master_repo = MasterRepository(session)
+    master = await master_repo.get_by_id(master_id)
+    if not master or master.owner_user_id != user.id:
+        await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
+        return
+
+    bot_repo = BotInstanceRepository(session)
+    bot = await bot_repo.get_current_for_master(master_id)
+    if not bot:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+
+    service = BotProvisioningService(session=session, registry=registry)
+    try:
+        await service.rotate_managed_bot_token(bot.id, user.id)
+        await callback.message.edit_text(
+            "✅ <b>Токен управляемого бота успешно обновлён!</b>\n\n"
+            "Telegram выпустил новый токен, вебхук переустановлен, данные зашифрованы.",
+            reply_markup=main_menu_keyboard(),
+        )
+    except Exception as exc:
+        logger.error("Error rotating managed bot token: %s", exc)
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка обновления токена:</b> {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
     await callback.answer()
 
 
