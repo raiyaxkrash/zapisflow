@@ -223,6 +223,10 @@ curl -fsS https://<ваш-api-домен>/health/ready
 
 `/health/live` проверяет, что приложение отвечает. `/health/ready` проверяет доступность PostgreSQL и Redis. URL зависит от `DOMAIN` и `WEBHOOK_BASE_URL` конкретного развёртывания.
 
+## Roadmap
+
+Актуальный план развития проекта: [ROADMAP.md](ROADMAP.md)
+
 ## Support
 
 Поддержка платформы: [@zapisflow](https://t.me/zapisflow).
