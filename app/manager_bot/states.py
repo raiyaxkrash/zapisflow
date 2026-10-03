@@ -98,3 +98,34 @@ class ManagerStaffStates(StatesGroup):
     waiting_for_specialization = State()
     waiting_for_description = State()
     waiting_for_edit_field_value = State()
+
+
+class AdminPlanStates(StatesGroup):
+    """FSM states for editing subscription plans."""
+
+    waiting_for_name = State()
+    waiting_for_price = State()
+    waiting_for_price_confirm = State()
+    waiting_for_custom_duration = State()
+    waiting_for_sort_order = State()
+
+
+class AdminSubscriptionStates(StatesGroup):
+    """FSM states for manual subscription management."""
+
+    waiting_for_custom_days = State()
+    waiting_for_custom_months = State()
+    waiting_for_expiry_date = State()
+    waiting_for_custom_reason = State()
+
+
+class AdminBotStates(StatesGroup):
+    """FSM states for bot administrative actions."""
+
+    waiting_for_delete_confirm = State()
+
+
+class AdminProjectStates(StatesGroup):
+    """FSM states for project administrative actions."""
+
+    waiting_for_delete_confirm = State()

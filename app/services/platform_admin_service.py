@@ -5,7 +5,7 @@ from decimal import Decimal
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -587,3 +587,581 @@ class PlatformAdminService:
         )
         await self.session.flush()
         return True, f"Тариф «{plan.name}» {status_str}."
+
+    ALLOWED_FEATURE_KEYS = {
+        "max_bots",
+        "max_staff",
+        "custom_branding",
+        "broadcasts",
+        "analytics",
+        "priority_support",
+    }
+
+    async def update_plan(
+        self,
+        plan_id: int,
+        actor_user_id: int,
+        name: Optional[str] = None,
+        price: Optional[Decimal] = None,
+        period_days: Optional[int] = None,
+        sort_order: Optional[int] = None,
+        features: Optional[dict] = None,
+    ) -> Tuple[bool, str, Optional[SubscriptionPlan]]:
+        """Edit subscription plan parameters with validation."""
+        plan = await self.session.get(SubscriptionPlan, plan_id)
+        if not plan:
+            return False, "Тариф не найден.", None
+
+        payload_before = {
+            "name": plan.name,
+            "price": str(plan.price),
+            "period_days": plan.period_days,
+            "sort_order": plan.sort_order,
+            "features": plan.features,
+        }
+
+        if name is not None:
+            clean_name = name.strip()
+            if not clean_name:
+                return False, "Название тарифа не может быть пустым.", None
+            if len(clean_name) > 64:
+                return False, "Название тарифа не должно превышать 64 символа.", None
+            plan.name = clean_name
+
+        if price is not None:
+            try:
+                dec_price = Decimal(str(price))
+            except Exception:
+                return False, "Некорректный формат цены.", None
+            if not dec_price.is_finite() or dec_price <= 0:
+                return False, "Цена тарифа должна быть больше 0.", None
+            if dec_price > Decimal("1000000.00"):
+                return False, "Цена тарифа не может превышать 1 000 000 ₽.", None
+            plan.price = dec_price.quantize(Decimal("0.01"))
+
+        if period_days is not None:
+            if period_days <= 0 or period_days > 3650:
+                return False, "Срок действия тарифа должен быть от 1 до 3650 дней.", None
+            plan.period_days = period_days
+
+        if sort_order is not None:
+            plan.sort_order = sort_order
+
+        if features is not None:
+            sanitized = {}
+            for k, v in features.items():
+                if k in self.ALLOWED_FEATURE_KEYS:
+                    sanitized[k] = v
+            plan.features = sanitized
+
+        await self.session.flush()
+
+        payload_after = {
+            "name": plan.name,
+            "price": str(plan.price),
+            "period_days": plan.period_days,
+            "sort_order": plan.sort_order,
+            "features": plan.features,
+        }
+
+        await self.audit_service.log_event(
+            action=AuditEvent.PLAN_UPDATED,
+            actor_user_id=actor_user_id,
+            entity_type="SubscriptionPlan",
+            entity_id=plan.id,
+            payload_before=payload_before,
+            payload_after=payload_after,
+        )
+        await self.session.flush()
+        return True, f"Тариф «{plan.name}» успешно обновлён.", plan
+
+    async def can_hard_delete_plan(self, plan_id: int) -> Tuple[bool, str]:
+        """Check whether plan can be hard deleted or only archived."""
+        payments_count = await self.session.scalar(
+            select(func.count(SubscriptionPayment.id)).where(SubscriptionPayment.plan_id == plan_id)
+        ) or 0
+        periods_count = await self.session.scalar(
+            select(func.count(SubscriptionPeriod.id)).where(SubscriptionPeriod.plan_id == plan_id)
+        ) or 0
+        if payments_count > 0 or periods_count > 0:
+            return False, "Тариф имеет историю покупок или периодов. Удаление запрещено, используйте деактивацию."
+        return True, "Тариф может быть удалён."
+
+    async def extend_subscription_manually(
+        self,
+        master_id: int,
+        days: int,
+        actor_user_id: int,
+        reason: str = "Ручное продление",
+    ) -> Tuple[bool, str, Optional[datetime]]:
+        """Delegate manual extension to SubscriptionService."""
+        from app.services.subscription_service import SubscriptionService
+        sub_svc = SubscriptionService(self.session)
+        try:
+            new_date, _ = await sub_svc.extend_subscription_manually(
+                master_id=master_id,
+                days=days,
+                actor_user_id=actor_user_id,
+                reason=reason,
+            )
+            return True, f"Подписка успешно продлена на {days} дн. до {new_date.strftime('%d.%m.%Y')}.", new_date
+        except Exception as exc:
+            logger.exception("Error extending subscription manually: %s", exc)
+            return False, f"Ошибка продления: {exc}", None
+
+    async def set_subscription_expiry_manually(
+        self,
+        master_id: int,
+        new_expiry_date: datetime,
+        actor_user_id: int,
+        reason: str = "Установка даты окончания",
+    ) -> Tuple[bool, str, Optional[datetime]]:
+        """Delegate manual expiry date setting to SubscriptionService."""
+        from app.services.subscription_service import SubscriptionService
+        sub_svc = SubscriptionService(self.session)
+        try:
+            new_date, _ = await sub_svc.set_subscription_expiry_manually(
+                master_id=master_id,
+                new_expiry_date=new_expiry_date,
+                actor_user_id=actor_user_id,
+                reason=reason,
+            )
+            return True, f"Дата окончания установлена: {new_date.strftime('%d.%m.%Y')}.", new_date
+        except Exception as exc:
+            logger.exception("Error setting subscription expiry manually: %s", exc)
+            return False, f"Ошибка установки даты: {exc}", None
+
+    async def get_subscription_history(
+        self, master_id: int, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Retrieve audit history of subscription changes for a master."""
+        from app.database.models.audit import AuditLog
+        stmt = (
+            select(AuditLog)
+            .where(
+                AuditLog.master_id == master_id,
+                AuditLog.action.in_([
+                    AuditEvent.SUBSCRIPTION_EXTENDED,
+                    AuditEvent.SUBSCRIPTION_EXPIRY_SET,
+                    AuditEvent.SUBSCRIPTION_SUSPENDED,
+                    AuditEvent.SUBSCRIPTION_ACTIVATED,
+                    "SUBSCRIPTION_RENEWED",
+                    "SUBSCRIPTION_ACTIVATED",
+                    "SUBSCRIPTION_RESTORED",
+                    "SUBSCRIPTION_SUSPENDED",
+                ]),
+            )
+            .order_by(desc(AuditLog.created_at))
+            .limit(limit)
+        )
+        res = await self.session.execute(stmt)
+        logs = res.scalars().all()
+
+        items = []
+        for l in logs:
+            items.append({
+                "id": l.id,
+                "action": l.action,
+                "actor_user_id": l.actor_user_id,
+                "created_at": l.created_at,
+                "payload_before": l.payload_before or {},
+                "payload_after": l.payload_after or {},
+            })
+        return items
+
+    async def get_project_impact_summary(self, master_id: int) -> Dict[str, int]:
+        """Exact count of all tenant-owned entities for hard delete preview."""
+        from app.database.models.appointment import Appointment
+        from app.database.models.broadcast import Broadcast
+        from app.database.models.master import BotInstance, MasterClient
+        from app.database.models.payment import Payment
+        from app.database.models.portfolio import PortfolioItem
+        from app.database.models.review import Review
+        from app.database.models.schedule import BlockedInterval, ScheduleException, ScheduleTemplate
+        from app.database.models.service import Service
+        from app.database.models.staff import StaffMember
+
+        bots_count = await self.session.scalar(
+            select(func.count(BotInstance.id)).where(BotInstance.master_id == master_id)
+        ) or 0
+        staff_count = await self.session.scalar(
+            select(func.count(StaffMember.id)).where(StaffMember.master_id == master_id)
+        ) or 0
+        services_count = await self.session.scalar(
+            select(func.count(Service.id)).where(Service.master_id == master_id)
+        ) or 0
+        appts_count = await self.session.scalar(
+            select(func.count(Appointment.id)).where(Appointment.master_id == master_id)
+        ) or 0
+        clients_count = await self.session.scalar(
+            select(func.count(MasterClient.id)).where(MasterClient.master_id == master_id)
+        ) or 0
+        payments_count = await self.session.scalar(
+            select(func.count(Payment.id)).where(Payment.master_id == master_id)
+        ) or 0
+        reviews_count = await self.session.scalar(
+            select(func.count(Review.id)).where(Review.master_id == master_id)
+        ) or 0
+        portfolio_count = await self.session.scalar(
+            select(func.count(PortfolioItem.id)).where(PortfolioItem.master_id == master_id)
+        ) or 0
+        broadcasts_count = await self.session.scalar(
+            select(func.count(Broadcast.id)).where(Broadcast.master_id == master_id)
+        ) or 0
+        tpl_count = await self.session.scalar(
+            select(func.count(ScheduleTemplate.id)).where(ScheduleTemplate.master_id == master_id)
+        ) or 0
+        exc_count = await self.session.scalar(
+            select(func.count(ScheduleException.id)).where(ScheduleException.master_id == master_id)
+        ) or 0
+        blk_count = await self.session.scalar(
+            select(func.count(BlockedInterval.id)).where(BlockedInterval.master_id == master_id)
+        ) or 0
+
+        return {
+            "bots": bots_count,
+            "staff": staff_count,
+            "services": services_count,
+            "appointments": appts_count,
+            "clients": clients_count,
+            "payments": payments_count,
+            "reviews": reviews_count,
+            "portfolio": portfolio_count,
+            "broadcasts": broadcasts_count,
+            "schedule": tpl_count + exc_count + blk_count,
+        }
+
+    async def hard_delete_bot(
+        self, bot_instance_id: int, actor_user_id: int
+    ) -> Tuple[bool, str]:
+        """Physically delete a BotInstance and its tokens with best-effort webhook cleanup."""
+        bot = await self.session.scalar(
+            select(BotInstance).where(BotInstance.id == bot_instance_id).with_for_update()
+        )
+        if not bot:
+            return False, "Бот не найден или уже удалён."
+
+        # Best-effort deleteWebhook
+        webhook_ok = True
+        if bot.encrypted_token and bot.telegram_bot_id:
+            try:
+                from app.core.token_crypto import TokenCrypto
+                raw_token = TokenCrypto().decrypt(bot.encrypted_token, associated_data=bot.telegram_bot_id)
+                await self.gateway.delete_webhook(raw_token)
+            except Exception as exc:
+                logger.warning("Telegram deleteWebhook failed for bot #%s: %s", bot.id, exc)
+                webhook_ok = False
+
+        if self.registry:
+            try:
+                await self.registry.invalidate_bot_instance(bot.id, reason="bot_hard_deleted")
+            except Exception as exc:
+                logger.warning("BotRegistry invalidation failed: %s", exc)
+
+        # Audit snapshot before purging
+        master_id = bot.master_id
+        username = bot.telegram_username
+        payload_before = {
+            "bot_instance_id": bot.id,
+            "telegram_bot_id": bot.telegram_bot_id,
+            "telegram_username": bot.telegram_username,
+            "master_id": bot.master_id,
+            "status": bot.status.value,
+        }
+
+        # Delete dependent outbox items first to respect RESTRICT FK
+        from app.database.models.telegram_outbox import TelegramOutbox
+        await self.session.execute(
+            delete(TelegramOutbox).where(TelegramOutbox.bot_instance_id == bot.id)
+        )
+
+        # Delete bot instance
+        await self.session.delete(bot)
+        await self.session.flush()
+
+        # If master has no other active bots, update status to SETUP_REQUIRED
+        remaining_bots = await self.session.scalar(
+            select(func.count(BotInstance.id)).where(
+                BotInstance.master_id == master_id,
+                BotInstance.status.in_([BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED]),
+            )
+        ) or 0
+        if remaining_bots == 0:
+            master = await self.master_repo.get_by_id(master_id)
+            if master and master.status == MasterStatus.ACTIVE:
+                master.status = MasterStatus.SETUP_REQUIRED
+                await self.session.flush()
+
+        await self.audit_service.log_event(
+            action=AuditEvent.BOT_HARD_DELETED,
+            actor_user_id=actor_user_id,
+            master_id=master_id,
+            entity_type="BotInstance",
+            entity_id=bot_instance_id,
+            payload_before=payload_before,
+            payload_after={"status": "DELETED", "webhook_cleaned": webhook_ok},
+        )
+        await self.session.flush()
+
+        msg = f"Бот @{username or bot_instance_id} полностью удалён из платформы."
+        if not webhook_ok:
+            msg += "\n⚠️ Telegram API не подтвердил удаление webhook (токен мог быть отозван). Локальные данные удалены."
+        return True, msg
+
+    async def hard_delete_project(
+        self, master_id: int, actor_user_id: int
+    ) -> Tuple[bool, str]:
+        """
+        Hard delete an entire tenant/master project and all its tenant-owned entities.
+        Preserves global User accounts and creates an audit record.
+        """
+        master = await self.session.scalar(
+            select(Master).where(Master.id == master_id).with_for_update()
+        )
+        if not master:
+            return False, "Проект не найден или уже удалён."
+
+        # 1. Best-effort webhook cleanup and cache invalidation for all bots of this master
+        bots_query = select(BotInstance).where(BotInstance.master_id == master_id)
+        bots_res = await self.session.execute(bots_query)
+        bots = bots_res.scalars().all()
+
+        from app.core.token_crypto import TokenCrypto
+        crypto = TokenCrypto()
+        for b in bots:
+            if b.encrypted_token and b.telegram_bot_id:
+                try:
+                    raw_token = crypto.decrypt(b.encrypted_token, associated_data=b.telegram_bot_id)
+                    await self.gateway.delete_webhook(raw_token)
+                except Exception as exc:
+                    logger.warning("deleteWebhook failed for bot #%s of master #%s: %s", b.id, master_id, exc)
+            if self.registry:
+                try:
+                    await self.registry.invalidate_bot_instance(b.id, reason="project_hard_deleted")
+                except Exception as exc:
+                    logger.warning("BotRegistry invalidation failed: %s", exc)
+
+        # 2. Get impact summary for audit log
+        impact = await self.get_project_impact_summary(master_id)
+        display_name = master.display_name
+        owner_id = master.owner_user_id
+
+        # 3. Purge all tenant data in strict dependency order (leaf to root)
+        from app.database.models.broadcast import Broadcast, BroadcastRecipient
+        from app.database.models.checkout_session import CheckoutSession
+        from app.database.models.payment import Payment, PaymentProof
+        from app.database.models.portfolio import PortfolioCategory, PortfolioItem
+        from app.database.models.review import Review
+        from app.database.models.schedule import BlockedInterval, ScheduleException, ScheduleTemplate
+        from app.database.models.service import Service
+        from app.database.models.staff import StaffMember, StaffService
+        from app.database.models.telegram_outbox import TelegramOutbox
+        from app.database.models.master import MasterAdmin, MasterSettings
+
+        # Outbox & notifications
+        await self.session.execute(delete(TelegramOutbox).where(TelegramOutbox.master_id == master_id))
+
+        # Broadcasts & recipients
+        broadcast_ids_stmt = select(Broadcast.id).where(Broadcast.master_id == master_id)
+        await self.session.execute(
+            delete(BroadcastRecipient).where(BroadcastRecipient.broadcast_id.in_(broadcast_ids_stmt))
+        )
+        await self.session.execute(delete(Broadcast).where(Broadcast.master_id == master_id))
+
+        # Checkout sessions
+        await self.session.execute(delete(CheckoutSession).where(CheckoutSession.master_id == master_id))
+
+        # Reviews
+        await self.session.execute(delete(Review).where(Review.master_id == master_id))
+
+        # Payments & payment proofs
+        payment_ids_stmt = select(Payment.id).where(Payment.master_id == master_id)
+        await self.session.execute(
+            delete(PaymentProof).where(PaymentProof.payment_id.in_(payment_ids_stmt))
+        )
+        await self.session.execute(delete(Payment).where(Payment.master_id == master_id))
+
+        # Appointments
+        await self.session.execute(delete(Appointment).where(Appointment.master_id == master_id))
+
+        # Schedule
+        await self.session.execute(delete(BlockedInterval).where(BlockedInterval.master_id == master_id))
+        await self.session.execute(delete(ScheduleException).where(ScheduleException.master_id == master_id))
+        await self.session.execute(delete(ScheduleTemplate).where(ScheduleTemplate.master_id == master_id))
+
+        # Portfolio
+        await self.session.execute(delete(PortfolioItem).where(PortfolioItem.master_id == master_id))
+        await self.session.execute(delete(PortfolioCategory).where(PortfolioCategory.master_id == master_id))
+
+        # Staff services & staff
+        await self.session.execute(delete(StaffService).where(StaffService.master_id == master_id))
+        await self.session.execute(delete(StaffMember).where(StaffMember.master_id == master_id))
+
+        # Services
+        await self.session.execute(delete(Service).where(Service.master_id == master_id))
+
+        # Clients, admins, settings
+        await self.session.execute(delete(MasterClient).where(MasterClient.master_id == master_id))
+        await self.session.execute(delete(MasterAdmin).where(MasterAdmin.master_id == master_id))
+        await self.session.execute(delete(MasterSettings).where(MasterSettings.master_id == master_id))
+
+        # Bot instances
+        await self.session.execute(delete(BotInstance).where(BotInstance.master_id == master_id))
+
+        # Subscriptions
+        await self.session.execute(delete(SubscriptionPeriod).where(SubscriptionPeriod.master_id == master_id))
+        await self.session.execute(delete(SubscriptionPayment).where(SubscriptionPayment.master_id == master_id))
+
+        # Delete Master
+        await self.session.execute(delete(Master).where(Master.id == master_id))
+        await self.session.flush()
+
+        # Audit log (master_id set to None since master is purged)
+        await self.audit_service.log_event(
+            action=AuditEvent.PROJECT_HARD_DELETED,
+            actor_user_id=actor_user_id,
+            master_id=None,
+            entity_type="Master",
+            entity_id=master_id,
+            payload_before={
+                "id": master_id,
+                "display_name": display_name,
+                "owner_user_id": owner_id,
+                "impact": impact,
+            },
+            payload_after={"status": "DELETED"},
+        )
+        await self.session.flush()
+        return True, f"Проект «{display_name}» (#{master_id}) и все его данные успешно удалены."
+
+    async def list_user_projects(self, user_id: int) -> List[Dict[str, Any]]:
+        """List all projects owned by a specific user."""
+        query = select(Master).where(Master.owner_user_id == user_id).order_by(Master.id.asc())
+        res = await self.session.execute(query)
+        masters = res.scalars().all()
+        items = []
+        for m in masters:
+            bot = await self.bot_repo.get_current_for_master(m.id)
+            items.append({
+                "id": m.id,
+                "display_name": m.display_name,
+                "status": m.status.value,
+                "subscription_status": m.subscription_status.value,
+                "paid_until": m.paid_until,
+                "trial_ends_at": m.trial_ends_at,
+                "bot_username": bot.telegram_username if bot else None,
+            })
+        return items
+
+    async def list_user_bots(self, user_id: int) -> List[Dict[str, Any]]:
+        """List all bot instances belonging to a user's projects."""
+        query = (
+            select(BotInstance)
+            .join(Master, Master.id == BotInstance.master_id)
+            .where(Master.owner_user_id == user_id)
+            .order_by(desc(BotInstance.created_at))
+        )
+        res = await self.session.execute(query)
+        bots = res.scalars().all()
+        items = []
+        for b in bots:
+            master = await self.master_repo.get_by_id(b.master_id)
+            items.append({
+                "id": b.id,
+                "telegram_username": b.telegram_username,
+                "telegram_bot_id": b.telegram_bot_id,
+                "status": b.status.value,
+                "is_current": b.is_current,
+                "master_id": b.master_id,
+                "master_name": master.display_name if master else "-",
+                "last_error": b.last_error,
+            })
+        return items
+
+    async def list_user_subscriptions(self, user_id: int) -> List[Dict[str, Any]]:
+        """List subscriptions for projects owned by a user."""
+        query = select(Master).where(Master.owner_user_id == user_id).order_by(Master.id.asc())
+        res = await self.session.execute(query)
+        masters = res.scalars().all()
+        items = []
+        for m in masters:
+            items.append({
+                "master_id": m.id,
+                "project_name": m.display_name,
+                "subscription_status": m.subscription_status.value,
+                "paid_until": m.paid_until,
+                "trial_ends_at": m.trial_ends_at,
+            })
+        return items
+
+    async def list_user_payments(self, user_id: int) -> List[Dict[str, Any]]:
+        """List subscription payments associated with a user's projects."""
+        query = (
+            select(SubscriptionPayment)
+            .join(Master, Master.id == SubscriptionPayment.master_id)
+            .where(Master.owner_user_id == user_id)
+            .order_by(desc(SubscriptionPayment.created_at))
+        )
+        res = await self.session.execute(query)
+        payments = res.scalars().all()
+        items = []
+        for p in payments:
+            master = await self.master_repo.get_by_id(p.master_id)
+            items.append({
+                "id": p.id,
+                "master_id": p.master_id,
+                "project_name": master.display_name if master else "Удалён",
+                "amount": p.amount,
+                "currency": p.currency,
+                "status": p.status,
+                "provider": p.provider,
+                "created_at": p.created_at,
+                "paid_at": p.paid_at,
+            })
+        return items
+
+    async def list_audit_logs(
+        self, page: int = 1, per_page: int = 10
+    ) -> Tuple[List[Dict[str, Any]], int, int]:
+        """Paginated platform audit events."""
+        from app.database.models.audit import AuditLog
+        total = await self.session.scalar(select(func.count(AuditLog.id))) or 0
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        offset = max(0, (page - 1) * per_page)
+
+        query = select(AuditLog).order_by(desc(AuditLog.created_at)).offset(offset).limit(per_page)
+        res = await self.session.execute(query)
+        logs = res.scalars().all()
+
+        items = []
+        for l in logs:
+            items.append({
+                "id": l.id,
+                "action": l.action,
+                "actor_user_id": l.actor_user_id,
+                "master_id": l.master_id,
+                "entity_type": l.entity_type,
+                "entity_id": l.entity_id,
+                "created_at": l.created_at,
+            })
+        return items, total, total_pages
+
+    async def get_audit_log_details(self, log_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch details of a single audit log event."""
+        from app.database.models.audit import AuditLog
+        log = await self.session.get(AuditLog, log_id)
+        if not log:
+            return None
+        actor = await self.session.get(User, log.actor_user_id) if log.actor_user_id else None
+        return {
+            "id": log.id,
+            "action": log.action,
+            "actor_user_id": log.actor_user_id,
+            "actor_username": actor.username if actor else None,
+            "master_id": log.master_id,
+            "entity_type": log.entity_type,
+            "entity_id": log.entity_id,
+            "payload_before": log.payload_before,
+            "payload_after": log.payload_after,
+            "created_at": log.created_at,
+        }

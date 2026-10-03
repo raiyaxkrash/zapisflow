@@ -413,7 +413,10 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="💰 Платежи", callback_data="mgr:admin:payments"),
                 InlineKeyboardButton(text="📦 Тарифы", callback_data="mgr:admin:plans"),
             ],
-            [InlineKeyboardButton(text="📈 SaaS Аналитика", callback_data="mgr:admin:metrics")],
+            [
+                InlineKeyboardButton(text="📈 SaaS Аналитика", callback_data="mgr:admin:metrics"),
+                InlineKeyboardButton(text="📝 Audit Log", callback_data="mgr:admin:audit"),
+            ],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="mgr:menu")],
         ]
     )
@@ -436,7 +439,10 @@ def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="💰 Платежи", callback_data="mgr:admin:payments"),
                 InlineKeyboardButton(text="📦 Тарифы", callback_data="mgr:admin:plans"),
             ],
-            [InlineKeyboardButton(text="📈 SaaS Аналитика", callback_data="mgr:admin:metrics")],
+            [
+                InlineKeyboardButton(text="📈 SaaS Аналитика", callback_data="mgr:admin:metrics"),
+                InlineKeyboardButton(text="📝 Audit Log", callback_data="mgr:admin:audit"),
+            ],
             [InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")],
         ]
     )
@@ -467,12 +473,81 @@ def admin_users_keyboard(
 
 
 def admin_user_detail_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """User detail view actions."""
+    """User detail view actions with sub-navigation."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ К списку пользователей", callback_data="mgr:admin:users")]
+            [
+                InlineKeyboardButton(text="🏢 Проекты", callback_data=f"mgr:admin:u_projects:{user_id}"),
+                InlineKeyboardButton(text="🤖 Боты", callback_data=f"mgr:admin:u_bots:{user_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="💳 Подписки", callback_data=f"mgr:admin:u_subs:{user_id}"),
+                InlineKeyboardButton(text="💰 Платежи", callback_data=f"mgr:admin:u_payments:{user_id}"),
+            ],
+            [InlineKeyboardButton(text="⬅️ К списку пользователей", callback_data="mgr:admin:users")],
         ]
     )
+
+
+def admin_user_projects_keyboard(projects: Sequence[dict], user_id: int) -> InlineKeyboardMarkup:
+    """List of projects owned by a user."""
+    buttons = []
+    for p in projects:
+        icon = "🟢" if p["status"] == "ACTIVE" else "🟡"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {p['display_name']} ({p['subscription_status']})",
+                callback_data=f"mgr:admin:project:{p['id']}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ К пользователю", callback_data=f"mgr:admin:user:{user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_user_bots_keyboard(bots: Sequence[dict], user_id: int) -> InlineKeyboardMarkup:
+    """List of bots owned by a user."""
+    buttons = []
+    for b in bots:
+        icon = "🟢" if b["status"] == "ACTIVE" else "🔴"
+        name = f"@{b['telegram_username']}" if b.get("telegram_username") else f"Bot #{b['id']}"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {name} ({b['master_name']})",
+                callback_data=f"mgr:admin:bot:{b['id']}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ К пользователю", callback_data=f"mgr:admin:user:{user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_user_subscriptions_keyboard(subs: Sequence[dict], user_id: int) -> InlineKeyboardMarkup:
+    """List of subscriptions for a user's projects."""
+    buttons = []
+    for s in subs:
+        icon = "🟢" if s["subscription_status"] == "ACTIVE" else ("🟡" if s["subscription_status"] == "TRIAL" else "🔴")
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {s['project_name']} ({s['subscription_status']})",
+                callback_data=f"mgr:admin:project:sub:{s['master_id']}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ К пользователю", callback_data=f"mgr:admin:user:{user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_user_payments_keyboard(payments: Sequence[dict], user_id: int) -> InlineKeyboardMarkup:
+    """List of payments made by a user."""
+    buttons = []
+    for p in payments:
+        icon = "🟢" if p["status"] == "SUCCEEDED" else "🔴"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {p['amount']} {p['currency']} - {p['project_name']}",
+                callback_data=f"mgr:admin:payment:{p['id']}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ К пользователю", callback_data=f"mgr:admin:user:{user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def admin_projects_keyboard(
@@ -507,8 +582,123 @@ def admin_project_detail_keyboard(master_id: int, is_suspended: bool) -> InlineK
     action_text = "▶️ Активировать проект" if is_suspended else "⏸ Приостановить проект"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Подписка проекта", callback_data=f"mgr:admin:project:sub:{master_id}")],
             [InlineKeyboardButton(text=action_text, callback_data=f"mgr:admin:project:suspend:{master_id}")],
+            [InlineKeyboardButton(text="🗑 Полностью удалить проект", callback_data=f"mgr:admin:project:hard_delete:{master_id}")],
             [InlineKeyboardButton(text="⬅️ К списку проектов", callback_data="mgr:admin:projects")],
+        ]
+    )
+
+
+def admin_project_hard_delete_confirm_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """First-step confirmation modal for project hard deletion."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚠️ Продолжить", callback_data=f"mgr:admin:project:hard_delete_prompt:{master_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:project:{master_id}")],
+        ]
+    )
+
+
+def admin_subscription_detail_keyboard(master_id: int, is_suspended: bool) -> InlineKeyboardMarkup:
+    """Subscription detail card actions."""
+    toggle_text = "▶️ Активировать" if is_suspended else "⏸ Приостановить"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ Добавить время", callback_data=f"mgr:admin:sub:extend:{master_id}"),
+                InlineKeyboardButton(text="📅 Установить дату", callback_data=f"mgr:admin:sub:set_date:{master_id}"),
+            ],
+            [
+                InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:admin:project:suspend:{master_id}"),
+                InlineKeyboardButton(text="📜 История изменений", callback_data=f"mgr:admin:sub:history:{master_id}"),
+            ],
+            [InlineKeyboardButton(text="⬅️ К проекту", callback_data=f"mgr:admin:project:{master_id}")],
+        ]
+    )
+
+
+def admin_subscription_extend_presets_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Preset options for extending subscription days and months."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ 1 день", callback_data=f"mgr:admin:sub:ext_preset:{master_id}:1"),
+                InlineKeyboardButton(text="➕ 7 дней", callback_data=f"mgr:admin:sub:ext_preset:{master_id}:7"),
+                InlineKeyboardButton(text="➕ 14 дней", callback_data=f"mgr:admin:sub:ext_preset:{master_id}:14"),
+            ],
+            [
+                InlineKeyboardButton(text="➕ 30 дней", callback_data=f"mgr:admin:sub:ext_preset:{master_id}:30"),
+                InlineKeyboardButton(text="➕ 1 месяц (30 дн.)", callback_data=f"mgr:admin:sub:ext_preset:{master_id}:30"),
+            ],
+            [
+                InlineKeyboardButton(text="➕ 3 месяца (90 дн.)", callback_data=f"mgr:admin:sub:ext_preset:{master_id}:90"),
+                InlineKeyboardButton(text="➕ 6 месяцев (180 дн.)", callback_data=f"mgr:admin:sub:ext_preset:{master_id}:180"),
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Своё кол-во дней", callback_data=f"mgr:admin:sub:ext_custom_d:{master_id}"),
+                InlineKeyboardButton(text="✏️ Своё кол-во месяцев", callback_data=f"mgr:admin:sub:ext_custom_m:{master_id}"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mgr:admin:project:sub:{master_id}")],
+        ]
+    )
+
+
+def admin_subscription_extend_reason_keyboard(
+    master_id: int, days: int, base_ts: int
+) -> InlineKeyboardMarkup:
+    """Reason selection modal for manual subscription extension."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🤝 Партнёрская",
+                    callback_data=f"mgr:admin:sub:ext_do:{master_id}:{days}:{base_ts}:partner",
+                ),
+                InlineKeyboardButton(
+                    text="🎁 Компенсация",
+                    callback_data=f"mgr:admin:sub:ext_do:{master_id}:{days}:{base_ts}:compensation",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧪 Тестирование",
+                    callback_data=f"mgr:admin:sub:ext_do:{master_id}:{days}:{base_ts}:testing",
+                ),
+                InlineKeyboardButton(
+                    text="🛠 Поддержка",
+                    callback_data=f"mgr:admin:sub:ext_do:{master_id}:{days}:{base_ts}:support",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📝 Другая причина",
+                    callback_data=f"mgr:admin:sub:ext_do:{master_id}:{days}:{base_ts}:other",
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:project:sub:{master_id}")],
+        ]
+    )
+
+
+def admin_subscription_set_expiry_confirm_keyboard(
+    master_id: int, date_iso: str, is_past: bool
+) -> InlineKeyboardMarkup:
+    """Confirmation modal for setting exact subscription expiry date."""
+    action_text = "✅ Завершить подписку" if is_past else "✅ Подтвердить дату"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=action_text, callback_data=f"mgr:admin:sub:set_date_do:{master_id}:{date_iso}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:project:sub:{master_id}")],
+        ]
+    )
+
+
+def admin_subscription_history_keyboard(master_id: int) -> InlineKeyboardMarkup:
+    """Back button from subscription change history."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:admin:project:sub:{master_id}")]
         ]
     )
 
@@ -549,8 +739,19 @@ def admin_bot_detail_keyboard(bot_id: int, is_active: bool) -> InlineKeyboardMar
         inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Проверить webhook", callback_data=f"mgr:admin:bot:webhook:{bot_id}")],
             [InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:admin:bot:{action}:{bot_id}")],
-            [InlineKeyboardButton(text="🗑 Удалить бота", callback_data=f"mgr:admin:bot:delete:{bot_id}")],
+            [InlineKeyboardButton(text="🗑 Отключить от проекта", callback_data=f"mgr:admin:bot:delete:{bot_id}")],
+            [InlineKeyboardButton(text="💥 Полностью удалить бота", callback_data=f"mgr:admin:bot:hard_delete:{bot_id}")],
             [InlineKeyboardButton(text="⬅️ К списку ботов", callback_data="mgr:admin:bots")],
+        ]
+    )
+
+
+def admin_bot_hard_delete_confirm_keyboard(bot_id: int) -> InlineKeyboardMarkup:
+    """First-step confirmation modal for bot hard deletion."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚠️ Продолжить", callback_data=f"mgr:admin:bot:hard_delete_prompt:{bot_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:bot:{bot_id}")],
         ]
     )
 
@@ -565,7 +766,7 @@ def admin_subscriptions_keyboard(
         buttons.append([
             InlineKeyboardButton(
                 text=f"{icon} {s['project_name']} ({s['subscription_status']})",
-                callback_data=f"mgr:admin:project:{s['master_id']}",
+                callback_data=f"mgr:admin:project:sub:{s['master_id']}",
             )
         ])
 
@@ -642,11 +843,116 @@ def admin_plans_keyboard(plans: Sequence[SubscriptionPlan]) -> InlineKeyboardMar
 
 def admin_plan_detail_keyboard(plan_id: int, is_active: bool) -> InlineKeyboardMarkup:
     """Plan detail action buttons."""
-    toggle_text = "🔴 Деактивировать тариф" if is_active else "🟢 Активировать тариф"
+    toggle_text = "🔴 Деактивировать" if is_active else "🟢 Активировать"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:admin:plan:toggle:{plan_id}")],
+            [
+                InlineKeyboardButton(text="✏️ Название", callback_data=f"mgr:admin:plan:name:{plan_id}"),
+                InlineKeyboardButton(text="💰 Цена", callback_data=f"mgr:admin:plan:price:{plan_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="📅 Длительность", callback_data=f"mgr:admin:plan:dur:{plan_id}"),
+                InlineKeyboardButton(text="🧩 Features", callback_data=f"mgr:admin:plan:feat:{plan_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔢 Порядок", callback_data=f"mgr:admin:plan:sort:{plan_id}"),
+                InlineKeyboardButton(text=toggle_text, callback_data=f"mgr:admin:plan:toggle:{plan_id}"),
+            ],
             [InlineKeyboardButton(text="⬅️ К тарифам", callback_data="mgr:admin:plans")],
+        ]
+    )
+
+
+def admin_plan_price_confirm_keyboard(plan_id: int, new_price_str: str) -> InlineKeyboardMarkup:
+    """Confirmation modal for plan price change."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"mgr:admin:plan:price_confirm:{plan_id}:{new_price_str}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:plan:{plan_id}")],
+        ]
+    )
+
+
+def admin_plan_duration_presets_keyboard(plan_id: int) -> InlineKeyboardMarkup:
+    """Presets for plan duration in days."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="7 дней", callback_data=f"mgr:admin:plan:dur_set:{plan_id}:7"),
+                InlineKeyboardButton(text="14 дней", callback_data=f"mgr:admin:plan:dur_set:{plan_id}:14"),
+                InlineKeyboardButton(text="30 дней", callback_data=f"mgr:admin:plan:dur_set:{plan_id}:30"),
+            ],
+            [
+                InlineKeyboardButton(text="60 дней", callback_data=f"mgr:admin:plan:dur_set:{plan_id}:60"),
+                InlineKeyboardButton(text="90 дней", callback_data=f"mgr:admin:plan:dur_set:{plan_id}:90"),
+                InlineKeyboardButton(text="180 дней", callback_data=f"mgr:admin:plan:dur_set:{plan_id}:180"),
+            ],
+            [
+                InlineKeyboardButton(text="365 дней", callback_data=f"mgr:admin:plan:dur_set:{plan_id}:365"),
+                InlineKeyboardButton(text="✏️ Свой срок", callback_data=f"mgr:admin:plan:dur_custom:{plan_id}"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mgr:admin:plan:{plan_id}")],
+        ]
+    )
+
+
+def admin_plan_features_keyboard(plan_id: int, features: dict) -> InlineKeyboardMarkup:
+    """Whitelist feature toggles for plan."""
+    buttons = []
+    allowed_keys = [
+        ("max_bots", "Боты"),
+        ("max_staff", "Сотрудники"),
+        ("custom_branding", "Брендинг"),
+        ("broadcasts", "Рассылки"),
+        ("analytics", "Аналитика"),
+        ("priority_support", "Поддержка"),
+    ]
+    for key, label in allowed_keys:
+        val = features.get(key)
+        icon = f"✅ {val}" if val is not None and val is not False else "❌ Выкл"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{label}: {icon}",
+                callback_data=f"mgr:admin:plan:feat_toggle:{plan_id}:{key}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ К тарифу", callback_data=f"mgr:admin:plan:{plan_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_audit_logs_keyboard(
+    logs: Sequence[dict], page: int, total_pages: int
+) -> InlineKeyboardMarkup:
+    """Paginated list of platform audit events."""
+    buttons = []
+    for l in logs:
+        ts_str = l["created_at"].strftime("%d.%m %H:%M") if l.get("created_at") else "-"
+        action_name = l["action"][:18]
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{ts_str} | {action_name} (#{l['id']})",
+                callback_data=f"mgr:admin:audit:{l['id']}",
+            )
+        ])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Пред", callback_data=f"mgr:admin:audit:p:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"Стр {page}/{total_pages}", callback_data=f"mgr:admin:audit:p:{page}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="След ➡️", callback_data=f"mgr:admin:audit:p:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="mgr:admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_audit_log_detail_keyboard() -> InlineKeyboardMarkup:
+    """Back button from audit log detail."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К списку логов", callback_data="mgr:admin:audit")]
         ]
     )
 

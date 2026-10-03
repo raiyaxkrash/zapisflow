@@ -1,8 +1,10 @@
 """Command and callback handlers for platform Manager Bot."""
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from html import escape
 import inspect
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -24,7 +26,10 @@ from app.database.models.subscription import EffectiveSubscriptionStatus, Subscr
 from app.database.models.user import User
 from app.manager_bot.keyboards import (
     ACTIVITY_TYPE_NAMES,
+    admin_audit_log_detail_keyboard,
+    admin_audit_logs_keyboard,
     admin_bot_detail_keyboard,
+    admin_bot_hard_delete_confirm_keyboard,
     admin_bots_keyboard,
     admin_dashboard_keyboard,
     admin_menu_keyboard,
@@ -32,11 +37,24 @@ from app.manager_bot.keyboards import (
     admin_payment_detail_keyboard,
     admin_payments_keyboard,
     admin_plan_detail_keyboard,
+    admin_plan_duration_presets_keyboard,
+    admin_plan_features_keyboard,
+    admin_plan_price_confirm_keyboard,
     admin_plans_keyboard,
     admin_project_detail_keyboard,
+    admin_project_hard_delete_confirm_keyboard,
     admin_projects_keyboard,
+    admin_subscription_detail_keyboard,
+    admin_subscription_extend_presets_keyboard,
+    admin_subscription_extend_reason_keyboard,
+    admin_subscription_history_keyboard,
+    admin_subscription_set_expiry_confirm_keyboard,
     admin_subscriptions_keyboard,
+    admin_user_bots_keyboard,
     admin_user_detail_keyboard,
+    admin_user_payments_keyboard,
+    admin_user_projects_keyboard,
+    admin_user_subscriptions_keyboard,
     admin_users_keyboard,
     bot_delete_confirm_keyboard,
     cancel_keyboard,
@@ -93,6 +111,10 @@ from app.database.session import async_session_factory
 from app.services.billing.yookassa_checkout import YooKassaCheckoutService
 from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError
 from app.manager_bot.states import (
+    AdminBotStates,
+    AdminPlanStates,
+    AdminProjectStates,
+    AdminSubscriptionStates,
     ConnectBotStates,
     CreateMasterStates,
     CrmNoteStates,
@@ -2119,6 +2141,82 @@ async def cb_admin_user_detail(callback: CallbackQuery, session: AsyncSession) -
     await callback.answer()
 
 
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:u_projects:(\d+)$"))
+async def cb_admin_user_projects(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show projects owned by a user."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    user_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    projects = await admin_svc.list_user_projects(user_id)
+    text = (
+        f"🏢 <b>Проекты пользователя #{user_id}</b> (Всего: {len(projects)})\n\n"
+        "Выберите проект для управления:"
+    )
+    if not projects:
+        text += "\n\n<i>У пользователя нет созданных проектов.</i>"
+    await callback.message.edit_text(text, reply_markup=admin_user_projects_keyboard(projects, user_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:u_bots:(\d+)$"))
+async def cb_admin_user_bots(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show bots belonging to a user's projects."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    user_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    bots = await admin_svc.list_user_bots(user_id)
+    text = (
+        f"🤖 <b>Боты пользователя #{user_id}</b> (Всего: {len(bots)})\n\n"
+        "Выберите бота для управления:"
+    )
+    if not bots:
+        text += "\n\n<i>У проектов пользователя нет подключённых ботов.</i>"
+    await callback.message.edit_text(text, reply_markup=admin_user_bots_keyboard(bots, user_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:u_subs:(\d+)$"))
+async def cb_admin_user_subscriptions(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show subscriptions for a user's projects."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    user_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    subs = await admin_svc.list_user_subscriptions(user_id)
+    text = (
+        f"💳 <b>Подписки пользователя #{user_id}</b> (Всего: {len(subs)})\n\n"
+        "Выберите проект для управления подпиской:"
+    )
+    if not subs:
+        text += "\n\n<i>Нет доступных подписок.</i>"
+    await callback.message.edit_text(text, reply_markup=admin_user_subscriptions_keyboard(subs, user_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:u_payments:(\d+)$"))
+async def cb_admin_user_payments(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show payments made by a user."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    user_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    payments = await admin_svc.list_user_payments(user_id)
+    text = (
+        f"💰 <b>Платежи пользователя #{user_id}</b> (Всего: {len(payments)})\n\n"
+        "Выберите платёж для просмотра деталей:"
+    )
+    if not payments:
+        text += "\n\n<i>У пользователя нет платежей.</i>"
+    await callback.message.edit_text(text, reply_markup=admin_user_payments_keyboard(payments, user_id))
+    await callback.answer()
+
+
 @manager_router.callback_query(F.data.startswith("mgr:admin:projects"))
 async def cb_admin_projects(callback: CallbackQuery, session: AsyncSession) -> None:
     """Platform Admin projects list."""
@@ -2177,7 +2275,7 @@ async def cb_admin_project_suspend(
     await callback.message.edit_text(text, reply_markup=admin_project_detail_keyboard(master_id, is_suspended))
 
 
-@manager_router.callback_query(F.data.startswith("mgr:admin:project:"))
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:project:(\d+)$"))
 async def cb_admin_project_detail(callback: CallbackQuery, session: AsyncSession) -> None:
     """Platform Admin project detail view."""
     is_admin, _ = await _ensure_platform_admin(session, callback)
@@ -2212,6 +2310,541 @@ async def cb_admin_project_detail(callback: CallbackQuery, session: AsyncSession
         f"Создан: {p['created_at'].strftime('%d.%m.%Y %H:%M') if p['created_at'] else '-'}\n"
     )
     await callback.message.edit_text(text, reply_markup=admin_project_detail_keyboard(master_id, is_suspended))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:project:hard_delete:(\d+)$"))
+async def cb_admin_project_hard_delete(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Preview impact and confirm project hard deletion."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    master_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_project_details(master_id)
+    if not p:
+        await callback.answer("Проект не найден.", show_alert=True)
+        return
+    impact = await admin_svc.get_project_impact_summary(master_id)
+    text = (
+        f"⚠️ <b>ПОЛНОЕ УДАЛЕНИЕ ПРОЕКТА</b>\n\n"
+        f"Проект: <b>{escape(p['display_name'])}</b>\n"
+        f"Master ID: <code>{master_id}</code>\n"
+        f"Владелец: <b>{escape(p['owner']['first_name'] or '')}</b> (@{p['owner']['username'] or '-'})\n\n"
+        f"Будет безвозвратно удалено:\n"
+        f"• Боты: <b>{impact['bots']}</b>\n"
+        f"• Сотрудники: <b>{impact['staff']}</b>\n"
+        f"• Услуги: <b>{impact['services']}</b>\n"
+        f"• Записи клиентов: <b>{impact['appointments']}</b>\n"
+        f"• Клиентские связи: <b>{impact['clients']}</b>\n"
+        f"• Платежи клиентов: <b>{impact['payments']}</b>\n"
+        f"• Отзывы: <b>{impact['reviews']}</b>\n"
+        f"• Портфолио: <b>{impact['portfolio']}</b>\n"
+        f"• Рассылки: <b>{impact['broadcasts']}</b>\n"
+        f"• Расписание и интервалы: <b>{impact['schedule']}</b>\n\n"
+        f"❗️ Аккаунты пользователей (владелец, клиенты, сотрудники) <b>сохраняются</b>.\n"
+        f"Операцию <b>нельзя отменить</b>!"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_project_hard_delete_confirm_keyboard(master_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:project:hard_delete_prompt:(\d+)$"))
+async def cb_admin_project_hard_delete_prompt(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt admin for typed text confirmation to delete project."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    master_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminProjectStates.waiting_for_delete_confirm)
+    await state.update_data(master_id=master_id)
+
+    text = (
+        f"⚠️ <b>Подтверждение удаления проекта #{master_id}</b>\n\n"
+        f"Для безвозвратного удаления проекта отправьте в чат точно:\n\n"
+        f"<code>DELETE PROJECT {master_id}</code>\n\n"
+        f"Любой другой текст отменит операцию."
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:project:{master_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminProjectStates.waiting_for_delete_confirm)
+async def msg_admin_project_hard_delete_confirm(
+    message: Message, state: FSMContext, session: AsyncSession, bot_registry: Optional[BotRegistry] = None
+) -> None:
+    """Execute project hard delete upon typed confirmation."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session, registry=bot_registry)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    await state.clear()
+    if not master_id:
+        await message.answer("Действие отменено.")
+        return
+
+    expected = f"DELETE PROJECT {master_id}"
+    if (message.text or "").strip() != expected:
+        await message.answer(
+            f"❌ Текст не совпал с «<code>{expected}</code>». Удаление проекта отменено.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏢 К проекту", callback_data=f"mgr:admin:project:{master_id}")]]
+            ),
+        )
+        return
+
+    ok, msg = await admin_svc.hard_delete_project(master_id, actor_user_id=user.id)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🏢 К списку проектов", callback_data="mgr:admin:projects")]]
+    )
+    await message.answer(f"✅ {msg}" if ok else f"❌ {msg}", reply_markup=kb)
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:project:sub:(\d+)$"))
+async def cb_admin_project_sub(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Project subscription card view."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    master_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_project_details(master_id)
+    if not p:
+        await callback.answer("Проект не найден.", show_alert=True)
+        return
+
+    sub_svc = SubscriptionService(session)
+    eff = await sub_svc.get_effective_status(master_id)
+    is_suspended = p["status"] == "SUSPENDED"
+
+    paid_until_str = eff.paid_until.strftime("%d.%m.%Y") if eff.paid_until else "—"
+    trial_ends_str = eff.trial_ends_at.strftime("%d.%m.%Y") if eff.trial_ends_at else "—"
+
+    text = (
+        f"💳 <b>Подписка проекта «{escape(p['display_name'])}»</b>\n\n"
+        f"Master ID: <code>{master_id}</code>\n"
+        f"Владелец: <b>{escape(p['owner']['first_name'] or '')}</b> (@{p['owner']['username'] or '-'})\n\n"
+        f"Эффективный статус: <b>{eff.status.value}</b>\n"
+        f"Сохранённый статус: <b>{eff.stored_status.value}</b>\n"
+        f"Дней осталось: <b>{eff.days_remaining}</b>\n"
+        f"Оплачен до: <b>{paid_until_str}</b>\n"
+        f"Триал до: <b>{trial_ends_str}</b>\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_subscription_detail_keyboard(master_id, is_suspended))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:sub:extend:(\d+)$"))
+async def cb_admin_sub_extend_menu(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Preset menu for subscription extension."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    master_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_project_details(master_id)
+    if not p:
+        await callback.answer("Проект не найден.", show_alert=True)
+        return
+
+    text = (
+        f"➕ <b>Продление подписки: {escape(p['display_name'])}</b>\n\n"
+        f"Текущий статус: <b>{p['subscription_status']}</b>\n\n"
+        "Выберите срок для продления подписки проекта:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_subscription_extend_presets_keyboard(master_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:sub:ext_preset:(\d+):(\d+)$"))
+async def cb_admin_sub_ext_preset(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Handle preset duration click and prompt for reason."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    parts = callback.data.split(":")
+    master_id, days = int(parts[4]), int(parts[5])
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master:
+        await callback.answer("Проект не найден.", show_alert=True)
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    base_dt = master.paid_until if (master.paid_until and master.paid_until > now_utc) else now_utc
+    base_ts = int(base_dt.timestamp())
+    new_dt = base_dt + timedelta(days=days)
+
+    cur_str = master.paid_until.strftime("%d.%m.%Y") if master.paid_until else "—"
+    new_str = new_dt.strftime("%d.%m.%Y")
+
+    text = (
+        f"⚠️ <b>Подтверждение продления подписки</b>\n\n"
+        f"Проект: <b>{escape(master.display_name)}</b>\n"
+        f"Продление: <b>+{days} дн.</b>\n"
+        f"Действует сейчас: <b>{cur_str}</b>\n"
+        f"После продления: <b>{new_str}</b>\n\n"
+        f"Выберите причину продления:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_subscription_extend_reason_keyboard(master_id, days, base_ts))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:sub:ext_custom_d:(\d+)$"))
+async def cb_admin_sub_ext_custom_d(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt for custom number of days."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    master_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminSubscriptionStates.waiting_for_custom_days)
+    await state.update_data(master_id=master_id)
+
+    text = (
+        "✏️ <b>Своё количество дней</b>\n\n"
+        "Введите количество дней для продления подписки (целое число от 1 до 3650):"
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:sub:extend:{master_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminSubscriptionStates.waiting_for_custom_days)
+async def msg_admin_sub_custom_days(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Validate custom days and prompt for reason."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    await state.clear()
+    if not master_id:
+        return
+
+    text_val = (message.text or "").strip()
+    if not text_val.isdigit() or int(text_val) <= 0 or int(text_val) > 3650:
+        await message.answer("Некорректное число дней. Введите число от 1 до 3650.")
+        return
+
+    days = int(text_val)
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master:
+        await message.answer("Проект не найден.")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    base_dt = master.paid_until if (master.paid_until and master.paid_until > now_utc) else now_utc
+    base_ts = int(base_dt.timestamp())
+    new_dt = base_dt + timedelta(days=days)
+
+    cur_str = master.paid_until.strftime("%d.%m.%Y") if master.paid_until else "—"
+    new_str = new_dt.strftime("%d.%m.%Y")
+
+    prompt_text = (
+        f"⚠️ <b>Подтверждение продления подписки</b>\n\n"
+        f"Проект: <b>{escape(master.display_name)}</b>\n"
+        f"Продление: <b>+{days} дн.</b>\n"
+        f"Действует сейчас: <b>{cur_str}</b>\n"
+        f"После продления: <b>{new_str}</b>\n\n"
+        f"Выберите причину продления:"
+    )
+    await message.answer(
+        prompt_text, reply_markup=admin_subscription_extend_reason_keyboard(master_id, days, base_ts)
+    )
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:sub:ext_custom_m:(\d+)$"))
+async def cb_admin_sub_ext_custom_m(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt for custom number of months."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    master_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminSubscriptionStates.waiting_for_custom_months)
+    await state.update_data(master_id=master_id)
+
+    text = (
+        "✏️ <b>Своё количество месяцев</b>\n\n"
+        "Введите количество месяцев (1 месяц = 30 дней, число от 1 до 120):"
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:sub:extend:{master_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminSubscriptionStates.waiting_for_custom_months)
+async def msg_admin_sub_custom_months(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Validate custom months and prompt for reason."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    await state.clear()
+    if not master_id:
+        return
+
+    text_val = (message.text or "").strip()
+    if not text_val.isdigit() or int(text_val) <= 0 or int(text_val) > 120:
+        await message.answer("Некорректное число месяцев. Введите число от 1 до 120.")
+        return
+
+    months = int(text_val)
+    days = months * 30
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master:
+        await message.answer("Проект не найден.")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    base_dt = master.paid_until if (master.paid_until and master.paid_until > now_utc) else now_utc
+    base_ts = int(base_dt.timestamp())
+    new_dt = base_dt + timedelta(days=days)
+
+    cur_str = master.paid_until.strftime("%d.%m.%Y") if master.paid_until else "—"
+    new_str = new_dt.strftime("%d.%m.%Y")
+
+    prompt_text = (
+        f"⚠️ <b>Подтверждение продления подписки</b>\n\n"
+        f"Проект: <b>{escape(master.display_name)}</b>\n"
+        f"Продление: <b>+{months} мес. ({days} дн.)</b>\n"
+        f"Действует сейчас: <b>{cur_str}</b>\n"
+        f"После продления: <b>{new_str}</b>\n\n"
+        f"Выберите причину продления:"
+    )
+    await message.answer(
+        prompt_text, reply_markup=admin_subscription_extend_reason_keyboard(master_id, days, base_ts)
+    )
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:sub:ext_do:(\d+):(\d+):(\d+):(\w+)$"))
+async def cb_admin_sub_ext_do(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Execute manual subscription extension with idempotency check."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    parts = callback.data.split(":")
+    master_id = int(parts[4])
+    days = int(parts[5])
+    base_ts = int(parts[6])
+    reason_code = parts[7]
+
+    reasons_map = {
+        "partner": "Партнёрская подписка",
+        "compensation": "Компенсация",
+        "testing": "Тестовый период",
+        "support": "Поддержка",
+        "other": "Ручное продление администратором",
+    }
+    reason = reasons_map.get(reason_code, "Ручное продление")
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    if not master:
+        await callback.answer("Проект не найден.", show_alert=True)
+        return
+
+    # Double-click / retry protection: check if base timestamp shifted by more than 60s
+    now_utc = datetime.now(timezone.utc)
+    current_base = master.paid_until if (master.paid_until and master.paid_until > now_utc) else now_utc
+    if abs(int(current_base.timestamp()) - base_ts) > 60:
+        await callback.answer("Подписка уже была обновлена. Откройте карточку заново.", show_alert=True)
+        return
+
+    admin_svc = PlatformAdminService(session)
+    ok, msg, new_date = await admin_svc.extend_subscription_manually(
+        master_id=master_id,
+        days=days,
+        actor_user_id=user.id,
+        reason=reason,
+    )
+    if not ok:
+        await callback.answer(msg, show_alert=True)
+        return
+
+    await callback.answer("✅ Подписка успешно продлена!", show_alert=True)
+    text = (
+        f"✅ <b>Подписка успешно продлена</b>\n\n"
+        f"Проект: <b>{escape(master.display_name)}</b>\n"
+        f"Добавлено: <b>+{days} дней</b>\n"
+        f"Новая дата окончания: <b>{new_date.strftime('%d.%m.%Y')}</b>\n"
+        f"Причина: <i>{reason}</i>\n"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:admin:project:sub:{master_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=kb)
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:sub:set_date:(\d+)$"))
+async def cb_admin_sub_set_date_prompt(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt for exact expiry date."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    master_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminSubscriptionStates.waiting_for_expiry_date)
+    await state.update_data(master_id=master_id)
+
+    text = (
+        "📅 <b>Установка даты окончания подписки</b>\n\n"
+        "Введите точную дату в формате <b>ДД.ММ.ГГГГ</b> (например, <code>31.12.2026</code>):"
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:project:sub:{master_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminSubscriptionStates.waiting_for_expiry_date)
+async def msg_admin_sub_expiry_date(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Validate date and prompt confirmation."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    await state.clear()
+    if not master_id:
+        return
+
+    raw_text = (message.text or "").strip()
+    try:
+        dt = datetime.strptime(raw_text, "%d.%m.%Y").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+    except ValueError:
+        await message.answer(
+            "Некорректный формат даты. Введите дату в виде ДД.ММ.ГГГГ, например 31.12.2026.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:admin:project:sub:{master_id}")]]
+            ),
+        )
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    is_past = dt <= now_utc
+    date_iso = dt.strftime("%Y-%m-%d")
+
+    master = await MasterRepository(session).get_by_id(master_id)
+    cur_str = master.paid_until.strftime("%d.%m.%Y") if master and master.paid_until else "—"
+
+    if is_past:
+        prompt_text = (
+            f"⚠️ <b>Внимание: указанная дата уже прошла!</b>\n\n"
+            f"Проект: <b>{escape(master.display_name if master else '-')}</b>\n"
+            f"Текущая дата: <b>{cur_str}</b>\n"
+            f"Новая дата: <b>{dt.strftime('%d.%m.%Y')}</b>\n\n"
+            f"Подписка будет немедленно переведена в статус <b>EXPIRED</b> (завершена).\n"
+            f"Вы уверены, что хотите завершить подписку?"
+        )
+    else:
+        prompt_text = (
+            f"📅 <b>Подтверждение изменения даты подписки</b>\n\n"
+            f"Проект: <b>{escape(master.display_name if master else '-')}</b>\n"
+            f"Текущая дата: <b>{cur_str}</b>\n"
+            f"Новая дата: <b>{dt.strftime('%d.%m.%Y')}</b>\n\n"
+            f"Установить новую дату окончания подписки?"
+        )
+
+    await message.answer(
+        prompt_text,
+        reply_markup=admin_subscription_set_expiry_confirm_keyboard(master_id, date_iso, is_past),
+    )
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:sub:set_date_do:(\d+):([\d-]+)$"))
+async def cb_admin_sub_set_date_do(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Execute exact subscription expiry date update."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    parts = callback.data.split(":")
+    master_id = int(parts[4])
+    date_iso = parts[5]
+
+    try:
+        dt = datetime.strptime(date_iso, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+    except ValueError:
+        await callback.answer("Некорректная дата.", show_alert=True)
+        return
+
+    admin_svc = PlatformAdminService(session)
+    ok, msg, new_date = await admin_svc.set_subscription_expiry_manually(
+        master_id=master_id,
+        new_expiry_date=dt,
+        actor_user_id=user.id,
+        reason="Установка даты администратором",
+    )
+    if not ok:
+        await callback.answer(msg, show_alert=True)
+        return
+
+    await callback.answer("✅ Дата подписки обновлена!", show_alert=True)
+    text = (
+        f"✅ <b>Дата подписки успешно установлена</b>\n\n"
+        f"Новая дата окончания: <b>{new_date.strftime('%d.%m.%Y')}</b>\n"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ К подписке", callback_data=f"mgr:admin:project:sub:{master_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=kb)
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:sub:history:(\d+)$"))
+async def cb_admin_sub_history(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show audit history of subscription changes."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    master_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    history = await admin_svc.get_subscription_history(master_id)
+
+    if not history:
+        text = "📜 <b>История изменений подписки</b>\n\n<i>Записей не найдено.</i>"
+    else:
+        text = f"📜 <b>История изменений подписки (#{master_id})</b>:\n\n"
+        for h in history:
+            date_str = h["created_at"].strftime("%d.%m.%Y %H:%M")
+            action = h["action"]
+            after = h["payload_after"]
+            reason = after.get("reason", "—")
+            days = after.get("days")
+            days_str = f" (+{days} дн.)" if days else ""
+            actor_str = f"Admin ID: {h['actor_user_id']}" if h.get("actor_user_id") else "Система"
+            text += f"• <b>{date_str}</b>: {action}{days_str}\n  {actor_str} | Причина: {reason}\n\n"
+
+    await callback.message.edit_text(text, reply_markup=admin_subscription_history_keyboard(master_id))
     await callback.answer()
 
 
@@ -2364,7 +2997,7 @@ async def cb_admin_bot_delete(
     await callback.message.edit_text(text, reply_markup=admin_bots_keyboard(bots, 1, total_pages))
 
 
-@manager_router.callback_query(F.data.startswith("mgr:admin:bot:"))
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:bot:(\d+)$"))
 async def cb_admin_bot_detail(callback: CallbackQuery, session: AsyncSession) -> None:
     """Platform Admin bot detail view."""
     is_admin, _ = await _ensure_platform_admin(session, callback)
@@ -2394,6 +3027,95 @@ async def cb_admin_bot_detail(callback: CallbackQuery, session: AsyncSession) ->
     )
     await callback.message.edit_text(text, reply_markup=admin_bot_detail_keyboard(bot_id, is_active))
     await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:bot:hard_delete:(\d+)$"))
+async def cb_admin_bot_hard_delete(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Preview warning and confirm bot hard deletion."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    bot_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    b = await admin_svc.get_bot_details(bot_id)
+    if not b:
+        await callback.answer("Бот не найден.", show_alert=True)
+        return
+
+    text = (
+        f"⚠️ <b>ПОЛНОЕ УДАЛЕНИЕ БОТА #{bot_id}</b>\n\n"
+        f"Бот: @{escape(b['telegram_username'] or '-')}\n"
+        f"Проект: <b>{escape(b['master_name'])}</b>\n\n"
+        f"Вы собираетесь <b>БЕЗВОЗВРАТНО</b> удалить бота из базы данных:\n"
+        f"• Будет отозван Webhook в Telegram.\n"
+        f"• Будет удалена запись бота и зашифрованный токен.\n"
+        f"• Будут очищены связанные сообщения в очереди Telegram Outbox.\n"
+        f"• Проект мастера и все данные клиентов <b>сохраняются</b>.\n\n"
+        f"Операцию <b>нельзя отменить</b>!"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_bot_hard_delete_confirm_keyboard(bot_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:bot:hard_delete_prompt:(\d+)$"))
+async def cb_admin_bot_hard_delete_prompt(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt admin for typed text confirmation to delete bot."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    bot_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminBotStates.waiting_for_delete_confirm)
+    await state.update_data(bot_id=bot_id)
+
+    text = (
+        f"⚠️ <b>Подтверждение удаления бота #{bot_id}</b>\n\n"
+        f"Для безвозвратного удаления бота отправьте в чат точно:\n\n"
+        f"<code>DELETE BOT {bot_id}</code>\n\n"
+        f"Любой другой текст отменит операцию."
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:bot:{bot_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminBotStates.waiting_for_delete_confirm)
+async def msg_admin_bot_hard_delete_confirm(
+    message: Message, state: FSMContext, session: AsyncSession, bot_registry: Optional[BotRegistry] = None
+) -> None:
+    """Execute bot hard delete upon typed confirmation."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session, registry=bot_registry)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    data = await state.get_data()
+    bot_id = data.get("bot_id")
+    await state.clear()
+    if not bot_id:
+        await message.answer("Действие отменено.")
+        return
+
+    expected = f"DELETE BOT {bot_id}"
+    if (message.text or "").strip() != expected:
+        await message.answer(
+            f"❌ Текст не совпал с «<code>{expected}</code>». Удаление бота отменено.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🤖 К боту", callback_data=f"mgr:admin:bot:{bot_id}")]]
+            ),
+        )
+        return
+
+    ok, msg = await admin_svc.hard_delete_bot(bot_id, actor_user_id=user.id)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🤖 К списку ботов", callback_data="mgr:admin:bots")]]
+    )
+    await message.answer(f"✅ {msg}" if ok else f"❌ {msg}", reply_markup=kb)
 
 
 @manager_router.callback_query(F.data.startswith("mgr:admin:subscriptions"))
@@ -2579,7 +3301,37 @@ async def cb_admin_plan_toggle(callback: CallbackQuery, session: AsyncSession) -
         await callback.message.edit_text(text, reply_markup=admin_plan_detail_keyboard(p.id, p.is_active))
 
 
-@manager_router.callback_query(F.data.startswith("mgr:admin:plan:"))
+def _format_plan_card(p: SubscriptionPlan) -> str:
+    feat_text = ""
+    if p.features:
+        feat_items = []
+        labels = {
+            "max_bots": "Боты",
+            "max_staff": "Сотрудники",
+            "custom_branding": "Брендинг",
+            "broadcasts": "Рассылки",
+            "analytics": "Аналитика",
+            "priority_support": "Поддержка",
+        }
+        for k, v in p.features.items():
+            label = labels.get(k, k)
+            feat_items.append(f"{label}: {v}")
+        if feat_items:
+            feat_text = "\n\n🧩 <b>Опции:</b>\n• " + "\n• ".join(feat_items)
+
+    return (
+        f"📦 <b>Тариф «{escape(p.name)}»</b>\n\n"
+        f"Код (неизменяемый): <code>{p.code}</code>\n"
+        f"Цена: <b>{p.price_rub} {p.currency}</b>\n"
+        f"Период: <b>{p.duration_days} дней</b>\n"
+        f"Статус: <b>{'🟢 Активен' if p.is_active else '🔴 Неактивен'}</b>\n"
+        f"Порядок: {p.sort_order}\n"
+        f"Описание: {escape(p.description or 'Нет описания')}"
+        f"{feat_text}"
+    )
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:(\d+)$"))
 async def cb_admin_plan_detail(callback: CallbackQuery, session: AsyncSession) -> None:
     """Platform Admin plan detail view."""
     is_admin, _ = await _ensure_platform_admin(session, callback)
@@ -2593,16 +3345,439 @@ async def cb_admin_plan_detail(callback: CallbackQuery, session: AsyncSession) -
         await callback.answer("Тариф не найден.", show_alert=True)
         return
 
-    text = (
-        f"📦 <b>Тариф «{escape(p.name)}»</b>\n\n"
-        f"Код: <code>{p.code}</code>\n"
-        f"Цена: <b>{p.price_rub} {p.currency}</b>\n"
-        f"Период: <b>{p.duration_days} дней</b>\n"
-        f"Статус: <b>{'🟢 Активен' if p.is_active else '🔴 Неактивен'}</b>\n"
-        f"Порядок: {p.sort_order}\n"
-        f"Описание: {escape(p.description or 'Нет описания')}\n"
+    await callback.message.edit_text(_format_plan_card(p), reply_markup=admin_plan_detail_keyboard(p.id, p.is_active))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:name:(\d+)$"))
+async def cb_admin_plan_name_prompt(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt for new plan name."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    plan_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminPlanStates.waiting_for_name)
+    await state.update_data(plan_id=plan_id)
+
+    text = "✏️ <b>Изменение названия тарифа</b>\n\nВведите новое название тарифа (до 64 символов):"
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:plan:{plan_id}")]]
     )
-    await callback.message.edit_text(text, reply_markup=admin_plan_detail_keyboard(p.id, p.is_active))
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminPlanStates.waiting_for_name)
+async def msg_admin_plan_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Handle new plan name input."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    plan_id = data.get("plan_id")
+    await state.clear()
+    if not plan_id:
+        return
+
+    name = (message.text or "").strip()
+    if not name or len(name) > 64:
+        await message.answer("Некорректное название. Длина должна быть от 1 до 64 символов.")
+        return
+
+    ok, msg, p = await admin_svc.update_plan(plan_id, actor_user_id=user.id, name=name)
+    if not ok or not p:
+        await message.answer(f"❌ {msg}")
+        return
+
+    await message.answer(
+        f"✅ Название тарифа успешно обновлено!\n\n" + _format_plan_card(p),
+        reply_markup=admin_plan_detail_keyboard(p.id, p.is_active),
+    )
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:price:(\d+)$"))
+async def cb_admin_plan_price_prompt(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt for new plan price."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    plan_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminPlanStates.waiting_for_price)
+    await state.update_data(plan_id=plan_id)
+
+    text = (
+        "💰 <b>Изменение цены тарифа</b>\n\n"
+        "Введите новую цену тарифа в рублях (например: <code>990</code> или <code>1490.50</code>):"
+    )
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:plan:{plan_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminPlanStates.waiting_for_price)
+async def msg_admin_plan_price(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Validate price and ask confirmation."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    plan_id = data.get("plan_id")
+    await state.clear()
+    if not plan_id:
+        return
+
+    raw_val = (message.text or "").strip().replace(",", ".")
+    try:
+        dec_price = Decimal(raw_val).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        await message.answer("Некорректный формат цены. Введите положительное число.")
+        return
+
+    if dec_price <= 0 or dec_price > Decimal("1000000.00"):
+        await message.answer("Цена тарифа должна быть больше 0 и не более 1 000 000 ₽.")
+        return
+
+    p = await admin_svc.get_plan_details(plan_id)
+    if not p:
+        await message.answer("Тариф не найден.")
+        return
+
+    text = (
+        f"⚠️ <b>Подтверждение изменения цены</b>\n\n"
+        f"Тариф: <b>{escape(p.name)}</b>\n"
+        f"Текущая цена: <b>{p.price_rub} {p.currency}</b>\n"
+        f"Новая цена: <b>{dec_price} {p.currency}</b>\n\n"
+        f"Вы уверены, что хотите обновить цену тарифа?"
+    )
+    await message.answer(text, reply_markup=admin_plan_price_confirm_keyboard(plan_id, str(dec_price)))
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:price_confirm:(\d+):([\d.]+)$"))
+async def cb_admin_plan_price_confirm(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Execute confirmed price update."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    parts = callback.data.split(":")
+    plan_id = int(parts[4])
+    price_str = parts[5]
+
+    try:
+        dec_price = Decimal(price_str)
+    except (InvalidOperation, ValueError):
+        await callback.answer("Некорректная цена.", show_alert=True)
+        return
+
+    admin_svc = PlatformAdminService(session)
+    ok, msg, p = await admin_svc.update_plan(plan_id, actor_user_id=user.id, price=dec_price)
+    if not ok or not p:
+        await callback.answer(msg, show_alert=True)
+        return
+
+    await callback.answer("✅ Цена успешно обновлена!", show_alert=True)
+    await callback.message.edit_text(_format_plan_card(p), reply_markup=admin_plan_detail_keyboard(p.id, p.is_active))
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:dur:(\d+)$"))
+async def cb_admin_plan_dur_menu(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show plan duration presets."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    plan_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_plan_details(plan_id)
+    if not p:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    text = (
+        f"📅 <b>Срок действия тарифа «{escape(p.name)}»</b>\n\n"
+        f"Текущий срок: <b>{p.duration_days} дней</b>\n\n"
+        "Выберите готовый пресет или введите своё количество дней:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_plan_duration_presets_keyboard(plan_id))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:dur_set:(\d+):(\d+)$"))
+async def cb_admin_plan_dur_set(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Apply preset duration to plan."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    parts = callback.data.split(":")
+    plan_id = int(parts[4])
+    days = int(parts[5])
+
+    admin_svc = PlatformAdminService(session)
+    ok, msg, p = await admin_svc.update_plan(plan_id, actor_user_id=user.id, period_days=days)
+    if not ok or not p:
+        await callback.answer(msg, show_alert=True)
+        return
+
+    await callback.answer(f"✅ Срок тарифа изменён на {days} дн.!", show_alert=True)
+    await callback.message.edit_text(_format_plan_card(p), reply_markup=admin_plan_detail_keyboard(p.id, p.is_active))
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:dur_custom:(\d+)$"))
+async def cb_admin_plan_dur_custom(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt for custom duration in days."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    plan_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminPlanStates.waiting_for_custom_duration)
+    await state.update_data(plan_id=plan_id)
+
+    text = "✏️ <b>Свой срок действия тарифа</b>\n\nВведите количество дней действия тарифа (целое число от 1 до 3650):"
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:plan:dur:{plan_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminPlanStates.waiting_for_custom_duration)
+async def msg_admin_plan_custom_dur(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Validate custom duration input."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    plan_id = data.get("plan_id")
+    await state.clear()
+    if not plan_id:
+        return
+
+    val = (message.text or "").strip()
+    if not val.isdigit() or int(val) <= 0 or int(val) > 3650:
+        await message.answer("Некорректное число дней. Введите целое число от 1 до 3650.")
+        return
+
+    days = int(val)
+    ok, msg, p = await admin_svc.update_plan(plan_id, actor_user_id=user.id, period_days=days)
+    if not ok or not p:
+        await message.answer(f"❌ {msg}")
+        return
+
+    await message.answer(
+        f"✅ Срок тарифа установлен на {days} дн.!\n\n" + _format_plan_card(p),
+        reply_markup=admin_plan_detail_keyboard(p.id, p.is_active),
+    )
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:sort:(\d+)$"))
+async def cb_admin_plan_sort_prompt(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Prompt for plan sort order."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    plan_id = int(callback.data.split(":")[-1])
+    await state.set_state(AdminPlanStates.waiting_for_sort_order)
+    await state.update_data(plan_id=plan_id)
+
+    text = "🔢 <b>Порядок сортировки тарифа</b>\n\nВведите целое число для сортировки (например: <code>10</code>):"
+    cancel_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"mgr:admin:plan:{plan_id}")]]
+    )
+    await callback.message.edit_text(text, reply_markup=cancel_kb)
+    await callback.answer()
+
+
+@manager_router.message(AdminPlanStates.waiting_for_sort_order)
+async def msg_admin_plan_sort(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Validate and set plan sort order."""
+    user = await _get_or_create_user(session, message.from_user)
+    admin_svc = PlatformAdminService(session)
+    if not await admin_svc.is_platform_admin(telegram_id=message.from_user.id, user_id=user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    plan_id = data.get("plan_id")
+    await state.clear()
+    if not plan_id:
+        return
+
+    val = (message.text or "").strip()
+    if not val.lstrip("-").isdigit():
+        await message.answer("Некорректное значение. Введите целое число.")
+        return
+
+    sort_order = int(val)
+    ok, msg, p = await admin_svc.update_plan(plan_id, actor_user_id=user.id, sort_order=sort_order)
+    if not ok or not p:
+        await message.answer(f"❌ {msg}")
+        return
+
+    await message.answer(
+        f"✅ Порядок сортировки установлен: {sort_order}\n\n" + _format_plan_card(p),
+        reply_markup=admin_plan_detail_keyboard(p.id, p.is_active),
+    )
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:feat:(\d+)$"))
+async def cb_admin_plan_feat_menu(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Show features toggle keyboard for plan."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+    plan_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_plan_details(plan_id)
+    if not p:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    text = (
+        f"🧩 <b>Настройка опций (Features) тарифа «{escape(p.name)}»</b>\n\n"
+        "Нажмите на строку для переключения опции:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_plan_features_keyboard(plan_id, p.features or {}))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:plan:feat_toggle:(\d+):(\w+)$"))
+async def cb_admin_plan_feat_toggle(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Toggle a feature option for a plan."""
+    is_admin, user = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    parts = callback.data.split(":")
+    plan_id = int(parts[4])
+    feature_key = parts[5]
+
+    admin_svc = PlatformAdminService(session)
+    p = await admin_svc.get_plan_details(plan_id)
+    if not p:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    features = dict(p.features or {})
+    if feature_key == "max_bots":
+        current = features.get("max_bots")
+        cycle = [None, 1, 3, 5]
+        try:
+            idx = cycle.index(current)
+            new_val = cycle[(idx + 1) % len(cycle)]
+        except ValueError:
+            new_val = 1
+        if new_val is None:
+            features.pop("max_bots", None)
+        else:
+            features["max_bots"] = new_val
+    elif feature_key == "max_staff":
+        current = features.get("max_staff")
+        cycle = [None, 1, 3, 5, 10]
+        try:
+            idx = cycle.index(current)
+            new_val = cycle[(idx + 1) % len(cycle)]
+        except ValueError:
+            new_val = 1
+        if new_val is None:
+            features.pop("max_staff", None)
+        else:
+            features["max_staff"] = new_val
+    else:
+        # Boolean toggle
+        current_bool = bool(features.get(feature_key, False))
+        features[feature_key] = not current_bool
+
+    ok, msg, updated_p = await admin_svc.update_plan(plan_id, actor_user_id=user.id, features=features)
+    if not ok or not updated_p:
+        await callback.answer(msg, show_alert=True)
+        return
+
+    await callback.answer("Опция обновлена.")
+    text = (
+        f"🧩 <b>Настройка опций (Features) тарифа «{escape(updated_p.name)}»</b>\n\n"
+        "Нажмите на строку для переключения опции:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_plan_features_keyboard(plan_id, updated_p.features or {}))
+
+
+@manager_router.callback_query(F.data == "mgr:admin:audit")
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:audit:p:(\d+)$"))
+async def cb_admin_audit_logs(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin paginated audit log listing."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    page = 1
+    if callback.data.startswith("mgr:admin:audit:p:"):
+        try:
+            page = max(1, int(callback.data.split(":")[-1]))
+        except ValueError:
+            page = 1
+
+    admin_svc = PlatformAdminService(session)
+    logs, total, total_pages = await admin_svc.list_audit_logs(page=page)
+
+    text = (
+        f"📝 <b>Журнал действий платформы (Audit Log)</b> (Всего: {total})\n\n"
+        f"Страница {page} из {total_pages}. Выберите запись для просмотра:"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_audit_logs_keyboard(logs, page, total_pages))
+    await callback.answer()
+
+
+@manager_router.callback_query(F.data.regexp(r"^mgr:admin:audit:(\d+)$"))
+async def cb_admin_audit_detail(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Platform Admin audit log event detail view."""
+    is_admin, _ = await _ensure_platform_admin(session, callback)
+    if not is_admin:
+        return
+
+    log_id = int(callback.data.split(":")[-1])
+    admin_svc = PlatformAdminService(session)
+    entry = await admin_svc.get_audit_log_details(log_id)
+    if not entry:
+        await callback.answer("Запись аудита не найдена.", show_alert=True)
+        return
+
+    actor_str = f"#{entry['actor_user_id']}"
+    if entry.get("actor_username"):
+        actor_str += f" (@{entry['actor_username']})"
+
+    date_str = entry["created_at"].strftime("%d.%m.%Y %H:%M:%S") if entry.get("created_at") else "-"
+
+    before_str = json.dumps(entry.get("payload_before") or {}, ensure_ascii=False, indent=2)
+    after_str = json.dumps(entry.get("payload_after") or {}, ensure_ascii=False, indent=2)
+
+    text = (
+        f"📝 <b>Запись аудита #{entry['id']}</b>\n\n"
+        f"⚡️ Действие: <code>{entry['action']}</code>\n"
+        f"👤 Инициатор: <b>{actor_str}</b>\n"
+        f"🏢 Проект ID: <code>{entry.get('master_id') or '—'}</code>\n"
+        f"🎯 Сущность: <b>{entry.get('entity_type') or '—'} #{entry.get('entity_id') or '—'}</b>\n"
+        f"🕒 Время (UTC): {date_str}\n\n"
+        f"<b>До изменения:</b>\n<code>{escape(before_str[:500])}</code>\n\n"
+        f"<b>После изменения:</b>\n<code>{escape(after_str[:500])}</code>\n"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_audit_log_detail_keyboard())
     await callback.answer()
 
 
