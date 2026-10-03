@@ -480,6 +480,11 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
         start_time=datetime.now(timezone.utc) + timedelta(days=1),
         end_time=datetime.now(timezone.utc) + timedelta(days=1, hours=1),
         end_time_with_buffer=datetime.now(timezone.utc) + timedelta(days=1, hours=1, minutes=15),
+        snapshot_service_title="Complex Haircut",
+        snapshot_service_price=Decimal("2000.00"),
+        snapshot_service_duration_min=60,
+        snapshot_buffer_duration_min=15,
+        snapshot_deposit_amount=Decimal("0.00"),
     )
     pg_session.add(appt)
     await pg_session.commit()
