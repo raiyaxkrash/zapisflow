@@ -17,12 +17,25 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("PAYMENT_PROVIDER", "manual")
+
 ROOT = Path(__file__).resolve().parents[1]
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql+asyncpg://postgres:postgres_secure_password@localhost:5432/beauty_bot_test",
 )
+
+
+@pytest.fixture(autouse=True)
+def _ensure_test_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config.settings import settings
+    if os.environ.get("APP_ENV", "test") != "production":
+        monkeypatch.setattr(settings, "app_env", "test")
+    if os.environ.get("PAYMENT_PROVIDER", "manual") != "yookassa_web":
+        monkeypatch.setattr(settings, "payment_provider", "manual")
+
 
 
 def is_postgres_available() -> bool:

@@ -182,11 +182,20 @@ class SlotEngine:
         master_id: int,
         *,
         staff_id: Optional[int] = None,
-        days_count: int = 14,
+        days_count: Optional[int] = None,
     ) -> List[dt_date]:
         """Scan a date range and return only dates with at least one free slot for this staff member."""
+        horizon_val = await self.master_settings_repo.get_value(
+            master_id, "booking_horizon_days", 30
+        )
+        max_horizon = max(1, int(horizon_val))
+        if days_count is None:
+            scan_days = max_horizon
+        else:
+            scan_days = min(days_count, max_horizon)
+
         available_dates: List[dt_date] = []
-        for offset in range(days_count):
+        for offset in range(scan_days):
             curr_date = start_date + timedelta(days=offset)
             slots = await self.get_available_slots(
                 service_id, curr_date, master_id=master_id, staff_id=staff_id

@@ -262,8 +262,11 @@ async def cb_service_selected(
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
 
+    horizon_val = await settings_repo.get_value(master_id, "booking_horizon_days", 30)
+    horizon_days = max(1, int(horizon_val))
+
     available_dates_list = await slot_engine.get_available_dates(
-        service_id=service_id, start_date=today, days_count=35, master_id=master_id, staff_id=staff_id
+        service_id=service_id, start_date=today, days_count=horizon_days, master_id=master_id, staff_id=staff_id
     )
     available_dates = set(available_dates_list)
 
@@ -318,10 +321,13 @@ async def cb_calendar_navigation(
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
 
+    horizon_val = await settings_repo.get_value(master_id, "booking_horizon_days", 30)
+    horizon_days = max(1, int(horizon_val))
+
     if action in ["prev_month", "next_month"]:
         # Month switch
         available_dates_list = await slot_engine.get_available_dates(
-            service_id=service_id, start_date=today, days_count=45, master_id=master_id, staff_id=staff_id
+            service_id=service_id, start_date=today, days_count=horizon_days, master_id=master_id, staff_id=staff_id
         )
         available_dates = set(available_dates_list)
 
@@ -351,7 +357,7 @@ async def cb_calendar_navigation(
         if callback_data.day == 0:
             # Re-render calendar
             available_dates_list = await slot_engine.get_available_dates(
-                service_id=service_id, start_date=today, days_count=35, master_id=master_id, staff_id=staff_id
+                service_id=service_id, start_date=today, days_count=horizon_days, master_id=master_id, staff_id=staff_id
             )
             available_dates = set(available_dates_list)
             service_repo = ServiceRepository(session)

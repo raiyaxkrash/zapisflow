@@ -131,3 +131,33 @@ async def test_slot_engine_calculation_with_active_booking():
 
     # Slot 14:00 (service 14:00-15:30, buffer to 16:00): starts at 14:00 -> VALID!
     assert "14:00" in slot_hours_with_booking
+
+
+@pytest.mark.asyncio
+async def test_get_available_dates_respects_booking_horizon():
+    """Verify get_available_dates caps scanning to master's booking_horizon_days."""
+    mock_session = AsyncMock()
+    engine = SlotEngine(mock_session)
+
+    async def mock_get_value(master_id, key, default):
+        if key == "booking_horizon_days":
+            return 5
+        return default
+
+    engine.master_settings_repo.get_value = AsyncMock(side_effect=mock_get_value)
+    engine.get_available_slots = AsyncMock(return_value=[datetime.now()])
+
+    start_date = dt_date(2026, 10, 1)
+    # Requesting 30 days should be constrained to 5
+    dates = await engine.get_available_dates(
+        service_id=1, start_date=start_date, master_id=1, days_count=30
+    )
+    assert len(dates) == 5
+    assert dates[-1] == start_date + timedelta(days=4)
+
+    # Default days_count=None should also use the 5-day horizon
+    dates_default = await engine.get_available_dates(
+        service_id=1, start_date=start_date, master_id=1
+    )
+    assert len(dates_default) == 5
+
