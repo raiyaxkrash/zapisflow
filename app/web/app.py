@@ -291,6 +291,9 @@ def create_app(
     app.state.manager_bot = manager_bot
     app.state.scheduler = scheduler
 
+    from app.web.miniapp import install_miniapp
+    install_miniapp(app)
+
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next: Any) -> Response:
         """Trace each incoming request with a unique correlation ID."""

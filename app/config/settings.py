@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import List, Optional
 import re
 from urllib.parse import quote, urlsplit
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
@@ -84,6 +84,17 @@ class Settings(BaseSettings):
     manager_bot_username: str = Field(default="", alias="MANAGER_BOT_USERNAME")
     manager_webhook_secret: str = Field(default="", alias="MANAGER_WEBHOOK_SECRET")
     mini_app_url: str = Field(default="", alias="MINI_APP_URL")
+    mini_app_base_url: str = Field(default="", alias="MINI_APP_BASE_URL")
+    mini_app_session_seconds: int = Field(default=1800, ge=60, le=3600, alias="MINI_APP_SESSION_SECONDS")
+    mini_app_auth_max_age_seconds: int = Field(default=300, ge=30, le=600, alias="MINI_APP_AUTH_MAX_AGE_SECONDS")
+
+    @field_validator("mini_app_base_url")
+    @classmethod
+    def validate_miniapp_url(cls, value: str) -> str:
+        if not value:
+            return value
+        from app.services.miniapp_auth import miniapp_origin
+        return miniapp_origin(value)
     trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
 
     support_telegram_username: str = Field(default="zapisflow", alias="SUPPORT_TELEGRAM_USERNAME")
@@ -245,6 +256,9 @@ class Settings(BaseSettings):
 
         if self.app_mode.lower() != "webhook":
             errors.append(f"APP_MODE must be 'webhook' in production, got '{self.app_mode}'")
+
+        if self.mini_app_base_url and not self.mini_app_base_url.startswith("https://"):
+            errors.append("MINI_APP_BASE_URL must use HTTPS in production")
 
         if not self.webhook_base_url or not self.webhook_base_url.startswith("https://"):
             errors.append("WEBHOOK_BASE_URL must be configured with https:// in production")

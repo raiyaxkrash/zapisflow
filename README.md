@@ -227,6 +227,13 @@ curl -fsS https://<ваш-api-домен>/health/ready
 
 Актуальный план развития проекта: [ROADMAP.md](ROADMAP.md)
 
+## Telegram Mini App
+
+В репозитории есть единый клиентский и мастерский Mini App, использующий
+существующие сервисы и tenant-scoped API. Подключение выполняется явно;
+production deployment и реальный Telegram UAT требуют отдельной проверки.
+Архитектура, конфигурация, API и сценарии проверки: [docs/miniapp.md](docs/miniapp.md).
+
 ## Support
 
 Поддержка платформы: [@zapisflow](https://t.me/zapisflow).

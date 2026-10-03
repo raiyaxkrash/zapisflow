@@ -77,6 +77,7 @@ class BookingService:
         is_manual: bool = False,
         admin_notes: Optional[str] = None,
         staff_id: Optional[int] = None,
+        reserve_only: bool = False,
     ) -> Tuple[Appointment, Optional[Payment]]:
         """Create a booking and, only for a positive deposit, its pending payment."""
         # Serialize booking creation with suspend/renewal/expiration updates.
@@ -187,7 +188,7 @@ class BookingService:
         no_deposit_required = deposit_amount <= 0
         initial_status = (
             AppointmentStatus.CONFIRMED
-            if is_manual or no_deposit_required
+            if is_manual or (no_deposit_required and not reserve_only)
             else AppointmentStatus.WAITING_PAYMENT
         )
 
@@ -206,7 +207,7 @@ class BookingService:
             start_time=start_time,
             end_time=end_time,
             end_time_with_buffer=end_time_with_buffer,
-            hold_until=None if is_manual or no_deposit_required else hold_until,
+            hold_until=None if is_manual or (no_deposit_required and not reserve_only) else hold_until,
             cancel_policy_agreed=cancel_policy_agreed,
             snapshot_service_title=service.title,
             snapshot_service_price=service.price,
@@ -242,6 +243,32 @@ class BookingService:
         await self.session.flush()
         await self.session.refresh(appointment)
         return appointment, payment
+
+    async def confirm_reserved_booking(self, master_id: int, appointment_id: int, user_id: int) -> Appointment:
+        """Finalize a Mini App zero-deposit hold; paid holds use existing proof flow.
+
+        Caller owns the transaction. Re-check entitlement and lease; retries are no-op.
+        """
+        await self.session.scalar(select(Master).where(Master.id == master_id).with_for_update())
+        if not await self.access_policy.can_create_hold(master_id):
+            raise SubscriptionExpiredError(NEUTRAL_CLIENT_EXPIRED_MESSAGE)
+        appointment = await self.appointment_repo.get_by_id_with_relations(appointment_id, master_id, for_update=True)
+        if appointment is None or appointment.user_id != user_id:
+            raise BookingNotFoundError("Запись не найдена")
+        if appointment.status == AppointmentStatus.CONFIRMED:
+            return appointment
+        if appointment.status != AppointmentStatus.WAITING_PAYMENT:
+            raise InvalidBookingStatusError("Запись больше не ожидает подтверждения")
+        if appointment.hold_until is None or appointment.hold_until <= datetime.now(pytz.UTC):
+            raise InvalidBookingStatusError("Время резервирования истекло")
+        if not appointment.cancel_policy_agreed:
+            raise InvalidBookingStatusError("Подтвердите условия отмены")
+        if appointment.snapshot_deposit_amount <= 0:
+            # The only additional transition: a real zero-deposit temporary hold.
+            appointment.status = AppointmentStatus.CONFIRMED
+            appointment.hold_until = None
+            await self.session.flush()
+        return appointment
 
     async def cancel_booking_by_client(
         self,

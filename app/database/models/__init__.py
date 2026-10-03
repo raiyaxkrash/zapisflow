@@ -40,6 +40,7 @@ from app.database.models.master import (
 )
 from app.database.models.audit import AuditLog
 from app.database.models.processed_update import ProcessedWebhookUpdate
+from app.database.models.miniapp import MiniAppSession, MiniAppOperation
 from app.database.models.telegram_outbox import TelegramOutbox, TelegramOutboxStatus
 from app.database.models.checkout_session import CheckoutSession
 from app.database.models.subscription import (

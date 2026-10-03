@@ -1,0 +1,7 @@
+{
+  "name": "zapisflow-miniapp",
+  "private": true,
+  "type": "module",
+  "scripts": {"dev": "vite --host 127.0.0.1", "test": "node --test tests/*.test.js", "build": "vite build"},
+  "devDependencies": {"vite": "^7.1.0", "jsdom": "^26.1.0"}
+}

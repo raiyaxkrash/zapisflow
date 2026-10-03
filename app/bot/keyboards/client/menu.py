@@ -2,7 +2,7 @@
 Main menu and navigation inline keyboards for clients.
 """
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.keyboards.client.callbacks import MenuCallback
@@ -12,6 +12,7 @@ def get_main_menu_keyboard(
     is_admin: bool = False,
     has_portfolio: bool = True,
     has_reviews: bool = True,
+    miniapp_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     """
     Build client main menu keyboard. Adds admin panel button if user is admin.
@@ -21,7 +22,7 @@ def get_main_menu_keyboard(
     builder.row(
         InlineKeyboardButton(
             text="📅 Записаться",
-            callback_data=MenuCallback(action="book").pack(),
+            **({"web_app": WebAppInfo(url=miniapp_url)} if miniapp_url else {"callback_data": MenuCallback(action="book").pack()}),
         )
     )
     row_2 = [

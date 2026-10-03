@@ -57,8 +57,9 @@ def test_alembic_revision_graph_consistency() -> None:
     assert "2026_10_01_0022" in rev_ids
     assert "2026_10_03_0023" in rev_ids
     assert "2026_10_03_0024" in rev_ids
-    # 0024 is head, 0001 is base
-    assert rev_ids[0] == "2026_10_03_0024"
+    assert "2026_10_03_0025" in rev_ids
+    # Mini App security migration is head; 0001 is base.
+    assert rev_ids[0] == "2026_10_03_0025"
     assert rev_ids[-1] == "2026_09_30_0001"
 
 

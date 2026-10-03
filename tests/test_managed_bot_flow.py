@@ -148,7 +148,7 @@ class TestManagedBotKeyboards:
 async def test_provision_managed_bot_lifecycle(pg_session: AsyncSession):
     """Test full managed bot provisioning: encryption, DB record, and idempotency."""
     # 1. Setup Master and Owner
-    user = User(telegram_id=999001, full_name="Master Owner", username="owner_test")
+    user = User(telegram_id=999001, first_name="Master Owner", username="owner_test")
     pg_session.add(user)
     await pg_session.flush()
 
@@ -170,7 +170,7 @@ async def test_provision_managed_bot_lifecycle(pg_session: AsyncSession):
     gateway.set_my_commands = AsyncMock(return_value=True)
     gateway.set_chat_menu_button = AsyncMock(return_value=True)
 
-    crypto = TokenCrypto()
+    crypto = TokenCrypto(master_key=TEST_KEY)
     service = BotProvisioningService(session=pg_session, gateway=gateway, crypto=crypto)
 
     raw_token = "987654321:AAFakeManagedBotTokenSecretABC_xyz"
@@ -188,7 +188,7 @@ async def test_provision_managed_bot_lifecycle(pg_session: AsyncSession):
         info.url = f"{settings.webhook_base_url.rstrip('/')}/telegram/webhook/{res.public_id}"
         return info
 
-    gateway.get_webhook_info.side_effect = fake_get_webhook_info
+    gateway.get_webhook_info = AsyncMock(side_effect=fake_get_webhook_info)
 
     # 3. Provision Managed Bot
     bot_instance = await service.provision_managed_bot(
@@ -228,7 +228,7 @@ async def test_provision_managed_bot_lifecycle(pg_session: AsyncSession):
     assert duplicate_call_instance.id == bot_instance.id
 
     # 5. Test Tenant Isolation: provisioning same bot for ANOTHER master must fail with DuplicateBotError
-    other_user = User(telegram_id=999002, full_name="Other User")
+    other_user = User(telegram_id=999002, first_name="Other User")
     pg_session.add(other_user)
     await pg_session.flush()
 
@@ -263,7 +263,7 @@ async def test_provision_managed_bot_lifecycle(pg_session: AsyncSession):
 @pytest.mark.asyncio
 async def test_rotate_managed_bot_token(pg_session: AsyncSession):
     """Test automatic token rotation for Telegram Managed Bot."""
-    user = User(telegram_id=999003, full_name="Rotation Owner")
+    user = User(telegram_id=999003, first_name="Rotation Owner")
     pg_session.add(user)
     await pg_session.flush()
 
@@ -275,7 +275,7 @@ async def test_rotate_managed_bot_token(pg_session: AsyncSession):
     pg_session.add(master)
     await pg_session.flush()
 
-    crypto = TokenCrypto()
+    crypto = TokenCrypto(master_key=TEST_KEY)
     token_v1 = "111222333:TokenVersionOneFakeABC"
     enc_token = crypto.encrypt(token_v1, associated_data=111222333)
 
@@ -299,7 +299,7 @@ async def test_rotate_managed_bot_token(pg_session: AsyncSession):
     gateway = TelegramProvisioningGateway()
     token_v2 = "111222333:TokenVersionTwoRotatedNewXYZ"
     gateway.replace_managed_bot_token = AsyncMock(return_value=token_v2)
-    gateway.validate_token = AsyncMock(return_value=BotIdentity(id=111222333, username="rotate_test_bot"))
+    gateway.validate_token = AsyncMock(return_value=BotIdentity(id=111222333, username="rotate_test_bot", first_name="Rotation"))
     gateway.set_webhook = AsyncMock(return_value=True)
 
     async def fake_get_webhook_info(t):
@@ -307,7 +307,7 @@ async def test_rotate_managed_bot_token(pg_session: AsyncSession):
         info.url = f"{settings.webhook_base_url.rstrip('/')}/telegram/webhook/{bot.public_id}"
         return info
 
-    gateway.get_webhook_info.side_effect = fake_get_webhook_info
+    gateway.get_webhook_info = AsyncMock(side_effect=fake_get_webhook_info)
 
     service = BotProvisioningService(session=pg_session, gateway=gateway, crypto=crypto)
 
@@ -322,7 +322,7 @@ async def test_rotate_managed_bot_token(pg_session: AsyncSession):
     assert decrypted == token_v2
     gateway.replace_managed_bot_token.assert_awaited_once_with(
         manager_token="fake_mgr_token",
-        user_id=user.telegram_id,
+        bot_id=bot.telegram_bot_id,
     )
 
 

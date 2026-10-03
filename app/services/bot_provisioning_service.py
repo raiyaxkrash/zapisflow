@@ -222,6 +222,9 @@ class BotProvisioningService:
                 entity_id=bot_instance.id,
                 payload_after={"status": "ERROR", "error": error_desc},
             )
+            await self.session.commit()
+            raise ProvisioningWebhookError(error_desc) from exc
+
     async def provision_managed_bot(
         self,
         master_id: int,
@@ -349,9 +352,11 @@ class BotProvisioningService:
                 logger.warning("Could not set commands for bot %s: %s", bot_identity.id, cmd_exc)
 
             # Mini App Menu Button (if configured)
-            if settings.mini_app_url:
+            if settings.mini_app_base_url:
                 try:
-                    await self.gateway.set_chat_menu_button(clean_token, mini_app_url=settings.mini_app_url)
+                    from app.services.miniapp_auth import miniapp_origin
+                    menu_url = f"{miniapp_origin(settings.mini_app_base_url)}/b/{bot_instance.public_id}"
+                    await self.gateway.set_chat_menu_button(clean_token, mini_app_url=menu_url)
                 except Exception as btn_exc:
                     logger.warning("Could not set menu button for bot %s: %s", bot_identity.id, btn_exc)
 
