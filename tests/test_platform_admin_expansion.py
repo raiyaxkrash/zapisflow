@@ -467,6 +467,7 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
         master_id=master.id,
         category_id=cat.id,
         telegram_file_id="photo_123",
+        telegram_file_unique_id="uniq_123",
         title="Photo 1",
     )
     pg_session.add(item)
