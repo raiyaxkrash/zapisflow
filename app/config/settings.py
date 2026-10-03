@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     hold_cleaner_interval_seconds: int = Field(default=60, alias="HOLD_CLEANER_INTERVAL_SECONDS")
     reminder_generation_interval_seconds: int = Field(default=120, alias="REMINDER_GENERATION_INTERVAL_SECONDS")
     reminder_delivery_interval_seconds: int = Field(default=30, alias="REMINDER_DELIVERY_INTERVAL_SECONDS")
+    telegram_outbox_poll_interval_seconds: int = Field(
+        default=2, ge=1, le=60, alias="TELEGRAM_OUTBOX_POLL_INTERVAL_SECONDS"
+    )
 
     @property
     def is_production(self) -> bool:

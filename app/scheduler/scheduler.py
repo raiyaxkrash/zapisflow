@@ -124,10 +124,13 @@ class MultiTenantScheduler:
         self._scheduler.add_job(
             dispatch_telegram_outbox,
             trigger="interval",
-            seconds=settings.reminder_delivery_interval_seconds,
+            # Interactive booking screens must not wait for the reminder cycle.
+            seconds=settings.telegram_outbox_poll_interval_seconds,
             id="dispatch_telegram_outbox",
             name="Dispatch Telegram Outbox",
             replace_existing=True,
+            max_instances=1,
+            coalesce=True,
             kwargs={
                 "registry": self.registry,
                 "session_maker": self.session_maker,

@@ -188,6 +188,19 @@ async def test_production_webhook_fsm_redis_failure_is_fatal(monkeypatch):
             await create_dispatcher()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reminder_interval", [30, 300])
+async def test_interactive_outbox_does_not_wait_for_reminder_cycle(monkeypatch, reminder_interval):
+    from app.scheduler.scheduler import setup_scheduler
+    monkeypatch.setattr(settings, "reminder_delivery_interval_seconds", reminder_interval)
+    monkeypatch.setattr(settings, "telegram_outbox_poll_interval_seconds", 2)
+    scheduler = setup_scheduler()
+    job = scheduler._scheduler.get_job("dispatch_telegram_outbox")
+    assert job.trigger.interval.total_seconds() == 2
+    assert job.max_instances == 1
+    assert job.coalesce is True
+
+
 @requires_postgres
 @pytest.mark.asyncio
 async def test_parallel_confirmation_distinct_updates_one_booking(pg_engine, monkeypatch):
