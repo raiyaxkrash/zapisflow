@@ -3,12 +3,15 @@ Configuration settings for the application using Pydantic Settings v2.
 """
 
 from pathlib import Path
-from typing import List
+from decimal import Decimal
+from typing import List, Optional
 import re
-from urllib.parse import quote
-from pydantic import Field
+from urllib.parse import quote, urlsplit
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
+
+from app.config.url_validation import miniapp_origin
 
 
 class Settings(BaseSettings):
@@ -52,10 +55,12 @@ class Settings(BaseSettings):
     grid_step_minutes: int = Field(default=30, alias="GRID_STEP_MINUTES")
 
     # Requisites
-    bank_name: str = Field(default="Сбербанк", alias="BANK_NAME")
-    bank_card_number: str = Field(default="2202 2000 0000 0000", alias="BANK_CARD_NUMBER")
-    default_phone_requisites: str = Field(default="+7 (999) 000-00-00", alias="DEFAULT_PHONE_REQUISITES")
-    bank_recipient_name: str = Field(default="Иван И.", alias="BANK_RECIPIENT_NAME")
+    # Client prepayment requisites are tenant-specific and must never have
+    # plausible-looking global defaults that could send money to a sample account.
+    bank_name: Optional[str] = Field(default=None, alias="BANK_NAME")
+    bank_card_number: Optional[str] = Field(default=None, alias="BANK_CARD_NUMBER")
+    default_phone_requisites: Optional[str] = Field(default=None, alias="DEFAULT_PHONE_REQUISITES")
+    bank_recipient_name: Optional[str] = Field(default=None, alias="BANK_RECIPIENT_NAME")
 
     # Phase 5: Dynamic Bot Instances, Token Security & BotRegistry
     bot_token_encryption_key: str = Field(
@@ -78,10 +83,43 @@ class Settings(BaseSettings):
 
     # Phase 7: Platform Manager Bot & Onboarding
     manager_bot_token: str = Field(default="", alias="MANAGER_BOT_TOKEN")
+    manager_bot_username: str = Field(default="", alias="MANAGER_BOT_USERNAME")
     manager_webhook_secret: str = Field(default="", alias="MANAGER_WEBHOOK_SECRET")
+    mini_app_url: str = Field(default="", alias="MINI_APP_URL")
+    mini_app_base_url: str = Field(default="", alias="MINI_APP_BASE_URL")
+    mini_app_session_seconds: int = Field(default=1800, ge=60, le=3600, alias="MINI_APP_SESSION_SECONDS")
+    mini_app_auth_max_age_seconds: int = Field(default=300, ge=30, le=600, alias="MINI_APP_AUTH_MAX_AGE_SECONDS")
+
+    @field_validator("mini_app_base_url")
+    @classmethod
+    def validate_miniapp_url(cls, value: str) -> str:
+        if not value:
+            return value
+        return miniapp_origin(value)
     trial_duration_days: int = Field(default=14, alias="TRIAL_DURATION_DAYS")
+
     support_telegram_username: str = Field(default="zapisflow", alias="SUPPORT_TELEGRAM_USERNAME")
     payment_provider: str = Field(default="manual", alias="PAYMENT_PROVIDER")
+    payment_currency: str = Field(default="RUB", alias="PAYMENT_CURRENCY")
+    yookassa_mode: str = Field(default="test", alias="YOOKASSA_MODE")
+    yookassa_allow_test_in_production: bool = Field(
+        default=False, alias="YOOKASSA_ALLOW_TEST_IN_PRODUCTION"
+    )
+    yookassa_test_allowed_telegram_ids: List[int] = Field(
+        default_factory=list, alias="YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS"
+    )
+    yookassa_shop_id: str = Field(default="", alias="YOOKASSA_SHOP_ID")
+    yookassa_secret_key: SecretStr = Field(default=SecretStr(""), alias="YOOKASSA_SECRET_KEY")
+    yookassa_test_shop_id: str = Field(default="", alias="YOOKASSA_TEST_SHOP_ID")
+    yookassa_test_secret_key: SecretStr = Field(default=SecretStr(""), alias="YOOKASSA_TEST_SECRET_KEY")
+    billing_return_url: str = Field(default="", alias="BILLING_RETURN_URL")
+    yookassa_fiscal_mode: str = Field(default="self_employed", alias="YOOKASSA_FISCAL_MODE")
+    yookassa_receipt_vat_code: str = Field(default="", alias="YOOKASSA_RECEIPT_VAT_CODE")
+    yookassa_receipt_payment_subject: str = Field(default="", alias="YOOKASSA_RECEIPT_PAYMENT_SUBJECT")
+    yookassa_receipt_payment_mode: str = Field(default="", alias="YOOKASSA_RECEIPT_PAYMENT_MODE")
+    yookassa_reconciliation_interval_seconds: int = Field(
+        default=300, alias="YOOKASSA_RECONCILIATION_INTERVAL_SECONDS"
+    )
 
     # Phase 8: Multi-Replica Multi-Tenant Scheduler & Reliable Background Jobs
     scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
@@ -92,6 +130,9 @@ class Settings(BaseSettings):
     hold_cleaner_interval_seconds: int = Field(default=60, alias="HOLD_CLEANER_INTERVAL_SECONDS")
     reminder_generation_interval_seconds: int = Field(default=120, alias="REMINDER_GENERATION_INTERVAL_SECONDS")
     reminder_delivery_interval_seconds: int = Field(default=30, alias="REMINDER_DELIVERY_INTERVAL_SECONDS")
+    telegram_outbox_poll_interval_seconds: int = Field(
+        default=2, ge=1, le=60, alias="TELEGRAM_OUTBOX_POLL_INTERVAL_SECONDS"
+    )
 
     @property
     def is_production(self) -> bool:
@@ -110,6 +151,93 @@ class Settings(BaseSettings):
         username = self.support_telegram_username.strip().lstrip("@")
         return f"@{username}"
 
+    @property
+    def yookassa_credentials(self) -> tuple[str, str]:
+        """Select one credential pair without ever mixing test and live shops."""
+        if self.yookassa_mode.lower() == "live":
+            return self.yookassa_shop_id, self.yookassa_secret_key.get_secret_value()
+        if self.yookassa_mode.lower() == "test":
+            return self.yookassa_test_shop_id, self.yookassa_test_secret_key.get_secret_value()
+        raise ValueError("YOOKASSA_MODE must be 'test' or 'live'")
+
+    @property
+    def billing_site_origin(self) -> str:
+        """Return the independently served website origin, never a browser value."""
+        parsed = urlsplit(self.billing_return_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("BILLING_RETURN_URL must be a valid HTTPS URL")
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def can_use_yookassa_test_checkout(self, telegram_id: int) -> bool:
+        """Keep the production test shop limited to explicitly named owners."""
+        if not self.is_production or self.yookassa_mode.lower() != "test":
+            return True
+        return (
+            self.yookassa_allow_test_in_production
+            and telegram_id in self.yookassa_test_allowed_telegram_ids
+        )
+
+    def build_yookassa_receipt(self, *, email: str, description: str, amount: Decimal) -> dict:
+        """Use merchant-confirmed fiscal settings, with no invented VAT values."""
+        self.validate_receipt_configuration()
+        return {
+            "customer": {"email": email},
+            "items": [{
+                "description": description[:128],
+                "quantity": "1.00",
+                "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+                "vat_code": int(self.yookassa_receipt_vat_code),
+                "payment_subject": self.yookassa_receipt_payment_subject,
+                "payment_mode": self.yookassa_receipt_payment_mode,
+            }],
+        }
+
+    def validate_receipt_configuration(self) -> None:
+        if not self.yookassa_receipt_vat_code.isdigit() or int(self.yookassa_receipt_vat_code) not in range(1, 13):
+            raise ValueError("YOOKASSA_RECEIPT_VAT_CODE must be merchant-confirmed (1-12)")
+        if not re.fullmatch(r"[a-z_]{2,32}", self.yookassa_receipt_payment_subject):
+            raise ValueError("YOOKASSA_RECEIPT_PAYMENT_SUBJECT must be merchant-confirmed")
+        if self.yookassa_receipt_payment_mode not in {"full_payment", "full_prepayment"}:
+            raise ValueError("YOOKASSA_RECEIPT_PAYMENT_MODE must be merchant-confirmed")
+
+    def validate_payment_configuration(self) -> None:
+        """Fail closed when YooKassa is enabled without its dependencies."""
+        if self.payment_provider.lower() != "yookassa_web":
+            return
+        errors: list[str] = []
+        if self.payment_currency != "RUB":
+            errors.append("PAYMENT_CURRENCY must be RUB for YooKassa checkout")
+        if self.yookassa_mode.lower() not in {"test", "live"}:
+            errors.append("YOOKASSA_MODE must be 'test' or 'live'")
+        elif self.is_production and self.yookassa_mode.lower() == "test" and not self.yookassa_allow_test_in_production:
+            errors.append("YOOKASSA_ALLOW_TEST_IN_PRODUCTION=true is required for production test mode")
+        else:
+            shop_id, secret_key = self.yookassa_credentials
+            if not shop_id or not secret_key:
+                errors.append("YooKassa shop ID and secret key are required for the selected mode")
+        if self.is_production and self.yookassa_mode.lower() == "test" and self.yookassa_allow_test_in_production:
+            if not self.yookassa_test_allowed_telegram_ids or any(
+                user_id <= 0 for user_id in self.yookassa_test_allowed_telegram_ids
+            ):
+                errors.append("YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS must contain a test owner")
+        parsed = urlsplit(self.billing_return_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            errors.append("BILLING_RETURN_URL must be an HTTPS URL without credentials")
+        else:
+            main_site_return = parsed.netloc == "zapisflow.su" and parsed.path in {"", "/"}
+            billing_return = parsed.path in {"/billing/success", "/billing/yookassa/return"}
+            if not (main_site_return or billing_return) or parsed.query or parsed.fragment:
+                errors.append("BILLING_RETURN_URL must point to a supported billing return path")
+        if self.yookassa_fiscal_mode not in {"self_employed", "merchant_receipt"}:
+            errors.append("YOOKASSA_FISCAL_MODE must be self_employed or merchant_receipt")
+        elif self.yookassa_fiscal_mode == "merchant_receipt":
+            try:
+                self.validate_receipt_configuration()
+            except ValueError as exc:
+                errors.append(str(exc))
+        if errors:
+            raise ValueError("Payment configuration invalid: " + "; ".join(errors))
+
     def validate_production_configuration(self) -> None:
         """
         Strict validation for production deployment.
@@ -123,10 +251,15 @@ class Settings(BaseSettings):
         if not self.is_production:
             return
 
+        self.validate_payment_configuration()
+
         errors: list[str] = []
 
         if self.app_mode.lower() != "webhook":
             errors.append(f"APP_MODE must be 'webhook' in production, got '{self.app_mode}'")
+
+        if self.mini_app_base_url and not self.mini_app_base_url.startswith("https://"):
+            errors.append("MINI_APP_BASE_URL must use HTTPS in production")
 
         if not self.webhook_base_url or not self.webhook_base_url.startswith("https://"):
             errors.append("WEBHOOK_BASE_URL must be configured with https:// in production")

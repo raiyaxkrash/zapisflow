@@ -21,6 +21,7 @@ from app.scheduler.jobs.reminder_worker import send_visit_reminders
 from app.scheduler.jobs.subscription_worker import refresh_subscriptions
 from app.scheduler.jobs.broadcast_worker import resume_broadcasts
 from app.scheduler.jobs.telegram_outbox_worker import dispatch_telegram_outbox
+from app.scheduler.jobs.yookassa_reconciliation import reconcile_pending_yookassa
 from app.services.bot_registry import BotRegistry
 
 logger = logging.getLogger("app.scheduler")
@@ -123,10 +124,13 @@ class MultiTenantScheduler:
         self._scheduler.add_job(
             dispatch_telegram_outbox,
             trigger="interval",
-            seconds=settings.reminder_delivery_interval_seconds,
+            # Interactive booking screens must not wait for the reminder cycle.
+            seconds=settings.telegram_outbox_poll_interval_seconds,
             id="dispatch_telegram_outbox",
             name="Dispatch Telegram Outbox",
             replace_existing=True,
+            max_instances=1,
+            coalesce=True,
             kwargs={
                 "registry": self.registry,
                 "session_maker": self.session_maker,
@@ -135,6 +139,20 @@ class MultiTenantScheduler:
                 "lease_seconds": settings.job_processing_timeout_seconds,
             },
         )
+
+        if settings.payment_provider.lower() == "yookassa_web":
+            self._scheduler.add_job(
+                reconcile_pending_yookassa,
+                trigger="interval",
+                seconds=settings.yookassa_reconciliation_interval_seconds,
+                id="reconcile_pending_yookassa",
+                name="Reconcile Pending YooKassa Payments",
+                replace_existing=True,
+                kwargs={
+                    "session_maker": self.session_maker,
+                    "batch_size": settings.scheduler_batch_size,
+                },
+            )
 
         logger.info(
             "MultiTenantScheduler configured with hold_cleaner (%ss), reminder_generator (%ss), reminder_worker (%ss), subscription_worker (600s)",

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
 from app.database.models.audit import AuditLog
-from app.database.models.master import Master, SubscriptionStatus
+from app.database.models.master import Master, MasterStatus, SubscriptionStatus
 from app.database.models.subscription import (
     EffectiveSubscriptionStatus,
     SubscriptionPayment,
@@ -101,7 +101,9 @@ class SubscriptionService:
             paid_until = paid_until.replace(tzinfo=timezone.utc)
 
         # 1. Administrative suspension always supersedes timestamps
-        if stored == SubscriptionStatus.SUSPENDED:
+        if stored == SubscriptionStatus.SUSPENDED or master.status in (
+            MasterStatus.SUSPENDED, MasterStatus.ARCHIVED
+        ):
             return EffectiveSubscription(
                 master_id=master_id,
                 status=EffectiveSubscriptionStatus.SUSPENDED,
@@ -200,37 +202,13 @@ class SubscriptionService:
         )
 
     async def get_active_plan(self, plan_code: str = "basic_monthly") -> SubscriptionPlan:
-        """Fetch active subscription plan from DB with graceful fallback."""
+        """Fetch exactly the requested active plan; never substitute a forged code."""
         stmt = select(SubscriptionPlan).where(
             SubscriptionPlan.code == plan_code,
             SubscriptionPlan.is_active == True,  # noqa: E712
         )
         res = await self.session.execute(stmt)
         plan = res.scalars().first()
-        if not plan:
-            # Fallback between 'BASIC' and 'basic_monthly' for backward compatibility
-            fallback_code = (
-                "BASIC" if plan_code == "basic_monthly" else ("basic_monthly" if plan_code == "BASIC" else None)
-            )
-            if fallback_code:
-                fb_res = await self.session.execute(
-                    select(SubscriptionPlan).where(
-                        SubscriptionPlan.code == fallback_code,
-                        SubscriptionPlan.is_active == True,
-                    )
-                )
-                plan = fb_res.scalars().first()
-
-        if not plan:
-            # First active plan by sort_order
-            first_res = await self.session.execute(
-                select(SubscriptionPlan)
-                .where(SubscriptionPlan.is_active == True)
-                .order_by(SubscriptionPlan.sort_order.asc(), SubscriptionPlan.period_days.asc())
-                .limit(1)
-            )
-            plan = first_res.scalars().first()
-
         if not plan:
             raise PlanNotFoundError(f"Active subscription plan '{plan_code}' not found")
         return plan
@@ -363,7 +341,7 @@ class SubscriptionService:
         if payment.status != "PENDING":
             raise SubscriptionError(f"Платёж в статусе {payment.status} не может быть подтверждён")
         if (
-            payment.plan_id is None
+            (payment.plan_id is None and provider != "YOOKASSA")
             or payment.amount is None
             or payment.amount <= 0
             or not payment.currency
@@ -372,12 +350,18 @@ class SubscriptionService:
             or payment.period_days <= 0
         ):
             raise SubscriptionError("Параметры платежа некорректны")
-        plan = await self.session.get(SubscriptionPlan, payment.plan_id)
-        if (
+        plan = await self.session.get(SubscriptionPlan, payment.plan_id) if payment.plan_id else None
+        # An externally captured YooKassa order is verified against its
+        # immutable local amount/currency snapshot before reaching this method.
+        # A later catalog edit must not discard money already paid for that
+        # snapshot. Legacy/manual payments retain their original plan check.
+        if provider != "YOOKASSA" and (
             plan is None
-            or payment.currency != plan.currency
-            or payment.amount != plan.price
-            or payment.period_days != plan.period_days
+            or (
+                payment.currency != plan.currency
+                or payment.amount != plan.price
+                or payment.period_days != plan.period_days
+            )
         ):
             raise SubscriptionError("Сумма, валюта или срок платежа не соответствуют тарифу")
 
@@ -684,4 +668,170 @@ class SubscriptionService:
         await self.session.flush()
         logger.info("Trial claimed for User #%s (ends at %s)", user_id, trial_ends)
         return True
+
+    async def extend_subscription_manually(
+        self,
+        master_id: int,
+        days: int,
+        actor_user_id: int,
+        reason: str = "Ручное продление",
+        now_utc: Optional[datetime] = None,
+    ) -> Tuple[datetime, SubscriptionStatus]:
+        """
+        Manually grant subscription duration to a master by a platform admin.
+        Semantic rules:
+        - If active with paid_until in future: extend from paid_until
+        - If trial with trial_ends_at in future: extend from trial_ends_at
+        - If expired or paid_until is None/in past: extend from now_utc
+        - Status transition:
+          - If SUSPENDED: remains SUSPENDED (requires separate activation)
+          - Otherwise: becomes ACTIVE
+        - Creates a SubscriptionPeriod(source="MANUAL")
+        - Logs AuditEvent.SUBSCRIPTION_EXTENDED
+        """
+        if days <= 0:
+            raise SubscriptionError("Количество дней продления должно быть больше нуля")
+
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+        stmt = select(Master).where(Master.id == master_id).with_for_update()
+        res = await self.session.execute(stmt)
+        master = res.scalar_one_or_none()
+        if not master:
+            raise SubscriptionError(f"Master #{master_id} not found")
+
+        prev_status = master.subscription_status
+        prev_paid_until = master.paid_until
+
+        if master.paid_until and master.paid_until > now_utc:
+            base_dt = master.paid_until
+        elif (
+            master.subscription_status == SubscriptionStatus.TRIAL
+            and master.trial_ends_at
+            and master.trial_ends_at > now_utc
+        ):
+            base_dt = master.trial_ends_at
+        else:
+            base_dt = now_utc
+
+        new_paid_until = base_dt + timedelta(days=days)
+
+        period = SubscriptionPeriod(
+            master_id=master.id,
+            plan_id=None,
+            status="ACTIVE",
+            source="MANUAL",
+            starts_at=base_dt,
+            ends_at=new_paid_until,
+            amount=Decimal("0.00"),
+            currency="RUB",
+            external_payment_id=f"manual:{actor_user_id}:{int(now_utc.timestamp())}",
+        )
+        self.session.add(period)
+
+        master.paid_until = new_paid_until
+        if master.subscription_status != SubscriptionStatus.SUSPENDED:
+            master.subscription_status = SubscriptionStatus.ACTIVE
+
+        audit = AuditLog(
+            master_id=master.id,
+            actor_user_id=actor_user_id,
+            action=AuditEvent.SUBSCRIPTION_EXTENDED,
+            entity_type="Master",
+            entity_id=master.id,
+            payload_before={
+                "status": prev_status.value if prev_status else None,
+                "paid_until": prev_paid_until.isoformat() if prev_paid_until else None,
+            },
+            payload_after={
+                "status": master.subscription_status.value,
+                "paid_until": new_paid_until.isoformat(),
+                "days": days,
+                "reason": reason,
+            },
+        )
+        self.session.add(audit)
+        await self.session.flush()
+        return new_paid_until, master.subscription_status
+
+    async def set_subscription_expiry_manually(
+        self,
+        master_id: int,
+        new_expiry_date: datetime,
+        actor_user_id: int,
+        reason: str = "Установка даты окончания",
+        now_utc: Optional[datetime] = None,
+    ) -> Tuple[datetime, SubscriptionStatus]:
+        """
+        Manually set the exact subscription expiration date for a master.
+        - If new_expiry_date in future:
+          - If SUSPENDED: remains SUSPENDED
+          - Otherwise: becomes ACTIVE
+          - Creates SubscriptionPeriod(source="MANUAL")
+        - If new_expiry_date in past or now:
+          - If SUSPENDED: remains SUSPENDED
+          - Otherwise: becomes EXPIRED
+        - Logs AuditEvent.SUBSCRIPTION_EXPIRY_SET
+        """
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+        if new_expiry_date.tzinfo is None:
+            new_expiry_date = new_expiry_date.replace(tzinfo=timezone.utc)
+
+        stmt = select(Master).where(Master.id == master_id).with_for_update()
+        res = await self.session.execute(stmt)
+        master = res.scalar_one_or_none()
+        if not master:
+            raise SubscriptionError(f"Master #{master_id} not found")
+
+        prev_status = master.subscription_status
+        prev_paid_until = master.paid_until
+
+        master.paid_until = new_expiry_date
+
+        if new_expiry_date <= now_utc:
+            if master.subscription_status != SubscriptionStatus.SUSPENDED:
+                master.subscription_status = SubscriptionStatus.EXPIRED
+        else:
+            if master.subscription_status != SubscriptionStatus.SUSPENDED:
+                master.subscription_status = SubscriptionStatus.ACTIVE
+
+            period = SubscriptionPeriod(
+                master_id=master.id,
+                plan_id=None,
+                status="ACTIVE",
+                source="MANUAL",
+                starts_at=now_utc,
+                ends_at=new_expiry_date,
+                amount=Decimal("0.00"),
+                currency="RUB",
+                external_payment_id=f"manual_set:{actor_user_id}:{int(now_utc.timestamp())}",
+            )
+            self.session.add(period)
+
+        audit = AuditLog(
+            master_id=master.id,
+            actor_user_id=actor_user_id,
+            action=AuditEvent.SUBSCRIPTION_EXPIRY_SET,
+            entity_type="Master",
+            entity_id=master.id,
+            payload_before={
+                "status": prev_status.value if prev_status else None,
+                "paid_until": prev_paid_until.isoformat() if prev_paid_until else None,
+            },
+            payload_after={
+                "status": master.subscription_status.value,
+                "paid_until": new_expiry_date.isoformat(),
+                "reason": reason,
+            },
+        )
+        self.session.add(audit)
+        await self.session.flush()
+        return new_expiry_date, master.subscription_status
 

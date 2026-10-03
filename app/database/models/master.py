@@ -27,6 +27,7 @@ from app.database.models.base import Base
 if TYPE_CHECKING:
     from app.database.models.subscription import SubscriptionPayment, SubscriptionPeriod
     from app.database.models.user import User
+    from app.database.models.staff import StaffMember
 
 
 class MasterStatus(str, enum.Enum):
@@ -54,6 +55,7 @@ class BotInstanceStatus(str, enum.Enum):
 class MasterAdminRole(str, enum.Enum):
     OWNER = "OWNER"
     ADMIN = "ADMIN"
+    STAFF = "STAFF"
 
 
 class Master(Base):
@@ -79,6 +81,7 @@ class Master(Base):
         nullable=False,
     )
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow", nullable=False)
+    activity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     trial_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     paid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -101,6 +104,9 @@ class Master(Base):
     )
     admins: Mapped[List["MasterAdmin"]] = relationship(
         "MasterAdmin", back_populates="master", cascade="all, delete-orphan"
+    )
+    staff_members: Mapped[List["StaffMember"]] = relationship(
+        "StaffMember", back_populates="master", cascade="all, delete-orphan"
     )
     subscription_periods: Mapped[List["SubscriptionPeriod"]] = relationship(
         "SubscriptionPeriod", back_populates="master", cascade="all, delete-orphan"
@@ -138,12 +144,22 @@ class BotInstance(Base):
     )
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     token_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    provisioning_source: Mapped[str] = mapped_column(
+        String(32), default="manual_token", server_default=text("'manual_token'"), nullable=False
+    )
+    managed_by_platform: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    telegram_owner_user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
 
     # Relationships
     master: Mapped["Master"] = relationship("Master", back_populates="bot_instances")
@@ -200,6 +216,7 @@ class MasterSettings(Base):
     working_hours_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     contacts_intro_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     telegram_username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    vk_profile: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     about_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     hold_duration_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     cancel_policy_hours: Mapped[int] = mapped_column(Integer, default=24, nullable=False)
@@ -241,6 +258,9 @@ class MasterAdmin(Base):
         default=MasterAdminRole.ADMIN,
         nullable=False,
     )
+    staff_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("staff_members.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -249,3 +269,4 @@ class MasterAdmin(Base):
     # Relationships
     master: Mapped["Master"] = relationship("Master", back_populates="admins")
     user: Mapped["User"] = relationship("User")
+    staff: Mapped[Optional["StaffMember"]] = relationship("StaffMember")

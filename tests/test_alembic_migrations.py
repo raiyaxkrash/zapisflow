@@ -8,6 +8,10 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import UniqueConstraint
+
+from app.database.models.master import BotInstance
+from app.database.models.subscription import SubscriptionPayment
 
 from tests.conftest import POSTGRES_AVAILABLE, TEST_DATABASE_URL, requires_postgres
 
@@ -44,9 +48,59 @@ def test_alembic_revision_graph_consistency() -> None:
     assert "2026_10_01_0013" in rev_ids
     assert "2026_10_01_0014" in rev_ids
     assert "2026_10_01_0015" in rev_ids
-    # 0015 is head, 0001 is base
-    assert rev_ids[0] == "2026_10_01_0015"
+    assert "2026_10_01_0016" in rev_ids
+    assert "2026_10_01_0017" in rev_ids
+    assert "2026_10_01_0018" in rev_ids
+    assert "2026_10_01_0019" in rev_ids
+    assert "2026_10_01_0020" in rev_ids
+    assert "2026_10_01_0021" in rev_ids
+    assert "2026_10_01_0022" in rev_ids
+    assert "2026_10_03_0023" in rev_ids
+    assert "2026_10_03_0024" in rev_ids
+    assert "2026_10_03_0025" in rev_ids
+    # Mini App security migration is head; 0001 is base.
+    assert rev_ids[0] == "2026_10_03_0025"
     assert rev_ids[-1] == "2026_09_30_0001"
+
+
+def test_subscription_checkout_reference_is_nullable_and_unique() -> None:
+    """Existing payments keep NULL while new checkout references cannot collide."""
+    table = SubscriptionPayment.__table__
+    assert table.c.checkout_ref.nullable is True
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and constraint.name == "uq_subscription_payment_checkout_ref"
+        and tuple(column.name for column in constraint.columns) == ("checkout_ref",)
+        for constraint in table.constraints
+    )
+
+
+def test_bot_instance_managed_bots_columns_exist() -> None:
+    """Verify that BotInstance table contains managed bot columns from migration 0023."""
+    table = BotInstance.__table__
+    assert "provisioning_source" in table.c
+    assert table.c.provisioning_source.nullable is False
+    assert "managed_by_platform" in table.c
+    assert table.c.managed_by_platform.nullable is False
+    assert "telegram_owner_user_id" in table.c
+    assert table.c.telegram_owner_user_id.nullable is True
+
+
+def test_managed_bot_creation_request_table_exists() -> None:
+    """Verify that ManagedBotCreationRequest table exists with all required columns and constraints."""
+    from app.database.models.managed_bot_request import ManagedBotCreationRequest
+    table = ManagedBotCreationRequest.__table__
+    assert "owner_user_id" in table.c
+    assert table.c.owner_user_id.nullable is False
+    assert "telegram_owner_user_id" in table.c
+    assert table.c.telegram_owner_user_id.nullable is False
+    assert "master_id" in table.c
+    assert table.c.master_id.nullable is False
+    assert "status" in table.c
+    assert table.c.status.nullable is False
+    assert "expires_at" in table.c
+    assert table.c.expires_at.nullable is False
+    assert "telegram_bot_id" in table.c
 
 
 @requires_postgres

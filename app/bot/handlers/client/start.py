@@ -12,8 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.client import MenuCallback, get_main_menu_keyboard
 from app.database.models.master import BotInstance, BotInstanceStatus
 from app.database.models.user import User
+from app.config.settings import settings
+from app.config.url_validation import miniapp_origin
 
 router = Router(name="client_start")
+
+
+def miniapp_url(bot_instance: Optional[BotInstance]) -> str | None:
+    if not settings.mini_app_base_url or bot_instance is None:
+        return None
+    return f"{miniapp_origin(settings.mini_app_base_url)}/b/{bot_instance.public_id}"
 
 
 @router.message(CommandStart())
@@ -65,13 +73,14 @@ async def cmd_start(
 
     await message.answer(
         text=text,
-        reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+        reply_markup=get_main_menu_keyboard(is_admin=is_admin, miniapp_url=miniapp_url(bot_instance)),
     )
 
 
 @router.callback_query(MenuCallback.filter(F.action == "main"))
 async def cb_main_menu(
-    callback: CallbackQuery, state: FSMContext, db_user: User, is_admin: bool
+    callback: CallbackQuery, state: FSMContext, db_user: User, is_admin: bool,
+    bot_instance: Optional[BotInstance] = None,
 ) -> None:
     """
     Return to main menu from any inline screen.
@@ -87,7 +96,7 @@ async def cb_main_menu(
     if callback.message:
         await callback.message.edit_text(
             text=text,
-            reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+            reply_markup=get_main_menu_keyboard(is_admin=is_admin, miniapp_url=miniapp_url(bot_instance)),
         )
     await callback.answer()
 
@@ -95,7 +104,8 @@ async def cb_main_menu(
 @router.message(Command("cancel"))
 @router.message(F.text.casefold() == "❌ отмена")
 async def cmd_cancel(
-    message: Message, state: FSMContext, db_user: User, is_admin: bool
+    message: Message, state: FSMContext, db_user: User, is_admin: bool,
+    bot_instance: Optional[BotInstance] = None,
 ) -> None:
     """
     Global cancellation handler that clears FSM state and removes reply keyboards.
@@ -109,5 +119,5 @@ async def cmd_cancel(
     )
     await message.answer(
         "Вы вернулись в главное меню:",
-        reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+        reply_markup=get_main_menu_keyboard(is_admin=is_admin, miniapp_url=miniapp_url(bot_instance)),
     )

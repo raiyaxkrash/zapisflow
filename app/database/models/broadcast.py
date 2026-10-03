@@ -59,6 +59,7 @@ class Broadcast(Base):
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     button_text: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     button_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    target_segment: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, default="ALL")
 
     status: Mapped[BroadcastStatus] = mapped_column(
         SQLEnum(BroadcastStatus, name="broadcast_status_enum", native_enum=True),

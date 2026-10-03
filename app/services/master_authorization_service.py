@@ -7,9 +7,11 @@ Enforces strict tenant-scoped administrative permissions based on:
 
 from enum import Enum
 from typing import List, Optional
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.master import Master, MasterAdminRole
+from app.database.models.staff import StaffMember
 from app.repositories.master_admin_repository import MasterAdminRepository
 from app.services.exceptions import AccessDeniedError
 
@@ -18,6 +20,7 @@ class AdminRole(str, Enum):
     """Domain representation of an administrative role within a specific master."""
     OWNER = "OWNER"
     ADMIN = "ADMIN"
+    STAFF = "STAFF"
     NONE = "NONE"
 
 
@@ -33,7 +36,8 @@ class MasterAuthorizationService:
         
         1. Checks Master.owner_user_id directly (dynamic owner resolution).
         2. If not primary owner, checks active entry in master_admins.
-        3. Returns AdminRole.NONE if user has no privileges.
+        3. If linked to an active staff member, returns STAFF.
+        4. Returns AdminRole.NONE if user has no privileges.
         """
         master = await self.session.get(Master, master_id)
         if not master:
@@ -50,8 +54,36 @@ class MasterAuthorizationService:
                 return AdminRole.OWNER
             elif admin_record.role == MasterAdminRole.ADMIN:
                 return AdminRole.ADMIN
+            elif admin_record.role == MasterAdminRole.STAFF:
+                return AdminRole.STAFF
+
+        # 3. Staff check (if user is linked to an active staff_member of this master)
+        staff_record = await self.session.scalar(
+            select(StaffMember).where(
+                StaffMember.master_id == master_id,
+                StaffMember.user_id == user_id,
+                StaffMember.is_active.is_(True),
+            )
+        )
+        if staff_record:
+            return AdminRole.STAFF
 
         return AdminRole.NONE
+
+    async def get_staff_id_for_user(self, master_id: int, user_id: int) -> Optional[int]:
+        """Fetch StaffMember.id for a user within this master if linked."""
+        res = await self.session.scalar(
+            select(StaffMember.id).where(
+                StaffMember.master_id == master_id,
+                StaffMember.user_id == user_id,
+                StaffMember.is_active.is_(True),
+            )
+        )
+        return res
+
+    async def is_staff_only(self, master_id: int, user_id: int) -> bool:
+        """Check whether the user is strictly a regular staff specialist (not owner/admin)."""
+        return (await self.get_role(master_id, user_id)) == AdminRole.STAFF
 
     async def is_owner(self, master_id: int, user_id: int) -> bool:
         """Check whether the user is owner of the master."""

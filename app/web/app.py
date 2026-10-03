@@ -12,32 +12,43 @@ import logging
 import secrets
 from typing import Any, AsyncGenerator, Optional
 import uuid
+import re
+from urllib.parse import parse_qs
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from redis.asyncio import Redis
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.bot_instance import create_dispatcher
 from app.config.settings import settings
+from app.core.token_crypto import TokenCrypto
 from app.core.security import install_sensitive_logging
 from app.database.models.master import BotInstanceStatus
+from app.database.models.subscription import SubscriptionPayment
 from app.database.session import async_session_factory, close_db, engine, init_db
 from app.manager_bot.dispatcher import create_manager_dispatcher
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.scheduler import MultiTenantScheduler
 from app.services.bot_registry import BotRegistry
+from app.services.bot_factory import BotFactory
+from app.services.billing.yookassa_checkout import YooKassaCheckoutService
+from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError
+from app.services.billing.checkout_session import CheckoutSessionNotFound, CheckoutSessionService
+from app.web.billing_pages import checkout_page, status_page
 from app.services.exceptions import (
     BotDisabledError,
     BotNotFoundError,
     BotProvisioningError,
     BotRegistryError,
     BotUnavailableError,
+    SubscriptionError,
 )
 from app.services.update_dedup import (
     DedupState,
@@ -46,6 +57,83 @@ from app.services.update_dedup import (
 )
 
 logger = logging.getLogger("app.web.app")
+
+BILLING_PAGE_HEADERS = {
+    "Cache-Control": "no-store, max-age=0",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+async def _notify_inactive_bot_update(
+    bot_instance: Any,
+    update: Update,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Tell users that an old/disabled bot is no longer the active project bot.
+
+    This path is intentionally outside BotRegistry: the instance is ineligible
+    for business handling, but its own Telegram token can safely answer the
+    update with a static, tenant-neutral notice. No update is sent to handlers.
+    """
+    if not bot_instance.encrypted_token or not bot_instance.telegram_bot_id:
+        logger.warning(
+            "Inactive bot update acknowledged without notification: bot_instance_id=%s",
+            bot_instance.id,
+        )
+        return
+
+    text = "Этот бот больше не активен. Откройте актуального бота проекта."
+    try:
+        async with session_factory() as session:
+            current = await BotInstanceRepository(session).get_current_for_master(
+                bot_instance.master_id
+            )
+        if current and current.telegram_username and re.fullmatch(
+            r"[A-Za-z0-9_]{5,32}", current.telegram_username
+        ):
+            text += f"\n\nАктуальный бот: @{current.telegram_username}"
+
+        token = TokenCrypto().decrypt(
+            bot_instance.encrypted_token,
+            associated_data=bot_instance.telegram_bot_id,
+        )
+        bot = BotFactory.create(token)
+        try:
+            if update.callback_query:
+                await bot.answer_callback_query(
+                    callback_query_id=update.callback_query.id,
+                    text=text,
+                    show_alert=True,
+                )
+            else:
+                message = update.message or update.edited_message
+                if message and message.chat.type == "private":
+                    await bot.send_message(message.chat.id, text)
+        finally:
+            await bot.session.close()
+    except TelegramBadRequest as exc:
+        lowered = str(exc).lower()
+        if "query is too old" in lowered or "query id is invalid" in lowered:
+            logger.debug(
+                "Could not answer stale callback for inactive bot_instance_id=%s",
+                bot_instance.id,
+            )
+        else:
+            logger.warning(
+                "Could not notify user about inactive bot_instance_id=%s error_type=%s",
+                bot_instance.id,
+                type(exc).__name__,
+            )
+    except Exception as exc:
+        # Never include exception text: Telegram transport exceptions may embed
+        # the bot token URL.
+        logger.warning(
+            "Could not notify user about inactive bot_instance_id=%s error_type=%s",
+            bot_instance.id,
+            type(exc).__name__,
+        )
 
 
 async def read_limited_request_body(request: Request, max_bytes: int) -> bytes:
@@ -82,6 +170,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Strict production configuration check (fail fast on invalid config)
     settings.validate_production_configuration()
+    settings.validate_payment_configuration()
 
     # Initialize Database if not already done
     await init_db()
@@ -202,6 +291,9 @@ def create_app(
     app.state.manager_bot = manager_bot
     app.state.scheduler = scheduler
 
+    from app.web.miniapp import install_miniapp
+    install_miniapp(app)
+
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next: Any) -> Response:
         """Trace each incoming request with a unique correlation ID."""
@@ -218,6 +310,169 @@ def create_app(
     async def health_live() -> dict[str, str]:
         """Lightweight liveness probe."""
         return {"status": "alive"}
+
+    def billing_services() -> tuple[CheckoutSessionService, YooKassaCheckoutService]:
+        session_maker = app.state.session_factory or async_session_factory
+        shop_id, secret_key = settings.yookassa_credentials
+        checkout = YooKassaCheckoutService(session_maker, YooKassaClient(shop_id, secret_key))
+        return CheckoutSessionService(session_maker, checkout), checkout
+
+    @app.get("/billing/checkout/{token}", tags=["billing"])
+    async def billing_checkout_page(token: str) -> HTMLResponse:
+        if settings.payment_provider.lower() != "yookassa_web":
+            raise HTTPException(status_code=404, detail="Not found")
+        if settings.yookassa_fiscal_mode == "self_employed":
+            return HTMLResponse(
+                status_page("Ссылка устарела", "Запросите новую ссылку в боте."),
+                status_code=410, headers=BILLING_PAGE_HEADERS,
+            )
+        sessions, _ = billing_services()
+        try:
+            offer = await sessions.inspect(token)
+        except CheckoutSessionNotFound:
+            raise HTTPException(status_code=404, detail="Not found")
+        except SubscriptionError:
+            return HTMLResponse(
+                status_page("Ссылка недействительна", "Запросите новую ссылку на оплату. "),
+                status_code=410,
+                headers=BILLING_PAGE_HEADERS,
+            )
+        return HTMLResponse(checkout_page(token, offer), headers=BILLING_PAGE_HEADERS)
+
+    @app.post("/billing/checkout/{token}/pay", tags=["billing"])
+    async def billing_checkout_pay(token: str, request: Request) -> Response:
+        if settings.payment_provider.lower() != "yookassa_web":
+            raise HTTPException(status_code=404, detail="Not found")
+        if settings.yookassa_fiscal_mode == "self_employed":
+            return HTMLResponse(
+                status_page("Ссылка устарела", "Запросите новую ссылку в боте."),
+                status_code=410, headers=BILLING_PAGE_HEADERS,
+            )
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+            raise HTTPException(status_code=415, detail="Unsupported form encoding")
+        raw = await read_limited_request_body(request, 4096)
+        try:
+            form = parse_qs(raw.decode("utf-8"), keep_blank_values=True, max_num_fields=8)
+            email_fields = form.get("email", [])
+            if len(email_fields) != 1:
+                raise ValueError("one email field required")
+            settings.validate_receipt_configuration()
+        except (UnicodeError, ValueError):
+            return HTMLResponse(
+                status_page("Оплата недоступна", "Проверьте email для чека или обратитесь в поддержку."),
+                status_code=400,
+                headers=BILLING_PAGE_HEADERS,
+            )
+
+        sessions, checkout = billing_services()
+        try:
+            offer, receipt_email = await sessions.consume(token, email_fields[0])
+        except CheckoutSessionNotFound:
+            raise HTTPException(status_code=404, detail="Not found")
+        except SubscriptionError:
+            return HTMLResponse(
+                status_page("Ссылка недействительна", "Запросите новую ссылку на оплату."),
+                status_code=410,
+                headers=BILLING_PAGE_HEADERS,
+            )
+
+        receipt = settings.build_yookassa_receipt(
+            email=receipt_email,
+            description=f"{offer.plan_name}: подписка на {offer.period_days} дней",
+            amount=offer.amount,
+        )
+        try:
+            redirect = await checkout.start_checkout(
+                checkout_ref=offer.checkout_ref,
+                actor_user_id=offer.user_id,
+                receipt=receipt,
+            )
+        except (YooKassaGatewayError, SubscriptionError):
+            logger.error("External checkout could not start for local payment_id=%s", offer.payment_id)
+            return HTMLResponse(
+                status_page("Не удалось открыть оплату", "Напишите в поддержку для проверки заказа."),
+                status_code=503,
+                headers=BILLING_PAGE_HEADERS,
+            )
+        if redirect.confirmation_url is None:
+            return RedirectResponse("/billing/success", status_code=303, headers=BILLING_PAGE_HEADERS)
+        return RedirectResponse(redirect.confirmation_url, status_code=303, headers=BILLING_PAGE_HEADERS)
+
+    @app.get("/billing/success", tags=["billing"])
+    async def billing_success() -> HTMLResponse:
+        return HTMLResponse(
+            status_page("Проверяем оплату", "Статус подписки обновится после подтверждения платежа ЮKassa."),
+            headers=BILLING_PAGE_HEADERS,
+        )
+
+    @app.get("/billing/yookassa/return", tags=["billing"])
+    async def billing_yookassa_return() -> HTMLResponse:
+        """A browser return is informational; only verified API state activates access."""
+        return HTMLResponse(
+            status_page("Проверяем оплату", "Статус подписки обновится после подтверждения платежа ЮKassa."),
+            headers=BILLING_PAGE_HEADERS,
+        )
+
+    @app.get("/billing/cancel", tags=["billing"])
+    async def billing_cancel() -> HTMLResponse:
+        return HTMLResponse(
+            status_page("Оплата не завершена", "Если возникли проблемы с оплатой, обратитесь в поддержку."),
+            headers=BILLING_PAGE_HEADERS,
+        )
+
+    @app.post("/billing/yookassa/webhook", tags=["billing"])
+    async def yookassa_webhook(request: Request) -> dict[str, bool]:
+        """Reconcile a provider event against authenticated YooKassa API state.
+
+        The notification body is only a lookup hint. It never activates a
+        subscription on its own, and no browser redirect can call this path.
+        """
+        if settings.payment_provider.lower() != "yookassa_web":
+            raise HTTPException(status_code=404, detail="Not found")
+        raw_body = await read_limited_request_body(request, min(settings.webhook_max_body_bytes, 65536))
+        try:
+            event = json.loads(raw_body)
+            if not isinstance(event, dict) or event.get("event") not in {
+                "payment.succeeded", "payment.canceled"
+            }:
+                return {"ok": True}
+            payment_data = event["object"]
+            payment_id = payment_data["id"]
+            checkout_ref = uuid.UUID(payment_data["metadata"]["checkout_ref"])
+            if not isinstance(payment_id, str) or len(payment_id) > 128:
+                raise ValueError("invalid payment id")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise HTTPException(status_code=400, detail="Invalid notification")
+
+        # Do not send arbitrary IDs to the provider API. An unknown opaque
+        # checkout reference cannot correspond to one of our orders.
+        session_maker = app.state.session_factory or async_session_factory
+        async with session_maker() as session:
+            known = await session.scalar(
+                select(SubscriptionPayment.id).where(
+                    SubscriptionPayment.checkout_ref == checkout_ref,
+                    SubscriptionPayment.provider == "YOOKASSA",
+                )
+            )
+        if known is None:
+            return {"ok": True}
+
+        shop_id, secret_key = settings.yookassa_credentials
+        service = YooKassaCheckoutService(
+            session_maker,
+            YooKassaClient(shop_id, secret_key),
+        )
+        try:
+            await service.reconcile(payment_id)
+        except YooKassaGatewayError:
+            logger.error("YooKassa verification temporarily unavailable")
+            raise HTTPException(status_code=503, detail="Verification unavailable")
+        except (SubscriptionError, ValueError):
+            # Verified mismatch is permanent and needs operator review. Do not
+            # echo provider fields or attempt to apply the payment.
+            logger.error("YooKassa notification did not match local payment_id=%s", known)
+            return {"ok": True}
+        return {"ok": True}
 
     @app.get("/health/ready", tags=["health"])
     async def health_ready() -> JSONResponse:
@@ -305,27 +560,8 @@ def create_app(
                 detail="Forbidden: Invalid secret token",
             )
 
-        # 5. Check if BotInstance is in an inactive/forbidden status
-        if not bot_instance.is_current or bot_instance.status in (
-            BotInstanceStatus.DISABLED,
-            BotInstanceStatus.ERROR,
-            BotInstanceStatus.PROVISIONING,
-        ):
-            logger.warning(
-                "Bot instance #%s has inactive status %s, rejecting update",
-                bot_instance.id,
-                bot_instance.status,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"Bot instance is {bot_instance.status.value}"
-                    if bot_instance.status != BotInstanceStatus.ACTIVE
-                    else "Bot instance unavailable"
-                ),
-            )
-
-        # 6. Parse and validate Telegram Update payload
+        # 5. Parse and validate Telegram Update payload before lifecycle policy,
+        # so stale bots can acknowledge callbacks/messages with a clear notice.
         try:
             update_data = json.loads(raw_body.decode("utf-8"))
             update = Update.model_validate(update_data)
@@ -340,6 +576,50 @@ def create_app(
                 detail="Invalid update payload",
             )
 
+        if update.callback_query:
+            ingress_type = "callback_query"
+            ingress_action = (update.callback_query.data or "").split(":", 1)[0][:32]
+        elif update.message:
+            ingress_type = "message"
+            ingress_action = "-"
+        else:
+            ingress_type = "other"
+            ingress_action = "-"
+        logger.info(
+            "Telegram webhook received: update_id=%s bot_instance_id=%s master_id=%s "
+            "status=%s current=%s type=%s callback_prefix=%s",
+            update.update_id,
+            bot_instance.id,
+            bot_instance.master_id,
+            bot_instance.status,
+            bot_instance.is_current,
+            ingress_type,
+            ingress_action or "<empty>",
+        )
+
+        # 6. Never dispatch updates for a replaced or administratively stopped
+        # instance. Return 200 after a user-facing notice so Telegram does not
+        # retry the same stale update forever. A current PROVISIONING instance
+        # is transient, so Telegram may retry it briefly.
+        if not bot_instance.is_current or bot_instance.status in (
+            BotInstanceStatus.DISABLED,
+            BotInstanceStatus.ERROR,
+        ):
+            logger.warning(
+                "Bot instance #%s is inactive (status=%s current=%s); acknowledging without dispatch",
+                bot_instance.id,
+                bot_instance.status,
+                bot_instance.is_current,
+            )
+            await _notify_inactive_bot_update(
+                bot_instance,
+                update,
+                session_maker,
+            )
+            return {"ok": True, "status": "inactive_bot"}
+        if bot_instance.status == BotInstanceStatus.PROVISIONING:
+            raise HTTPException(status_code=503, detail="Bot is provisioning")
+
         # 7. Deduplication check in Redis
         deduplicator: UpdateDeduplicator = app.state.deduplicator
         try:
@@ -347,14 +627,43 @@ def create_app(
         except DedupUnavailableError:
             raise HTTPException(status_code=503, detail="Update deduplication unavailable")
         if acquired.state == DedupState.COMPLETED:
+            logger.info(
+                "Telegram webhook duplicate completed: update_id=%s bot_instance_id=%s master_id=%s",
+                update.update_id,
+                bot_instance.id,
+                bot_instance.master_id,
+            )
             return {"ok": True, "status": "duplicate"}
         if acquired.state == DedupState.PROCESSING:
             # Telegram must retry if the first replica crashes mid-handler.
+            logger.warning(
+                "Telegram webhook update already processing: update_id=%s bot_instance_id=%s master_id=%s",
+                update.update_id,
+                bot_instance.id,
+                bot_instance.master_id,
+            )
             raise HTTPException(status_code=503, detail="Update is still processing")
         claim = acquired.claim
         assert claim is not None
 
         try:
+            if update.callback_query:
+                update_type = "callback_query"
+                callback_prefix = (update.callback_query.data or "").split(":", 1)[0][:32]
+            elif update.message:
+                update_type = "message"
+                callback_prefix = "-"
+            else:
+                update_type = "other"
+                callback_prefix = "-"
+            logger.info(
+                "Dispatching Telegram update: update_id=%s bot_instance_id=%s master_id=%s type=%s callback_prefix=%s",
+                update.update_id,
+                bot_instance.id,
+                bot_instance.master_id,
+                update_type,
+                callback_prefix or "<empty>",
+            )
             # 8. Retrieve aiogram.Bot from BotRegistry
             registry: BotRegistry = app.state.registry
             async with session_maker() as session:

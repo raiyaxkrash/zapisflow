@@ -14,6 +14,11 @@ class ServiceCallback(CallbackData, prefix="svc"):
     service_id: int
 
 
+class StaffChoiceCallback(CallbackData, prefix="stf"):
+    action: str  # "select", "any"
+    staff_id: int = 0
+
+
 class CalendarNavCallback(CallbackData, prefix="cal"):
     action: str  # "prev_month", "next_month", "select_day", "ignore"
     year: int
@@ -29,6 +34,10 @@ class TimeSlotCallback(CallbackData, prefix="slot"):
 class BookingActionCallback(CallbackData, prefix="book"):
     action: str  # "agree_policy", "cancel_policy", "i_paid", "cancel_booking", "detail", "client_cancel"
     appointment_id: int = 0
+
+
+class PolicyAgreementCallback(CallbackData, prefix="policy"):
+    confirmation_id: str
 
 
 class PortfolioNavCallback(CallbackData, prefix="port"):

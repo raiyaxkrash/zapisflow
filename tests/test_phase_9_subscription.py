@@ -632,7 +632,7 @@ async def test_12_renewal_from_future_paid_until_preserves_days(pg_engine: Async
         payment, intent = await sub_service.create_subscription_payment(
             master_id=master.id,
             actor_user_id=owner.id,
-            plan_code="BASIC",
+            plan_code="basic_monthly",
         )
         await session.commit()
 
@@ -673,7 +673,7 @@ async def test_13_renewal_during_trial_preserves_remaining_trial(pg_engine: Asyn
         payment, intent = await sub_service.create_subscription_payment(
             master_id=master.id,
             actor_user_id=owner.id,
-            plan_code="BASIC",
+            plan_code="basic_monthly",
         )
         await session.commit()
 
@@ -713,7 +713,7 @@ async def test_14_payment_callback_idempotency_no_double_extension(pg_engine: As
         payment, intent = await sub_service.create_subscription_payment(
             master_id=master.id,
             actor_user_id=owner.id,
-            plan_code="BASIC",
+            plan_code="basic_monthly",
         )
         await session.commit()
 
@@ -758,7 +758,7 @@ async def test_same_payment_concurrent_confirmation_creates_one_period(pg_engine
             trial_ends_at=datetime.now(timezone.utc) - timedelta(days=1),
         )
         payment, _ = await SubscriptionService(session).create_subscription_payment(
-            master.id, owner.id, plan_code="BASIC"
+            master.id, owner.id, plan_code="basic_monthly"
         )
         master_id, payment_id = master.id, payment.id
         provider, provider_payment_id = payment.provider, payment.provider_payment_id
@@ -796,7 +796,7 @@ async def test_payment_does_not_clear_administrative_suspension(pg_engine: Async
             session, owner.id, "Suspended Payment", SubscriptionStatus.SUSPENDED
         )
         payment, _ = await SubscriptionService(session).create_subscription_payment(
-            master.id, owner.id, plan_code="BASIC"
+            master.id, owner.id, plan_code="basic_monthly"
         )
         await session.commit()
         assert await SubscriptionService(session).process_successful_payment(
@@ -831,7 +831,7 @@ async def test_payment_terms_must_match_plan_before_extension(
             trial_ends_at=datetime.now(timezone.utc) - timedelta(days=1),
         )
         payment, _ = await SubscriptionService(session).create_subscription_payment(
-            master.id, owner.id, plan_code="BASIC"
+            master.id, owner.id, plan_code="basic_monthly"
         )
         setattr(payment, field, invalid_value)
         await session.commit()
@@ -893,10 +893,10 @@ async def test_15_concurrent_successful_payments_both_accounted(pg_engine: Async
 
         sub_service = SubscriptionService(session)
         p1, _ = await sub_service.create_subscription_payment(
-            master_id=master.id, actor_user_id=owner.id, plan_code="BASIC"
+            master_id=master.id, actor_user_id=owner.id, plan_code="basic_monthly"
         )
         p2, _ = await sub_service.create_subscription_payment(
-            master_id=master.id, actor_user_id=owner.id, plan_code="BASIC"
+            master_id=master.id, actor_user_id=owner.id, plan_code="basic_monthly"
         )
         await session.commit()
 
@@ -947,7 +947,7 @@ async def test_16_failed_and_pending_payments_do_not_activate(pg_engine: AsyncEn
         payment, intent = await sub_service.create_subscription_payment(
             master_id=master.id,
             actor_user_id=owner.id,
-            plan_code="BASIC",
+            plan_code="basic_monthly",
         )
         await session.commit()
 
@@ -982,7 +982,7 @@ async def test_17_idor_protection_non_owner_cannot_create_or_view_payment(pg_eng
             await sub_service.create_subscription_payment(
                 master_id=master.id,
                 actor_user_id=attacker.id,
-                plan_code="BASIC",
+                plan_code="basic_monthly",
             )
 
 
@@ -1089,13 +1089,16 @@ async def test_20_manager_bot_subscription_screen_and_renewal(pg_engine: AsyncEn
 
         sub_service = SubscriptionService(session)
         plans = await sub_service.list_active_plans()
-        assert len(plans) >= 3  # 1M, 3M, 12M seeded in migration 0008
+        assert "basic_monthly" in {plan.code for plan in plans}
+        assert not {"basic_3_months", "basic_6_months", "basic_yearly"} & {
+            plan.code for plan in plans
+        }
 
-        # Simulate user choosing 1M (BASIC)
+        # Simulate the owner choosing the approved monthly plan.
         payment, intent = await sub_service.create_subscription_payment(
             master_id=master.id,
             actor_user_id=owner.id,
-            plan_code="BASIC",
+            plan_code="basic_monthly",
         )
         await session.commit()
 

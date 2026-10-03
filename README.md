@@ -1,305 +1,239 @@
-# ⚡ ZapisFlow — Мультитенантная SaaS-платформа онлайн-записи в Telegram
+# ZapisFlow
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![aiogram 3.x](https://img.shields.io/badge/aiogram-3.14+-green.svg)](https://docs.aiogram.dev/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
-[![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-blue.svg)](https://www.postgresql.org/)
-[![Redis 7](https://img.shields.io/badge/Redis-7-red.svg)](https://redis.io/)
-[![SQLAlchemy 2.0](https://img.shields.io/badge/SQLAlchemy-2.0-red.svg)](https://docs.sqlalchemy.org/)
-[![Alembic](https://img.shields.io/badge/Alembic-Migrations-orange.svg)](https://alembic.sqlalchemy.org/)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/tests-237%20passed-success.svg)](https://github.com/raiyaxkrash/zapisflow)
+ZapisFlow — сервис записи клиентов через Telegram. Каждый мастер или студия ведёт отдельный проект со своим клиентским ботом, услугами, сотрудниками, расписанием, записями и CRM.
 
-**ZapisFlow** — это промышленная мультитенантная облачная платформа для автоматизации онлайн-записи, предоплат и управления студиями красоты через персональных Telegram-ботов мастеров.
+## Что такое ZapisFlow
 
-Платформа позволяет мастерам подключать собственных Telegram-ботов без навыков программирования за 2 минуты, а клиентам — записываться на процедуры через современный Single-Message интерфейс без спама в чате.
+Платформа предназначена для частных мастеров и небольших студий: бьюти-мастеров, специалистов по волосам, барберов, визажистов, массажистов и других специалистов, работающих по предварительной записи. Проекты изолированы друг от друга; один владелец может создать несколько проектов и подключить к ним отдельные Telegram-боты.
 
----
+## Возможности
 
-## 🌟 Архитектура платформы
+### Для мастера
 
-```
-                   Telegram API Cloud
-                           │
-                           │ HTTPS Webhooks
-                           ▼
-                  Reverse Proxy (Caddy / NGINX)
-                           │ (TLS 1.2/1.3, Rate-Limit, 2MB Body Limit)
-                           ▼
-            ┌─────────────────────────────────────────┐
-            │       FastAPI Webhook Ingestion         │
-            ├─────────────────────────────────────────┤
-            │  /telegram/manager-webhook (Manager)   │
-            │  /telegram/webhook/{public_id} (Bots)   │
-            │  /health/live & /health/ready           │
-            └──────────────┬──────────────────────────┘
-                           │
-              ┌────────────┴────────────┐
-              ▼                         ▼
-      Platform Manager Bot      Dynamic BotRegistry
-      • Онбординг мастеров      • AES-256-GCM + AAD
-      • Токены через BotFather  • Кэширование экземпляров
-      • Управление подписками   • Redis Pub/Sub инвалидация
-              │                         │
-              └────────────┬────────────┘
-                           ▼
-                TenantContextMiddleware
-                           ▼
-               Shared aiogram Dispatcher
-                           │
-             ┌─────────────┴─────────────┐
-             ▼                           ▼
-     Client Experience            Master Admin CRM
-     • Выбор мастера и услуги    • Подтверждение предоплат
-     • Интерактивный календарь   • Журнал записей и график
-     • Расчёт окон SlotEngine    • Клиентская база и LTV
-     • Защита от овербукинга     • Финансовая аналитика
-                           │
-                           ▼
-        ┌───────────────────────────────────────┐
-        │  Multi-Replica Multi-Tenant Scheduler │
-        │  • Очистка броней (Hold Cleaner)      │
-        │  • Генерация и доставка напоминаний   │
-        │  • Жизненный цикл подписок            │
-        │  • Распределённые Advisory Locks      │
-        └──────────────────┬────────────────────┘
-                           │
-             ┌─────────────┴─────────────┐
-             ▼                           ▼
-       PostgreSQL 16                  Redis 7
-     (БД & Аудит-логи)         (FSM, Дедупликация, Locks)
+- Создание проекта и начальная настройка в Manager Bot.
+- Подключение собственного Telegram-бота через токен BotFather, проверка готовности и включение/отключение webhook.
+- Каталог услуг: описание, цена, длительность, буфер и размер предоплаты.
+- Настройка реквизитов проекта для клиентской предоплаты; готовность проекта к активации проверяется с учётом услуг, где предоплата задана.
+- Еженедельное расписание, перерывы, отдельные рабочие даты, выходные и блокировка интервалов; настраиваемые часовой пояс, минимальное время до визита и горизонт записи.
+- Несколько сотрудников в проекте, привязка сотрудников к услугам и отдельное расписание.
+- Управление записями: просмотр, подтверждение/отмена, перенос, завершение визита и отметка неявки.
+- Входящие подтверждения клиентской предоплаты, карточки клиентов с историей и заметками, поиск и сегменты CRM.
+- Контакты проекта, портфолио, просмотр отзывов и статистика.
+- Создание и возобновление рассылок по клиентским сегментам.
+- Настройка клиентских напоминаний и параметров записи.
+
+### Для клиента
+
+Клиентский бот показывает услуги, портфолио, контакты и информацию о мастере. Клиент выбирает сотрудника/услугу, дату и свободное время, создаёт запись, просматривает и отменяет свои записи. Если у услуги задана предоплата, бот показывает реквизиты проекта, принимает фото или документ подтверждения, а мастер проверяет оплату. Перенос записи клиент согласует с мастером; самостоятельный перенос доступен мастеру в панели проекта.
+
+Клиент также может оставить отзыв после визита. Напоминания о предстоящей записи отправляются фоновыми задачами, если они включены в настройках проекта.
+
+### Для команды проекта
+
+Роли `OWNER`, `ADMIN` и `STAFF` проверяются в контексте конкретного проекта. Владелец управляет проектом и его подпиской; администратор ведёт рабочие данные в пределах разрешений; сотрудник получает доступ к разрешённым операциям по своему расписанию и записям. Для сотрудников предусмотрены приглашение и назначение услуг.
+
+### Platform Admin
+
+В отдельной админке того же Manager Bot пользователям платформы с правами Platform Admin доступны Dashboard, пользователи, проекты, клиентские боты, подписки, платежи, тарифы и сводные SaaS-показатели. Доступ ограничен проверкой Platform Admin и не предоставляется обычным владельцам проектов.
+
+## Как работает
+
+У ZapisFlow есть три интерфейса:
+
+- **Manager Bot** — регистрация пользователя, создание проектов, настройка проекта, подключение клиентского бота и управление подпиской.
+- **Client Bot** — отдельный бот проекта для записи и взаимодействия с его клиентами. Входящий webhook определяет tenant по связанному `BotInstance`, а не по данным кнопки или клиента.
+- **Platform Admin** — административные разделы платформы внутри Manager Bot, закрытые отдельной авторизацией.
+
+Клиентская предоплата и SaaS-платёж — разные процессы. Клиентская предоплата относится к записи и оплачивается мастеру по его реквизитам; подтверждение чека выполняет мастер. SaaS-платёж относится к подписке владельца проекта на ZapisFlow и обрабатывается отдельно через YooKassa, если провайдер включён.
+
+## Архитектура
+
+```text
+Telegram
+   ↓ HTTPS
+Caddy
+   ↓
+FastAPI webhook gateway
+   ├─ Manager Bot dispatcher
+   └─ public bot ID → BotRegistry → BotInstance → aiogram dispatcher
+                                      ↓
+                              middleware, handlers
+                                      ↓
+                              services / repositories
+                                ↙             ↘
+                         PostgreSQL           Redis
 ```
 
----
+FastAPI проверяет входящие webhook-запросы и маршрутизирует обновления. Для клиентских ботов `BotRegistry` разрешает `BotInstance`, допущенный политикой состояния (`ACTIVE` или предусмотренный кодом `SETUP_REQUIRED`), использует зашифрованный токен и создаёт/переиспользует runtime-бота. Отключённые экземпляры не обслуживаются. Dispatcher подключает роутеры клиентского интерфейса и панели проекта. PostgreSQL хранит бизнес-данные; Redis используется для FSM, дедупликации обновлений и уведомления экземпляров приложения об инвалидировании кэша.
 
-## 🚀 Ключевые возможности
+Отправка исходящих сообщений выполняется через **Telegram Outbox**: строка outbox и бизнес-изменение фиксируются в одной транзакции PostgreSQL, после чего фоновый worker отправляет сообщение. Это позволяет восстановить незавершённую доставку после сбоя. Telegram Bot API не поддерживает атомарную транзакцию с PostgreSQL, поэтому при сбое после принятия сообщения Telegram, но до фиксации `SENT`, уведомление может быть отправлено повторно. Бизнес-изменения защищаются отдельно идемпотентностью и ограничениями базы данных.
 
-### 🏢 Платформенный управляющий бот (Manager Bot):
-- **Автоматический онбординг мастера:**
-  - Создание студии (Master) и пошаговый мастер подключения бота.
-  - Проверка токена через Telegram `getMe`, валидация коллизий и защита от дублирования.
-  - Автоматическая регистрация вебхука с уникальным `public_id` UUID и секретным токеном `X-Telegram-Bot-Api-Secret-Token`.
-  - Безопасная ротация токенов и отключение/включение бота в 1 клик.
-- **SaaS-подписки и биллинг:**
-  - Пробный период 14 дней (`TRIAL`) при регистрации без ввода карты.
-  - Прозрачный переход между тарифами (месяц, квартал, год).
-  - При истечении тарифа (`EXPIRED`) доступ мастера к данным и клиентской базе сохраняется в полном объёме; онлайн-запись вежливо уведомляет клиентов о регламентных работах.
-  - Защита от несанкционированного ручного продления в продакшене.
+## Технологии
 
-### 👤 Клиентский опыт в боте мастера (Customer Experience):
-- **Single-Message UI:** Навигация и выбор слота происходят редактированием одного сообщения — чат остаётся безупречно чистым.
-- **Умный расчёт свободных окон (`SlotEngine`):**
-  - Учитывает индивидуальную длительность процедуры и обязательный буфер мастера после каждого клиента.
-  - Учитывает рабочий график, перерывы на обед, выходные дни и исключения.
-- **100% гарантия от овербукинга (Double-Booking Prevention):**
-  - Механизм временного удержания слота (`HOLD`) на 30 минут для перевода предоплаты.
-  - Строгие ограничения `EXCLUSION CONSTRAINT` на уровне PostgreSQL 16 с использованием `btree_gist` и блокировки `SELECT ... FOR UPDATE`.
-- **Предоплата и загрузка чека:**
-  - Автоматический расчёт суммы (фиксированная или % от услуги).
-  - Реквизиты мастера с удобным копированием номера карты.
-  - Загрузка чека (фотографией или документом) для быстрой сверки.
-- **Личный кабинет «Мои записи»:**
-  - Просмотр актуальных и прошедших визитов, отмена с учётом политики студии.
-- **Портфолио и контакты:**
-  - Галерея работ по категориям, адрес, схема проезда и ссылки на соцсети.
+| Компонент | Версия в конфигурации проекта |
+| --- | --- |
+| Python | 3.12 в Docker-образе; пакет заявляет совместимость с Python 3.11+ |
+| FastAPI / Uvicorn | `>=0.115.0` / `>=0.30.0` |
+| aiogram | `3.14.0` |
+| PostgreSQL / Redis | `16-alpine` / `7-alpine` |
+| SQLAlchemy / asyncpg | `2.0.35` / `0.29.0` |
+| Alembic | `1.13.3` |
+| YooKassa | HTTP API-клиент и redirect checkout |
+| Reverse proxy | Docker Compose и Caddy `2-alpine` |
 
-### 👑 Кабинет мастера в боте (`/admin`):
-- **Входящие чеки (Inbox):** Мгновенные уведомления о новых оплатах с кнопками подтверждения или аргументированного отклонения («Не поступил платёж», «Неверная сумма», «Нечитаемый чек»).
-- **Журнал визитов:** Фильтры по статусам (*Сегодня*, *Завтра*, *Ожидают проверки*, *Ожидают оплаты*), карточка визита, перенос даты (*Reschedule*), отметка о неявке (*No-Show*).
-- **Гибкий график:** Быстрое закрытие дат, индивидуальные часы работы на конкретный день, блокировка перерывов.
-- **Ручная запись клиентов (Walk-in):** Быстрое добавление записи мастером без прохождения клиентского пути.
-- **Клиентская база (CRM):** Поиск гостей по имени, телефону или `@username`, расчёт **LTV** (совокупный доход), процент отмен, заметки о предпочтениях.
-- **Автоматические напоминания клиентам:**
-  - За 24 часа: напоминание о записи на завтра с суммой к доплате на месте.
-  - За 3 часа: финальное напоминание с адресом студии.
-- **Бизнес-аналитика:** Доход от услуг, удержанные предоплаты, валовая прибыль, средний чек, топ услуг за день, месяц или за всё время.
+Точные Python-зависимости зафиксированы в `requirements.txt`; диапазоны проектных метаданных находятся в `pyproject.toml`.
 
----
+## Структура проекта
 
-## 🛠 Технологический стек
-
-| Направление | Стек | Назначение |
-|---|---|---|
-| **Язык разработки** | Python 3.12+ | Строгая типизация, современный асинхронный синтаксис |
-| **Telegram Framework** | `aiogram 3.14+` | Асинхронные роутеры, фильтры, FSM и middlewares |
-| **HTTP Webhook Engine** | `FastAPI` + `uvicorn` | Приём входящих апдейтов, потоковый лимитер, health checks |
-| **База данных** | PostgreSQL 16 | Реляционные данные, `btree_gist` exclusion constraints |
-| **ORM / Драйвер** | `SQLAlchemy 2.0` + `asyncpg` | Асинхронный пул соединений, строгая типизация Mapped |
-| **Миграции БД** | `Alembic` | Версионирование структуры таблиц (0001–0008) |
-| **Кэш & Брокер** | `Redis 7` | FSM состояний, дедупликация апдейтов, Pub/Sub инвалидация |
-| **Криптография** | `cryptography` (AES-256-GCM) | Аутентифицированное шифрование токенов ботов с AAD |
-| **Фоновые задачи** | `APScheduler 3.10+` | Распределённый планировщик с advisory locks |
-| **Обратный прокси** | `Caddy` / `NGINX` | TLS 1.2/1.3, Rate-limiting, HSTS, защита от атак |
-| **Контейнеризация** | `Docker` + `Docker Compose` | Развёртывание под непривилегированным пользователем `appuser` |
-
----
-
-## 📁 Структура проекта
-
-```
-zapisflow/
-├── app/
-│   ├── bot/                  # Клиентский бот и панель мастера (/admin)
-│   │   ├── filters/          # Фильтры прав (IsAdminFilter per-master)
-│   │   ├── handlers/         # Хэндлеры (client, admin)
-│   │   ├── keyboards/        # Фабрики inline-клавиатур
-│   │   ├── middlewares/      # TenantContext, DbSession, UserContext
-│   │   └── states/           # FSM-состояния визардов
-│   ├── manager_bot/          # Управляющий бот платформы
-│   │   ├── handlers.py       # Онбординг, подключение ботов, биллинг
-│   │   ├── keyboards.py      # Клавиатуры управляющего бота
-│   │   └── dispatcher.py     # Изолированный диспетчер платформы
-│   ├── config/
-│   │   └── settings.py       # Pydantic Settings v2 и fail-fast валидация
-│   ├── core/
-│   │   ├── security.py       # Фильтрация секретов и маскирование в логах
-│   │   └── token_crypto.py   # AES-256-GCM authenticated шифрование токенов
-│   ├── database/
-│   │   ├── models/           # SQLAlchemy 2.0 модели (Master, BotInstance, Appointment, etc.)
-│   │   └── session.py        # Асинхронный движок и фабрика сессий
-│   ├── repositories/         # Репозитории доступа к данным
-│   ├── scheduler/            # MultiTenantScheduler и фоновые воркеры
-│   ├── services/             # Сервисный слой (BotRegistry, Booking, Provisioning, Billing)
-│   ├── web/
-│   │   └── app.py            # FastAPI Webhook Ingestion Engine
-│   └── main.py               # Точка входа приложения
-├── alembic/                  # Миграции базы данных (версии 0001–0008)
-├── deploy/                   # Конфигурации обратных прокси
-│   ├── caddy/Caddyfile       # Caddy с авто-TLS Let's Encrypt
-│   └── nginx/nginx.conf      # Защищённый NGINX с rate-limiting
-├── docs/                     # Документация
-│   ├── production_deployment.md  # Регламент промышленного развёртывания
-│   └── security_checklist.md     # Чек-лист безопасности и аудита
-├── scripts/                  # Скрипты обслуживания и верификации бэкапов
-├── tests/                    # 237 автоматических тестов (pytest)
-├── docker-compose.yml        # Оркестрация контейнеров
-├── Dockerfile                # Multi-stage сборка с non-root пользователем
-├── requirements.txt          # Зависимости Python
-└── .env.example              # Пример переменных окружения
+```text
+app/
+├── bot/             # Client Bot, панель проекта, клавиатуры и middleware
+├── manager_bot/     # Manager Bot и Platform Admin
+├── config/          # настройки окружения
+├── core/            # шифрование токенов и защита секретов
+├── database/        # SQLAlchemy-модели, сессии и seed-код
+├── repositories/    # tenant-scoped доступ к данным
+├── services/        # запись, слоты, CRM, платежи, подписки, BotRegistry, Outbox
+│   └── billing/     # YooKassa checkout и billing-сессии
+├── scheduler/       # фоновые задачи и workers
+├── scripts/         # служебные команды
+└── web/             # FastAPI webhooks, health и billing pages
+alembic/             # миграции схемы
+deploy/caddy/        # конфигурация Caddy
+tests/               # модульные и интеграционные тесты
+docker-compose.yml   # PostgreSQL, Redis, migrate, backend и Caddy
+Dockerfile
 ```
 
----
+## База данных
 
-## 🔒 Безопасность и отказоустойчивость
+Схемой управляет Alembic, основная и production-база — PostgreSQL. Ключевые сущности: `User`, `Master` (проект и текущий статус подписки), `BotInstance`, `MasterSettings`, `Service`, `StaffMember`/`StaffService`, `Appointment`, клиентский `Payment` и подтверждения `PaymentProof`, `MasterClient`, `Review`, портфолио и рассылки. SaaS-подписка хранит тариф в `SubscriptionPlan`, состояние на проекте, а оплаты и периоды — в `SubscriptionPayment` и `SubscriptionPeriod`; отдельной таблицы `Subscription` в текущей модели нет.
 
-- **Криптографическая защита токенов:** Все токены Telegram-ботов шифруются алгоритмом **AES-256-GCM** с привязкой **Associated Authenticated Data (AAD)** к идентификатору бота (`telegram_bot_id`). Подмена или расшифровка токена другим ботом невозможна на уровне протокола.
-- **Очистка FSM в Redis:** Временные plaintext-токены удаляются из состояния памяти сразу после валидации.
-- **Защита вебхуков от DoS и OOM:** Потоковый ограничитель `read_limited_request_body` читает тело запроса порциями и прерывает соединение с ошибкой `413 Payload Too Large`, исключая переполнение памяти при `Transfer-Encoding: chunked`.
-- **Timing-Safe сравнение:** Секретные заголовки `X-Telegram-Bot-Api-Secret-Token` проверяются строго через `secrets.compare_digest`, исключая атаки по времени.
-- **Идемпотентная дедупликация апдейтов:** Входящие `update_id` дедуплицируются атомарно в Redis (`SET NX EX`).
-- **Строгая многотенантность:** Полный отказ от глобальной модели администраторов. Владелец студии A имеет доступ строго к студии A.
-- **Санитизация Health Checks:** Эндпоинт `/health/ready` скрывает детали подключения и пароли БД/Redis, отдавая только безопасный статус.
+Миграции добавляют tenant-связи, составные внешние ключи и другие ограничения целостности. Пересечения записей специалиста ограничиваются на стороне PostgreSQL. Текущую ревизию можно проверить командами `alembic current` и `alembic heads`.
 
----
+## Безопасность
 
-## ⚙️ Настройка переменных окружения (`.env`)
+- Tenant для Client Bot берётся из server-side связи `BotInstance.master_id`; неизвестный или отключённый бот не должен обрабатываться как другой проект.
+- Запросы и административные действия ограничиваются `master_id` и ролевой авторизацией. Составные внешние ключи защищают ключевые связи между проектом, сотрудниками, услугами, записями и платежами.
+- Webhook Manager Bot проверяется секретным заголовком. Для клиентских ботов применяются проверки состояния и публичного идентификатора экземпляра.
+- Токены пользовательских ботов хранятся в зашифрованном виде; `BOT_TOKEN_ENCRYPTION_KEY` и provider credentials должны поступать только из окружения/секретов.
+- Redis-дедупликация дополняется долговечным `ProcessedWebhookUpdate` в PostgreSQL; повторные бизнес-команды и платежи защищаются идемпотентностью и уникальными ограничениями.
+- Telegram Outbox хранит задачу доставки отдельно от plaintext bot token и разрешает BotInstance при отправке.
+- Сумма SaaS-платежа берётся из плана и локального платежа, затем сверяется с аутентифицированным ответом YooKassa. Webhook YooKassa служит сигналом для проверки через API провайдера, а не самостоятельным доказательством оплаты.
+- В Manager Bot есть ограничение частоты на повторную проверку SaaS-платежа; это не следует считать глобальным rate limit всех действий пользователей.
 
-Создайте файл `.env` на основе примера:
+## Подписки и оплата
+
+Проект может иметь статусы подписки `TRIAL`, `ACTIVE`, `EXPIRED` или `SUSPENDED`. Длительность trial задаётся `TRIAL_DURATION_DAYS` (пример в `.env.example` — 14 дней); выдача пробного доступа учитывается на уровне владельца, поэтому новый проект не должен сбрасывать использованный trial. Окончание периода переводит подписку в `EXPIRED`; данные проекта сохраняются, но создание новых записей и рассылки ограничиваются entitlement-проверками. `SUSPENDED` — отдельная административная блокировка и не снимается оплатой автоматически.
+
+Миграции задают тариф `basic_monthly` / **ZapisFlow Basic**, **499 RUB за 30 дней**. Цена и срок читаются из активной записи `SubscriptionPlan` в PostgreSQL. Другие исторические тарифы сохраняются для данных, но миграция `0022` выключает продажи неподтверждённых многомесячных планов.
+
+При `PAYMENT_PROVIDER=yookassa_web` Manager Bot создаёт/переиспользует локальный `SubscriptionPayment`, затем открывает подтверждение YooKassa. Webhook и кнопка проверки получают статус через API YooKassa, сверяют его с локальным заказом и запускают идемпотентную активацию:
+
+```text
+Manager Bot → локальный заказ → подтверждение YooKassa
+           → webhook/проверка статуса через YooKassa API
+           → SubscriptionPayment → SubscriptionPeriod → статус проекта
+```
+
+Повторное webhook-уведомление или ручная проверка используют идемпотентный путь активации. Возврат браузера не подтверждает оплату. Тестовый магазин и боевой магазин выбираются раздельно через `YOOKASSA_MODE`; включение провайдера требует корректных секретов и параметров чеков согласно настройкам магазина. В `.env.example` провайдер выключен (`PAYMENT_PROVIDER=disabled`), поэтому образец конфигурации не запускает реальные платежи.
+
+Веб-маршруты для одноразовой checkout-сессии (`/billing/checkout/{token}`) и её сервиса в коде также присутствуют; страница требует email для чека в режиме `merchant_receipt`. Сейчас Manager Bot напрямую выдаёт подтверждение YooKassa для режима `self_employed`; вызова выдачи website checkout-сессии из пользовательского интерфейса в текущем коде нет. Поэтому сайт checkout не описывается как доступный стандартный сценарий покупки.
+
+## Локальный запуск
+
+Нужны Git, Docker и Docker Compose. Создайте `.env` на основе шаблона и заполните параметры до запуска. Для webhook-режима настройте HTTPS-домены, токен Manager Bot, секрет webhook, пароль PostgreSQL, пароль Redis и ключ шифрования токенов. Пароль в `POSTGRES_PASSWORD` должен соответствовать credentials в `DATABASE_URL`. Не коммитьте `.env`.
+
 ```bash
+git clone https://github.com/raiyaxkrash/zapisflow.git
+cd zapisflow
 cp .env.example .env
+# Отредактируйте .env: DOMAIN, WEBHOOK_BASE_URL и обязательные секреты.
+docker compose config -q
+docker compose up -d --build
+docker compose ps
 ```
 
-Основные параметры:
-```env
-# Режим окружения (development / production)
-APP_ENV=production
-APP_MODE=webhook
-DOMAIN=api.yourdomain.com
+Compose запускает PostgreSQL 16 и Redis 7 во внутренней сети, одноразовый сервис `migrate`, backend и Caddy. Backend ждёт успешного завершения миграций; публично Caddy публикует порты 80 и 443. Для получения TLS-сертификатов DNS `DOMAIN` (и `BILLING_DOMAIN`, если используется billing origin) должен указывать на сервер. При настройке billing-поддомена Caddy проксирует только поддерживаемые billing-маршруты.
 
-# Публичный URL для вебхуков (обязательно HTTPS в production)
-WEBHOOK_BASE_URL=https://api.yourdomain.com
-WEBHOOK_HOST=0.0.0.0
-WEBHOOK_PORT=8000
-WEBHOOK_MAX_BODY_BYTES=1048576
+## Настройка окружения
 
-# PostgreSQL 16 (asyncpg)
-POSTGRES_PASSWORD=secure_password
-DATABASE_URL=postgresql+asyncpg://postgres:secure_password@postgres:5432/beauty_bot_db
-DB_POOL_SIZE=20
-DB_MAX_OVERFLOW=20
-DB_POOL_PRE_PING=True
+Актуальные имена переменных перечислены в `.env.example` и проверяются `app/config/settings.py` и Compose.
 
-# Redis 7
-REDIS_HOST=redis
-REDIS_PORT=6379
-REDIS_PASSWORD=strong_redis_password
-REDIS_DB=0
+| Назначение | Основные переменные |
+| --- | --- |
+| Режим приложения | `APP_ENV`, `APP_MODE`, `TIMEZONE` |
+| Telegram | `MANAGER_BOT_TOKEN`, `MANAGER_WEBHOOK_SECRET`, `SUPPORT_TELEGRAM_USERNAME`; `BOT_TOKEN` и `ADMIN_IDS` используются legacy polling/seed-кодом |
+| PostgreSQL | `POSTGRES_PASSWORD`, `DATABASE_URL`, `DB_POOL_*` |
+| Redis и BotRegistry | `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`, `BOT_REGISTRY_CACHE_MAX_SIZE`, `BOT_REGISTRY_CACHE_TTL_SECONDS`, `BOT_REGISTRY_INVALIDATION_CHANNEL` |
+| Входящие webhook | `DOMAIN`, `WEBHOOK_BASE_URL`, `WEBHOOK_HOST`, `WEBHOOK_PORT`, `WEBHOOK_MAX_BODY_BYTES`, `WEBHOOK_UPDATE_DEDUP_TTL` |
+| Шифрование | `BOT_TOKEN_ENCRYPTION_KEY` |
+| YooKassa и возврат | `PAYMENT_PROVIDER`, `PAYMENT_CURRENCY`, `YOOKASSA_MODE`, `YOOKASSA_ALLOW_TEST_IN_PRODUCTION`, `YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS`, `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY`, `YOOKASSA_TEST_SHOP_ID`, `YOOKASSA_TEST_SECRET_KEY`, `YOOKASSA_RECONCILIATION_INTERVAL_SECONDS`, `BILLING_RETURN_URL`; домен Caddy: `BILLING_DOMAIN` |
+| Чек YooKassa | `YOOKASSA_FISCAL_MODE`, `YOOKASSA_RECEIPT_VAT_CODE`, `YOOKASSA_RECEIPT_PAYMENT_SUBJECT`, `YOOKASSA_RECEIPT_PAYMENT_MODE` |
+| Trial и расписание | `TRIAL_DURATION_DAYS`, `HOLD_DURATION_MINUTES`, `MIN_ADVANCE_HOURS`, `MAX_ADVANCE_DAYS`, `DEFAULT_BUFFER_MINUTES`, `GRID_STEP_MINUTES` |
+| Фоновые задачи | `SCHEDULER_ENABLED`, `SCHEDULER_BATCH_SIZE`, `JOB_PROCESSING_TIMEOUT_SECONDS`, `JOB_MAX_ATTEMPTS`, `HOLD_CLEANER_INTERVAL_SECONDS`, `REMINDER_GENERATION_INTERVAL_SECONDS`, `REMINDER_DELIVERY_INTERVAL_SECONDS` |
 
-# Криптографический ключ AES-256-GCM (32 байта Base64)
-# Генерация: python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
-BOT_TOKEN_ENCRYPTION_KEY=ВашКлюч32БайтаBase64==
+`PAYMENT_PROVIDER=disabled` оставляет SaaS-оплату выключенной. Для теста YooKassa в production-контексте нужен явный `YOOKASSA_ALLOW_TEST_IN_PRODUCTION=true` и ограниченный список `YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS`; тестовые и боевые Shop ID/Secret Key хранятся отдельно. Не задавайте общие банковские реквизиты через env: реквизиты клиентской предоплаты задаются отдельно в настройках каждого проекта.
 
-# Платформенный управляющий бот (Manager Bot)
-MANAGER_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
-MANAGER_WEBHOOK_SECRET=СлучайнаяСтрокаМинимум32Символа
+Параметры фоновых задач приведены в `.env.example` со значениями по умолчанию приложения. `BILLING_DOMAIN` задаёт домен Caddy в Compose, а `DOMAIN` — основной API-домен; `WEBHOOK_BASE_URL` использует публичный URL API.
 
-# Фоновый планировщик
-SCHEDULER_ENABLED=True
-SCHEDULER_TICK_SECONDS=30
+## Миграции
 
-# Биллинг
-TRIAL_DURATION_DAYS=14
-```
-
----
-
-## 🚀 Запуск проекта
-
-### Вариант 1. Запуск через Docker Compose (Рекомендуемый для Production)
+Compose-сервис `migrate` по умолчанию выполняет `alembic upgrade head`; `docker compose up` запускает его перед backend. Проверка состояния БД:
 
 ```bash
-# 1. Запуск БД и Redis
-docker compose up -d postgres redis
+docker compose run --rm migrate alembic current
+docker compose run --rm migrate alembic heads
+```
 
-# 2. Применение миграций Alembic
+Для отдельного применения миграций:
+
+```bash
 docker compose run --rm migrate
-
-# 3. Запуск веб-приложения и Caddy Reverse Proxy
-docker compose up -d backend caddy
 ```
 
-Проверка статуса:
-```bash
-curl -i https://api.yourdomain.com/health/live
-curl -i https://api.yourdomain.com/health/ready
-```
-
-### Вариант 2. Локальный запуск для разработки
+## Тесты
 
 ```bash
-# 1. Активация виртуального окружения
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-
-# 2. Установка зависимостей
-pip install -r requirements.txt
-
-# 3. Применение миграций
-alembic upgrade head
-
-# 4. Запуск в режиме разработки
-python -m app.main
+pytest -q
+python -m compileall app tests
 ```
 
----
+Тесты покрывают tenant isolation и роли, webhook/дедупликацию, динамические боты и токены, запись и конкуренцию слотов, расписание, клиентские платежи, SaaS billing и YooKassa, CRM, рассылки, Outbox, Platform Admin, конфигурацию, Compose и миграции. Интеграционные проверки PostgreSQL-специфичного поведения требуют PostgreSQL; SQLite не заменяет проверки блокировок и ограничений PostgreSQL.
 
-## 🧪 Тестирование
+## Production
 
-Проект покрыт автоматизированными модульными, интеграционными и E2E тестами (237 тестов, 100% успешно):
+Production-развёртывание использует Linux VPS, Docker Compose, PostgreSQL, Redis, FastAPI и Caddy. Перед обновлением существующей установки проверьте изменения на сервере и сделайте резервные копии `.env` и PostgreSQL. После синхронизации кода примените миграции, пересоберите сервисы и проверьте контейнеры:
+
 ```bash
-pytest -v
+docker compose config -q
+docker compose run --rm migrate
+docker compose up -d --build
+docker compose ps
 ```
 
-Тестирование охватывает:
-- Миграции Alembic (0001–0008) и целостность схемы.
-- Межтенантную изоляцию и невозможность подмены bot token.
-- Потоковый ограничитель тела запроса и защиту от DoS.
-- Конкурентное бронирование и предотвращение овербукинга.
-- Идемпотентность продления подписок и блокировку ручного биллинга в прод.
-- Резервное копирование (`pg_dump`) и восстановление (`pg_restore`) с проверкой ключей шифрования.
+Не удаляйте volumes PostgreSQL или Redis при обновлении. Проверьте логи backend и результаты health endpoints после запуска.
 
----
+## Health checks
 
-## 📄 Лицензия
+```bash
+curl -fsS https://<ваш-api-домен>/health/live
+curl -fsS https://<ваш-api-домен>/health/ready
+```
 
-Проект распространяется под лицензией MIT. Подробности в файле [LICENSE](LICENSE).
+`/health/live` проверяет, что приложение отвечает. `/health/ready` проверяет доступность PostgreSQL и Redis. URL зависит от `DOMAIN` и `WEBHOOK_BASE_URL` конкретного развёртывания.
+
+## Roadmap
+
+Актуальный план развития проекта: [ROADMAP.md](ROADMAP.md)
+
+## Telegram Mini App
+
+В репозитории есть единый клиентский и мастерский Mini App, использующий
+существующие сервисы и tenant-scoped API. Подключение выполняется явно;
+production deployment и реальный Telegram UAT требуют отдельной проверки.
+Архитектура, конфигурация, API и сценарии проверки: [docs/miniapp.md](docs/miniapp.md).
+
+## Support
+
+Поддержка платформы: [@zapisflow](https://t.me/zapisflow).

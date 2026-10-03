@@ -218,7 +218,10 @@ async def test_production_payment_screen_creates_no_fake_checkout() -> None:
     session.commit.assert_not_awaited()
     callback.message.edit_text.assert_awaited_once()
     text = callback.message.edit_text.call_args.args[0]
-    assert "Автоматическая оплата временно недоступна" in text
+    assert (
+        "Автоматическая оплата временно недоступна" in text
+        or "Оплата онлайн временно недоступна" in text
+    )
     assert settings.support_tag in text
     keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
     assert not any(

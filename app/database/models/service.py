@@ -16,6 +16,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,6 +37,7 @@ class Service(Base, TimestampMixin):
     """
     __tablename__ = "services"
     __table_args__ = (
+        UniqueConstraint("master_id", "id", name="uq_services_master_id_id"),
         CheckConstraint("price >= 0", name="chk_services_price_positive"),
         CheckConstraint("deposit_value >= 0", name="chk_services_deposit_positive"),
         CheckConstraint("duration_min > 0", name="chk_services_duration_positive"),
@@ -59,7 +61,7 @@ class Service(Base, TimestampMixin):
         default=DepositType.FIXED,
         nullable=False,
     )
-    deposit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    deposit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0.00"), nullable=False)
     
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
@@ -67,5 +69,8 @@ class Service(Base, TimestampMixin):
 
     # Relationships
     appointments: Mapped[List["Appointment"]] = relationship(
-        "Appointment", back_populates="service"
+        "Appointment",
+        back_populates="service",
+        primaryjoin="and_(Service.master_id == Appointment.master_id, Service.id == Appointment.service_id)",
+        foreign_keys="[Appointment.master_id, Appointment.service_id]",
     )

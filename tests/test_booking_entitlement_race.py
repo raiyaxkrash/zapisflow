@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from app.database.models.appointment import Appointment
-from app.database.models.master import Master, SubscriptionStatus
+from app.database.models.master import Master, MasterSettings, SubscriptionStatus
 from app.services.booking_service import BookingService
 from app.services.exceptions import SubscriptionExpiredError
 from app.services.slot_engine import SlotEngine
@@ -30,6 +30,10 @@ async def test_suspension_waits_for_inflight_booking_transaction(pg_engine: Asyn
             paid_until=datetime.now(timezone.utc) + timedelta(days=5),
         )
         service = await _create_service(session, master.id)
+        payment_settings = await session.get(MasterSettings, master.id)
+        payment_settings.bank_name = "Test Bank"
+        payment_settings.bank_card_number = "4111111111111111"
+        payment_settings.bank_recipient_name = "Test Owner"
         master_id, client_id, service_id = master.id, client.id, service.id
         await session.commit()
 
