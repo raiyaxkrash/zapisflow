@@ -17,17 +17,21 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-status_enum = sa.Enum(
-    "PENDING",
-    "COMPLETED",
-    "EXPIRED",
-    "FAILED",
-    name="managed_bot_request_status_enum",
-)
-
-
 def upgrade() -> None:
-    status_enum.create(op.get_bind(), checkfirst=True)
+    op.execute(
+        "DO $$ BEGIN CREATE TYPE managed_bot_request_status_enum AS ENUM "
+        "('PENDING', 'COMPLETED', 'EXPIRED', 'FAILED'); "
+        "EXCEPTION WHEN duplicate_object THEN null; END $$;"
+    )
+
+    status_enum = postgresql.ENUM(
+        "PENDING",
+        "COMPLETED",
+        "EXPIRED",
+        "FAILED",
+        name="managed_bot_request_status_enum",
+        create_type=False,
+    )
 
     op.create_table(
         "managed_bot_creation_requests",
@@ -86,4 +90,7 @@ def downgrade() -> None:
     op.drop_index("ix_managed_bot_requests_owner_master", table_name="managed_bot_creation_requests")
     op.drop_index("uq_pending_managed_bot_request_per_user", table_name="managed_bot_creation_requests")
     op.drop_table("managed_bot_creation_requests")
-    status_enum.drop(op.get_bind(), checkfirst=True)
+    op.execute(
+        "DO $$ BEGIN DROP TYPE IF EXISTS managed_bot_request_status_enum; "
+        "EXCEPTION WHEN undefined_object THEN null; END $$;"
+    )
