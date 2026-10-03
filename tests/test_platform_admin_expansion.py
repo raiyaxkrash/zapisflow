@@ -309,7 +309,6 @@ async def test_user_card_subnavigation_queries(pg_session: AsyncSession):
 
     payment = SubscriptionPayment(
         master_id=m1.id,
-        user_id=user.id,
         plan_id=plan.id,
         provider="YOOKASSA",
         amount=Decimal("1500.00"),
@@ -367,9 +366,10 @@ async def test_bot_hard_delete_with_outbox(pg_session: AsyncSession):
 
     # Add a TelegramOutbox record with FK RESTRICT on bot.id
     outbox = TelegramOutbox(
-        bot_id=bot.id,
+        bot_instance_id=bot.id,
         master_id=master.id,
-        chat_id=owner.telegram_id,
+        operation_type="SEND_MESSAGE",
+        target_chat_id=owner.telegram_id,
         idempotency_key=f"idem_{random.randint(1000, 9999)}",
         status=TelegramOutboxStatus.PENDING,
         payload={"text": "Hello client"},
@@ -464,8 +464,9 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
 
     sched = ScheduleTemplate(
         master_id=master.id,
+        staff_id=staff.id,
         day_of_week=0,
-        is_working_day=True,
+        is_day_off=False,
     )
     pg_session.add(sched)
     await pg_session.flush()
