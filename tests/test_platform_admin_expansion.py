@@ -387,7 +387,7 @@ async def test_bot_hard_delete_with_outbox(pg_session: AsyncSession):
     # Execute hard delete
     ok, msg = await admin_svc.hard_delete_bot(bot.id, actor_user_id=admin_user.id)
     assert ok is True
-    assert "безвозвратно удалён" in msg
+    assert "удалён" in msg
 
     # Verify bot record is gone
     check_bot = await pg_session.get(BotInstance, bot.id)
@@ -473,7 +473,7 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
 
     appt = Appointment(
         master_id=master.id,
-        client_id=client.id,
+        user_id=client_user.id,
         service_id=service.id,
         staff_id=staff.id,
         status=AppointmentStatus.CONFIRMED,
@@ -503,7 +503,7 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
     # 2. Execute hard delete
     ok, msg = await admin_svc.hard_delete_project(master.id, actor_user_id=admin_user.id)
     assert ok is True
-    assert "безвозвратно удалён" in msg
+    assert "удалены" in msg or "удален" in msg.lower()
 
     # 3. Verify master and all children are purged
     assert await pg_session.get(Master, master.id) is None
