@@ -36,6 +36,10 @@ class BookingActionCallback(CallbackData, prefix="book"):
     appointment_id: int = 0
 
 
+class PolicyAgreementCallback(CallbackData, prefix="policy"):
+    confirmation_id: str
+
+
 class PortfolioNavCallback(CallbackData, prefix="port"):
     action: str  # "categories", "category", "next", "prev"
     category_id: int = 0

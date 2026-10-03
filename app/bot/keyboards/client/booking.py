@@ -13,6 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 from app.bot.keyboards.client.callbacks import (
     BookingActionCallback,
+    PolicyAgreementCallback,
     MenuCallback,
     StaffChoiceCallback,
 )
@@ -58,7 +59,7 @@ def get_phone_request_keyboard() -> ReplyKeyboardMarkup:
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
 
-def get_policy_agreement_keyboard() -> InlineKeyboardMarkup:
+def get_policy_agreement_keyboard(confirmation_id: str | None = None) -> InlineKeyboardMarkup:
     """
     Cancellation policy confirmation keyboard.
     """
@@ -66,7 +67,8 @@ def get_policy_agreement_keyboard() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(
             text="✅ Согласен(на), перейти к оплате",
-            callback_data=BookingActionCallback(action="agree_policy").pack(),
+            callback_data=(PolicyAgreementCallback(confirmation_id=confirmation_id).pack()
+                           if confirmation_id else BookingActionCallback(action="agree_policy").pack()),
         )
     )
     builder.row(

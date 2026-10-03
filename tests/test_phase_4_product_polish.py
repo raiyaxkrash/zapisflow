@@ -371,6 +371,7 @@ async def test_zero_deposit_policy_screen_does_not_claim_prepayment_is_required(
         message=SimpleNamespace(edit_text=AsyncMock()), answer=AsyncMock()
     )
     state = AsyncMock()
+    state.get_data.return_value = {}
     session = AsyncMock()
 
     with patch("app.bot.handlers.client.booking.MasterSettingsRepository") as settings_repo:

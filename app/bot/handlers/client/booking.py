@@ -7,10 +7,12 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 import logging
+from uuid import uuid4
 import pytz
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from sqlalchemy import select, text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.client import (
@@ -30,9 +32,11 @@ from app.bot.keyboards.client import (
     get_staff_selection_keyboard,
 )
 from app.bot.states.client import ClientBookingSG
+from app.bot.keyboards.client.callbacks import PolicyAgreementCallback
 from app.config.settings import settings
 from app.database.models.master import BotInstance, BotInstanceStatus
 from app.database.models.user import User
+from app.database.models.telegram_outbox import TelegramOutbox
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.staff_repository import StaffRepository
@@ -406,6 +410,7 @@ async def cb_slot_selected(
 
     data = await state.get_data()
     service_id = data.get("service_id") or callback_data.service_id
+    await _log_booking_fsm("slot", state, master_id)
     service_repo = ServiceRepository(session)
     service = await service_repo.get_by_id(service_id, master_id=master_id)
 
@@ -471,12 +476,15 @@ async def _show_policy_screen(
         f"{policy_text}"
     )
 
+    confirmation_id = uuid4().hex
+    await state.update_data(confirmation_id=confirmation_id)
     await state.set_state(ClientBookingSG.confirming_policy)
+    await _log_booking_fsm("policy", state, master_id)
 
     if callback.message:
         await callback.message.edit_text(
             text=text,
-            reply_markup=get_policy_agreement_keyboard(),
+            reply_markup=get_policy_agreement_keyboard(confirmation_id),
         )
     await callback.answer()
 
@@ -564,10 +572,12 @@ async def msg_receive_phone(
         f"{policy_text}"
     )
 
+    confirmation_id = uuid4().hex
+    await state.update_data(confirmation_id=confirmation_id)
     await state.set_state(ClientBookingSG.confirming_policy)
     await message.answer(
         text=text,
-        reply_markup=get_policy_agreement_keyboard(),
+        reply_markup=get_policy_agreement_keyboard(confirmation_id),
     )
 
 
@@ -587,19 +597,63 @@ async def cb_cancel_policy(
     await callback.answer()
 
 
+@router.callback_query(PolicyAgreementCallback.filter())
 @router.callback_query(BookingActionCallback.filter(F.action == "agree_policy"))
 async def cb_agree_policy(
     callback: CallbackQuery,
     state: FSMContext,
     db_user: User,
     session: AsyncSession, master_id: int,
+    callback_data: PolicyAgreementCallback | BookingActionCallback | None = None,
 ) -> None:
     """
     Client agreed to policy: create hold booking, create pending payment and show requisites.
     """
+    # Different update IDs can represent two clicks on the same policy screen.
+    # Serialize them using its server-bound identity, and use the committed
+    # outbox row as a durable receipt even after Redis FSM has been cleared.
+    confirmation_key = None
+    if callback.message:
+        instance_id = session.info.get("bot_instance_id")
+        if instance_id and session.info.get("trusted_master_id") == master_id:
+            screen_id = (callback_data.confirmation_id
+                         if isinstance(callback_data, PolicyAgreementCallback)
+                         else "legacy")
+            if len(screen_id) > 32 or not screen_id.isalnum():
+                await callback.answer("Сессия истекла. Начните запись заново.", show_alert=True)
+                return
+            confirmation_key = (
+                f"booking-confirm:{instance_id}:{db_user.id}:"
+                f"{callback.message.chat.id}:{callback.message.message_id}:{screen_id}"
+            )
+            await session.execute(
+                sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": confirmation_key},
+            )
+            receipt = await session.scalar(select(TelegramOutbox.id).where(
+                TelegramOutbox.idempotency_key == confirmation_key,
+                TelegramOutbox.master_id == master_id,
+                TelegramOutbox.bot_instance_id == instance_id,
+                TelegramOutbox.target_chat_id == callback.message.chat.id,
+            ))
+            if receipt is not None:
+                await callback.answer(
+                    "Запись уже создана. Подтверждение появится в этом сообщении.",
+                    show_alert=True,
+                )
+                return
+
     data = await state.get_data()
+    await _log_booking_fsm("agree", state, master_id)
     service_id = data.get("service_id")
     slot_ts = data.get("slot_timestamp")
+
+    if isinstance(callback_data, PolicyAgreementCallback) and data.get("confirmation_id") != callback_data.confirmation_id:
+        await callback.answer("Сессия истекла. Начните запись заново.", show_alert=True)
+        return
+    if isinstance(callback_data, BookingActionCallback) and data.get("confirmation_id"):
+        await callback.answer("Откройте актуальное подтверждение записи.", show_alert=True)
+        return
 
     if not service_id or not slot_ts:
         await callback.answer("Сессия истекла. Начните запись заново.", show_alert=True)
@@ -676,7 +730,7 @@ async def cb_agree_policy(
                 message_id=callback.message.message_id,
                 text=text,
                 reply_markup=get_main_menu_keyboard(is_admin=False),
-                idempotency_key=f"appointment:{appointment.id}:confirmation-screen",
+                idempotency_key=confirmation_key or f"appointment:{appointment.id}:confirmation-screen",
             )
         else:
             await enqueue_telegram_message(
@@ -688,7 +742,9 @@ async def cb_agree_policy(
                 reply_markup=get_main_menu_keyboard(is_admin=False),
                 idempotency_key=f"appointment:{appointment.id}:confirmation-screen",
             )
-        session.info.setdefault("post_commit", []).append(callback.answer)
+        session.info.setdefault("post_commit", []).append(
+            lambda: callback.answer("Запись подтверждена. Сообщение обновляется.", show_alert=True)
+        )
         return
 
     if not master_payment_settings or not all(
@@ -740,7 +796,7 @@ async def cb_agree_policy(
             message_id=callback.message.message_id,
             text=text,
             reply_markup=get_payment_screen_keyboard(appointment.id),
-            idempotency_key=f"appointment:{appointment.id}:payment-screen",
+            idempotency_key=confirmation_key or f"appointment:{appointment.id}:payment-screen",
         )
     else:
         await enqueue_telegram_message(
@@ -752,4 +808,19 @@ async def cb_agree_policy(
             reply_markup=get_payment_screen_keyboard(appointment.id),
             idempotency_key=f"appointment:{appointment.id}:payment-screen",
         )
-    session.info.setdefault("post_commit", []).append(callback.answer)
+    session.info.setdefault("post_commit", []).append(
+        lambda: callback.answer("Время зарезервировано. Реквизиты появятся в этом сообщении.", show_alert=True)
+    )
+
+
+async def _log_booking_fsm(checkpoint: str, state: FSMContext, master_id: int) -> None:
+    """Log routing metadata and field presence, never client contact data."""
+    key = state.key
+    data = await state.get_data()
+    logger.info(
+        "Booking FSM checkpoint=%s master_id=%s bot_id=%s chat_id=%s user_id=%s "
+        "destiny=%s state=%s has_service=%s has_slot=%s has_staff=%s",
+        checkpoint, master_id, key.bot_id, key.chat_id, key.user_id,
+        key.destiny, await state.get_state(), bool(data.get("service_id")),
+        bool(data.get("slot_timestamp")), bool(data.get("staff_id")),
+    )

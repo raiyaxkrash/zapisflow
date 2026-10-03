@@ -107,6 +107,7 @@ async def test_booking_callback_crash_and_replay_creates_one_appointment(
     callback.answer = AsyncMock()
     slot = datetime.now(timezone.utc) + timedelta(days=2)
     state = MagicMock()
+    state.get_state = AsyncMock(return_value="confirming_policy")
     state.get_data = AsyncMock(return_value={"service_id": service.id, "slot_timestamp": int(slot.timestamp())})
     state.clear = AsyncMock()
     update = Update(update_id=1_000_000_000 + suffix)
@@ -165,6 +166,7 @@ async def test_expired_booking_callback_is_acknowledged_and_deduplicated(
     callback = MagicMock()
     callback.answer = AsyncMock()
     state = MagicMock()
+    state.get_state = AsyncMock(return_value="confirming_policy")
     state.get_data = AsyncMock(
         return_value={"service_id": 123, "slot_timestamp": int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp())}
     )
