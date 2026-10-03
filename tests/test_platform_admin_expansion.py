@@ -380,7 +380,7 @@ async def test_bot_hard_delete_with_outbox(pg_session: AsyncSession):
     mock_gateway = MagicMock()
     mock_gateway.delete_webhook = AsyncMock(return_value=True)
     mock_registry = MagicMock(spec=BotRegistry)
-    mock_registry.invalidate_bot = AsyncMock()
+    mock_registry.invalidate_bot_instance = AsyncMock()
 
     admin_svc = PlatformAdminService(pg_session, registry=mock_registry, gateway=mock_gateway)
 
@@ -398,7 +398,7 @@ async def test_bot_hard_delete_with_outbox(pg_session: AsyncSession):
     assert check_outbox is None
 
     # Verify webhook delete and registry invalidation were attempted
-    mock_registry.invalidate_bot.assert_called_once_with(bot.id)
+    mock_registry.invalidate_bot_instance.assert_called_once_with(bot.id, reason="bot_hard_deleted")
 
     # Verify audit log
     audit_res = await pg_session.execute(
@@ -479,6 +479,7 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
         status=AppointmentStatus.CONFIRMED,
         start_time=datetime.now(timezone.utc) + timedelta(days=1),
         end_time=datetime.now(timezone.utc) + timedelta(days=1, hours=1),
+        end_time_with_buffer=datetime.now(timezone.utc) + timedelta(days=1, hours=1, minutes=15),
     )
     pg_session.add(appt)
     await pg_session.commit()
@@ -486,7 +487,7 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
     mock_gateway = MagicMock()
     mock_gateway.delete_webhook = AsyncMock(return_value=True)
     mock_registry = MagicMock(spec=BotRegistry)
-    mock_registry.invalidate_bot = AsyncMock()
+    mock_registry.invalidate_bot_instance = AsyncMock()
 
     admin_svc = PlatformAdminService(pg_session, registry=mock_registry, gateway=mock_gateway)
 
@@ -649,7 +650,7 @@ async def test_manager_bot_typed_confirmation_handlers(pg_session: AsyncSession)
     mock_gateway = MagicMock()
     mock_gateway.delete_webhook = AsyncMock(return_value=True)
     mock_reg = MagicMock(spec=BotRegistry)
-    mock_reg.invalidate_bot = AsyncMock()
+    mock_reg.invalidate_bot_instance = AsyncMock()
 
     await msg_admin_bot_hard_delete_confirm(msg_exact, state=state_mock, session=pg_session, bot_registry=mock_reg)
     assert "успешно" in msg_exact.answer.call_args[0][0] or "удалён" in msg_exact.answer.call_args[0][0]
