@@ -27,7 +27,7 @@ from app.database.models.master import (
     MasterStatus,
     SubscriptionStatus,
 )
-from app.database.models.outbox import OutboxStatus, TelegramOutbox
+from app.database.models.telegram_outbox import TelegramOutbox, TelegramOutboxStatus
 from app.database.models.portfolio import PortfolioCategory
 from app.database.models.schedule import ScheduleTemplate
 from app.database.models.service import Service
@@ -371,7 +371,7 @@ async def test_bot_hard_delete_with_outbox(pg_session: AsyncSession):
         master_id=master.id,
         chat_id=owner.telegram_id,
         idempotency_key=f"idem_{random.randint(1000, 9999)}",
-        status=OutboxStatus.PENDING,
+        status=TelegramOutboxStatus.PENDING,
         payload={"text": "Hello client"},
     )
     pg_session.add(outbox)
