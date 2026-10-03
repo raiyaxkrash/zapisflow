@@ -28,7 +28,7 @@ from app.database.models.master import (
     SubscriptionStatus,
 )
 from app.database.models.telegram_outbox import TelegramOutbox, TelegramOutboxStatus
-from app.database.models.portfolio import PortfolioCategory
+from app.database.models.portfolio import PortfolioCategory, PortfolioItem
 from app.database.models.schedule import ScheduleTemplate
 from app.database.models.service import Service
 from app.database.models.staff import StaffMember
@@ -461,6 +461,15 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
         title="Haircuts",
     )
     pg_session.add(cat)
+    await pg_session.flush()
+
+    item = PortfolioItem(
+        master_id=master.id,
+        category_id=cat.id,
+        telegram_file_id="photo_123",
+        title="Photo 1",
+    )
+    pg_session.add(item)
 
     sched = ScheduleTemplate(
         master_id=master.id,
@@ -517,6 +526,7 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
     assert await pg_session.get(StaffMember, staff.id) is None
     assert await pg_session.get(Service, service.id) is None
     assert await pg_session.get(MasterClient, client.id) is None
+    assert await pg_session.get(PortfolioItem, item.id) is None
     assert await pg_session.get(PortfolioCategory, cat.id) is None
     assert await pg_session.get(ScheduleTemplate, sched.id) is None
     assert await pg_session.get(Appointment, appt.id) is None
