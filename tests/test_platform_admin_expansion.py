@@ -290,7 +290,7 @@ async def test_user_card_subnavigation_queries(pg_session: AsyncSession):
         telegram_bot_id=random.randint(100000, 999999),
         telegram_username="studio_one_bot",
         telegram_first_name="Studio One Bot",
-        encrypted_token=b"enc1",
+        encrypted_token="enc1",
         status=BotInstanceStatus.ACTIVE,
         is_current=True,
     )
@@ -358,7 +358,7 @@ async def test_bot_hard_delete_with_outbox(pg_session: AsyncSession):
         telegram_bot_id=random.randint(100000, 999999),
         telegram_username="to_delete_bot",
         telegram_first_name="Delete Me Bot",
-        encrypted_token=b"enc_dummy_token",
+        encrypted_token="enc_dummy_token",
         status=BotInstanceStatus.ACTIVE,
         is_current=True,
     )
@@ -426,7 +426,7 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
         telegram_bot_id=random.randint(100000, 999999),
         telegram_username="big_proj_bot",
         telegram_first_name="Big Proj Bot",
-        encrypted_token=b"enc",
+        encrypted_token="enc",
         status=BotInstanceStatus.ACTIVE,
         is_current=True,
     )
@@ -452,8 +452,7 @@ async def test_project_hard_delete_cascade_and_user_preservation(pg_session: Asy
     client = MasterClient(
         master_id=master.id,
         user_id=client_user.id,
-        first_name="Client Elena",
-        total_visits=1,
+        notes="Client note",
     )
     pg_session.add(client)
 
