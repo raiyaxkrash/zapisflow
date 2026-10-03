@@ -2,7 +2,8 @@ export class ApiError extends Error {
   constructor(code, message, status) { super(message); this.code = code; this.status = status; }
 }
 export class Api {
-  constructor(fetcher = fetch) { this.fetcher = fetcher; this.csrf = ''; this.botId = ''; this.pending = new Map(); }
+  // Native WebView fetch must run with the browser global as its receiver.
+  constructor(fetcher = (...args) => globalThis.fetch(...args)) { this.fetcher = fetcher; this.csrf = ''; this.botId = ''; this.pending = new Map(); }
   async request(path, options = {}) {
     let result;
     const controller = new AbortController();

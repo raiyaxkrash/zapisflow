@@ -38,6 +38,26 @@ test('Authentication sends original initData only',async()=>{
   await api.auth('public-id','raw-signed-data');assert.deepEqual(JSON.parse(request.options.body),{bot_public_id:'public-id',init_data:'raw-signed-data'});
   assert.equal(api.csrf,'csrf');assert.equal(request.options.credentials,'same-origin');
 });
+
+test('Default browser fetch retains the global receiver during authentication', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async function (url, options) {
+    assert.equal(this, globalThis, 'WebView native fetch requires its browser receiver');
+    calls++;
+    assert.equal(url, '/api/miniapp/auth');
+    assert.equal(options.credentials, 'same-origin');
+    return {ok: true, json: async () => ({csrf_token: 'csrf'})};
+  };
+  try {
+    const api = new Api();
+    await api.auth('public-id', 'signed-data');
+    assert.equal(calls, 1);
+    assert.equal(api.csrf, 'csrf');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 test('Network retry uses same idempotency key, no auth in storage',async()=>{
   const requests=[];const api=new Api(async(url,options)=>{requests.push(options);if(requests.length===1)throw Error('offline');return {ok:true,json:async()=>({id:7})}});api.csrf='csrf';
   await assert.rejects(api.mutate('/client/holds',{service_id:1}),/Нет соединения/);
