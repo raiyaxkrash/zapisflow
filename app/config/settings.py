@@ -11,7 +11,7 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
-from app.config.url_validation import miniapp_origin
+from app.config.url_validation import miniapp_origin, webhook_origin
 
 
 class Settings(BaseSettings):
@@ -261,8 +261,10 @@ class Settings(BaseSettings):
         if self.mini_app_base_url and not self.mini_app_base_url.startswith("https://"):
             errors.append("MINI_APP_BASE_URL must use HTTPS in production")
 
-        if not self.webhook_base_url or not self.webhook_base_url.startswith("https://"):
-            errors.append("WEBHOOK_BASE_URL must be configured with https:// in production")
+        try:
+            webhook_origin(self.webhook_base_url, production=True)
+        except ValueError as exc:
+            errors.append(str(exc))
 
         if not self.manager_bot_token:
             errors.append("MANAGER_BOT_TOKEN is required in production")

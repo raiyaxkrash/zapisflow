@@ -96,7 +96,7 @@ def test_production_config_validation_fails_on_insecure_url_and_secret() -> None
     with pytest.raises(ValueError) as exc:
         insecure_settings.validate_production_configuration()
     err_msg = str(exc.value)
-    assert "WEBHOOK_BASE_URL must be configured with https://" in err_msg
+    assert "WEBHOOK_BASE_URL must be an HTTPS hostname origin" in err_msg
     assert "MANAGER_WEBHOOK_SECRET must be at least 32 characters" in err_msg
 
 

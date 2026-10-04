@@ -166,6 +166,11 @@ def project_card_keyboard(
             )
         ])
 
+    if bot_instance and bot_instance.status in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED):
+        rows.append([InlineKeyboardButton(
+            text="🔄 Обновить webhook", callback_data=f"mgr:bot:resync:{bot_instance.id}",
+        )])
+
     # Business & CRM features
     rows.append([
         InlineKeyboardButton(text="📅 Расписание", callback_data=f"mgr:schedule:{master.id}"),

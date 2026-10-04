@@ -1678,6 +1678,21 @@ async def cb_activate_bot(
 # Retry Provisioning, Disable, Enable & Token Rotation
 # ---------------------------------------------------------------------------
 
+@manager_router.callback_query(F.data.startswith("mgr:bot:resync:"))
+async def cb_resync_webhook(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Owner/admin action for one instance; middleware owns the DB transaction."""
+    user = await _get_or_create_user(session, callback.from_user)
+    await _answer_bot_callback(callback)
+    service = BotProvisioningService(session)
+    try:
+        await service.resync_webhook(int(callback.data.rsplit(":", 1)[1]), user.id)
+        text = "✅ Webhook обновлён. Отправьте /start в клиентский бот для проверки."
+    except (AccessDeniedError, ProvisioningWebhookError, ValueError):
+        text = f"Не удалось обновить webhook. Проверьте права и состояние бота. Поддержка: {settings.support_tag}"
+    if callback.message:
+        await callback.message.answer(text, reply_markup=main_menu_keyboard())
+
+
 @manager_router.callback_query(F.data.startswith("mgr:bot:retry:"))
 async def cb_retry_provisioning(
     callback: CallbackQuery, session: AsyncSession, registry: Optional[BotRegistry] = None
@@ -1700,9 +1715,9 @@ async def cb_retry_provisioning(
 
     service = BotProvisioningService(session=session, registry=registry)
     try:
-        await service.retry_provisioning(bot.id, user.id)
+        await service.retry_provisioning(bot.id, user.id, commit=False)
         await callback.message.edit_text(
-            "✅ <b>Вебхук успешно подключён!</b> Бот переведён в статус настройки.",
+            "✅ <b>Вебхук успешно подключён!</b> Можно проверить бота командой /start.",
             reply_markup=main_menu_keyboard(),
         )
     except Exception as exc:

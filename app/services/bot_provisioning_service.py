@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
-from app.config.url_validation import miniapp_origin
+from app.config.url_validation import miniapp_origin, webhook_origin
 from app.core.security import redact_token
 from app.core.token_crypto import TokenCrypto
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterStatus
@@ -27,6 +27,7 @@ from app.services.exceptions import (
     TokenRotationBotMismatchError,
 )
 from app.services.master_readiness_service import MasterReadinessService
+from app.services.master_authorization_service import MasterAuthorizationService
 from app.services.telegram_provisioning_gateway import BotIdentity, TelegramProvisioningGateway
 
 logger = logging.getLogger(__name__)
@@ -188,7 +189,7 @@ class BotProvisioningService:
         await self.session.commit()
 
         # 5. Build webhook URL using public_id (never exposing token or secret in URL)
-        base_url = settings.webhook_base_url.rstrip("/")
+        base_url = webhook_origin(settings.webhook_base_url, production=settings.is_production)
         webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
 
         # 6. Execute network setWebhook
@@ -342,7 +343,7 @@ class BotProvisioningService:
         await self.session.commit()
 
         # 6. Configure Telegram Webhook and commands
-        base_url = settings.webhook_base_url.rstrip("/")
+        base_url = webhook_origin(settings.webhook_base_url, production=settings.is_production)
         webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
 
         try:
@@ -406,10 +407,63 @@ class BotProvisioningService:
             await self.session.commit()
             raise ProvisioningWebhookError(error_desc) from exc
 
+    async def resync_webhook(
+        self, bot_instance_id: int, actor_user_id: int, *, commit: bool = False,
+    ) -> BotInstance:
+        """Reinstall one authorized current webhook, preserving credentials and status.
+
+        The caller owns the transaction by default; standalone callers may commit
+        explicitly or opt in with commit=True. Telegram retries are idempotent.
+        """
+        instance = await self.bot_repo.get_by_id(bot_instance_id)
+        if instance is None:
+            raise AccessDeniedError("Экземпляр бота не найден или доступ запрещён.")
+        authorized_master_id = instance.master_id
+        await MasterAuthorizationService(self.session).require_admin(authorized_master_id, actor_user_id)
+        instance = await self.session.scalar(
+            select(BotInstance).where(
+                BotInstance.id == bot_instance_id, BotInstance.master_id == authorized_master_id,
+            )
+            .with_for_update().execution_options(populate_existing=True)
+        )
+        if not instance or not instance.is_current or instance.status not in (
+            BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED,
+        ):
+            raise ProvisioningWebhookError("Обновление webhook доступно только текущему подключённому боту.")
+        if not instance.encrypted_token or not instance.telegram_bot_id or not instance.webhook_secret:
+            raise ProvisioningWebhookError("Данные подключения бота неполные.")
+        base_url = webhook_origin(settings.webhook_base_url, production=settings.is_production)
+        url = f"{base_url}/telegram/webhook/{instance.public_id}"
+        token = self.crypto.decrypt(instance.encrypted_token, associated_data=instance.telegram_bot_id)
+        try:
+            result = await self.gateway.set_webhook(
+                token=token, url=url, secret_token=instance.webhook_secret,
+                drop_pending_updates=False,
+            )
+            if not result:
+                raise ProvisioningWebhookError("Telegram не подтвердил установку webhook.")
+            info = await self.gateway.get_webhook_info(token)
+            if info.url != url:
+                raise ProvisioningWebhookError("Telegram вернул несовпадающий URL webhook.")
+        except TelegramGatewayError as exc:
+            raise ProvisioningWebhookError("Не удалось обновить webhook. Повторите позже.") from exc
+        instance.last_error = None
+        await self.audit_service.log_event(
+            action=AuditEvent.BOT_WEBHOOK_RESYNCED, actor_user_id=actor_user_id,
+            master_id=instance.master_id, entity_id=instance.id,
+            payload_after={"status": instance.status.value, "url": url},
+        )
+        # No token/status/version change: a registry invalidation is unnecessary.
+        await self.session.flush()
+        if commit:
+            await self.session.commit()
+        return instance
+
     async def retry_provisioning(
         self,
         bot_instance_id: int,
         actor_user_id: int,
+        *, commit: bool = True,
     ) -> BotInstance:
         """Retry setWebhook for an ERROR BotInstance without creating duplicates."""
         bot_instance = await self.bot_repo.get_by_id_and_owner(bot_instance_id, actor_user_id)
@@ -417,7 +471,7 @@ class BotProvisioningService:
             raise AccessDeniedError("Экземпляр бота не найден или доступ запрещен.")
 
         if bot_instance.status in (BotInstanceStatus.SETUP_REQUIRED, BotInstanceStatus.ACTIVE):
-            return bot_instance
+            return await self.resync_webhook(bot_instance_id, actor_user_id, commit=commit)
 
         if not bot_instance.encrypted_token or not bot_instance.telegram_bot_id:
             raise ProvisioningWebhookError("Токен бота не настроен.")
@@ -428,7 +482,7 @@ class BotProvisioningService:
             associated_data=bot_instance.telegram_bot_id,
         )
 
-        base_url = settings.webhook_base_url.rstrip("/")
+        base_url = webhook_origin(settings.webhook_base_url, production=settings.is_production)
         webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
 
         try:
@@ -448,9 +502,6 @@ class BotProvisioningService:
 
             bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
             bot_instance.last_error = None
-            await self.session.commit()
-            if self.registry:
-                await self.registry.invalidate_bot(bot_instance.id, reason="bot_reconnected")
 
             await self.audit_service.log_event(
                 action=AuditEvent.BOT_CONNECTED,
@@ -459,13 +510,15 @@ class BotProvisioningService:
                 entity_id=bot_instance.id,
                 payload_after={"status": "SETUP_REQUIRED", "retry": True},
             )
-            await self.session.commit()
+            await self._finish_state_change(bot_instance.id, "webhook_retry", commit=commit)
             return bot_instance
         except Exception as exc:
             error_desc = f"Ошибка повторного подключения: {redact_token(str(exc)[:200])}"
             bot_instance.status = BotInstanceStatus.ERROR
             bot_instance.last_error = error_desc
-            await self.session.commit()
+            await self.session.flush()
+            if commit:
+                await self.session.commit()
             raise ProvisioningWebhookError(error_desc) from exc
 
     async def rotate_token(
@@ -517,7 +570,7 @@ class BotProvisioningService:
             await self.registry.invalidate_bot(bot_instance.id)
 
         # 6. Update webhook with new token
-        base_url = settings.webhook_base_url.rstrip("/")
+        base_url = webhook_origin(settings.webhook_base_url, production=settings.is_production)
         webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
 
         try:
@@ -648,7 +701,7 @@ class BotProvisioningService:
             await self.gateway.validate_token(raw_token)
 
             # Re-install webhook
-            base_url = settings.webhook_base_url.rstrip("/")
+            base_url = webhook_origin(settings.webhook_base_url, production=settings.is_production)
             webhook_url = f"{base_url}/telegram/webhook/{bot_instance.public_id}"
 
             await self.gateway.set_webhook(

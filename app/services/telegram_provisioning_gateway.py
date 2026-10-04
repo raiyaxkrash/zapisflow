@@ -5,6 +5,9 @@ guaranteeing that temporary bot client sessions are closed cleanly without resou
 """
 
 import asyncio
+import socket
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 import logging
 from typing import Optional
@@ -20,6 +23,8 @@ from aiogram.exceptions import (
 from aiogram.types import BotCommand, MenuButton, WebhookInfo
 
 from app.core.security import mask_token
+from app.config.settings import settings
+from app.config.url_validation import webhook_origin
 from app.services.exceptions import (
     InvalidBotTokenError,
     TelegramGatewayError,
@@ -107,15 +112,39 @@ class TelegramProvisioningGateway:
 
         bot = self._create_temp_bot(token)
         try:
+            delivery = {}
+            if settings.is_production:
+                parsed = urlsplit(url)
+                webhook_origin(f"{parsed.scheme}://{parsed.netloc}", production=True)
+                try:
+                    addresses = await asyncio.wait_for(
+                        asyncio.get_running_loop().getaddrinfo(
+                            parsed.hostname, parsed.port or 443,
+                            family=socket.AF_INET, type=socket.SOCK_STREAM,
+                        ), timeout=self.request_timeout,
+                    )
+                except OSError as exc:
+                    raise TelegramGatewayNetworkError("Не удалось разрешить DNS webhook.") from exc
+                current_ip = next((entry[4][0] for entry in addresses if ip_address(entry[4][0]).is_global), None)
+                if not current_ip:
+                    raise TelegramGatewayNetworkError("DNS webhook не содержит публичного IPv4 адреса.")
+                delivery["ip_address"] = current_ip
             result = await asyncio.wait_for(
                 bot.set_webhook(
                     url=url,
                     secret_token=secret_token,
                     allowed_updates=configured_updates,
                     drop_pending_updates=drop_pending_updates,
+                    **delivery,
                 ),
                 timeout=self.request_timeout,
             )
+            if not result:
+                raise TelegramGatewayError("Telegram не подтвердил установку webhook.")
+            if delivery:
+                info = await asyncio.wait_for(bot.get_webhook_info(), timeout=self.request_timeout)
+                if info.url != url or info.ip_address != delivery["ip_address"]:
+                    raise TelegramGatewayError("Telegram не подтвердил URL/IP webhook.")
             logger.info("Successfully set webhook for bot token %s -> %s", mask_token(token), url)
             return bool(result)
         except TelegramUnauthorizedError as exc:
@@ -269,4 +298,3 @@ class TelegramProvisioningGateway:
             return False
         finally:
             await bot.session.close()
-
