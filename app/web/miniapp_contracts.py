@@ -1,5 +1,6 @@
 """Input allow-lists for the Mini App. Extra authoritative fields are rejected."""
 
+from typing import Literal
 from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
@@ -216,4 +217,20 @@ class ScheduleInput(Input):
                 raise ValueError("Break outside work interval")
             if index and ordered[index - 1][1] > start:
                 raise ValueError("Overlapping breaks")
+        return self
+
+
+class DateScheduleInput(Input):
+    staff_id: int = Field(gt=0)
+    scope: Literal["staff", "project"] = "staff"
+    mode: Literal["weekly", "day_off", "custom"]
+    work_start: time = time(10)
+    work_end: time = time(19)
+    breaks: list[tuple[time, time]] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="after")
+    def window(self):
+        if self.mode == "custom":
+            ScheduleInput(staff_id=self.staff_id, weekday=0, work_start=self.work_start,
+                          work_end=self.work_end, breaks=self.breaks)
         return self

@@ -69,7 +69,7 @@ def get_main_menu_keyboard(
     if is_admin:
         builder.row(
             InlineKeyboardButton(
-                text="⚙️ Панель мастера (Админка)",
+                text="⚙️ Панель управления",
                 callback_data="admin:menu",
             )
         )

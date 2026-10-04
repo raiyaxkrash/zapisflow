@@ -939,3 +939,177 @@ def test_miniapp_url_configuration_and_menu_binding(monkeypatch):
         ).action
         == "book"
     )
+
+
+@pytest.mark.asyncio
+async def test_bot_mini_app_switch_owner_only_persists_and_enforces_old_sessions(system):
+    from unittest.mock import AsyncMock
+    from aiogram.types import MenuButtonCommands, MenuButtonWebApp
+    from app.services.bot_provisioning_service import BotProvisioningService
+    from app.services.exceptions import AccessDeniedError
+    client = await login(system)
+    gateway = SimpleNamespace(set_chat_menu_button=AsyncMock(return_value=True))
+    async with system.factory() as session:
+        service = BotProvisioningService(session, gateway=gateway)
+        with pytest.raises(AccessDeniedError):
+            await service.set_mini_app_enabled(system.bots[0].id, system.owners[1].id, False)
+        await service.set_mini_app_enabled(system.bots[0].id, system.owners[0].id, False)
+        assert isinstance(gateway.set_chat_menu_button.call_args.kwargs["menu_button"], MenuButtonCommands)
+        await session.commit()
+    result = await client.get("/api/miniapp/context")
+    assert result.status_code == 403 and result.json()["code"] == "MINI_APP_DISABLED"
+    result = await client.post("/api/miniapp/auth", headers={"Origin": ORIGIN}, json={"bot_public_id":str(system.bots[0].public_id), "init_data":signed(11001)})
+    assert result.status_code == 403 and result.json()["code"] == "MINI_APP_DISABLED"
+    async with system.factory() as session:
+        assert await session.scalar(select(func.count()).select_from(MiniAppSession)) == 1
+        service = BotProvisioningService(session, gateway=gateway)
+        await service.set_mini_app_enabled(system.bots[0].id, system.owners[0].id, True)
+        assert isinstance(gateway.set_chat_menu_button.call_args.kwargs["menu_button"], MenuButtonWebApp)
+        await session.commit()
+    assert (await client.get("/api/miniapp/context")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_bot_mini_app_menu_failure_rolls_back_without_rotating_token(system):
+    from unittest.mock import AsyncMock
+    from app.services.bot_provisioning_service import BotProvisioningService
+    from app.services.exceptions import ProvisioningWebhookError
+    async with system.factory() as session:
+        row = await session.get(BotInstance, system.bots[0].id)
+        snapshot = row.encrypted_token, row.token_version, row.status
+        with pytest.raises(ProvisioningWebhookError):
+            await BotProvisioningService(session, gateway=SimpleNamespace(set_chat_menu_button=AsyncMock(return_value=False))).set_mini_app_enabled(row.id, system.owners[0].id, False)
+        await session.rollback()
+    async with system.factory() as session:
+        row = await session.get(BotInstance, system.bots[0].id)
+        assert row.mini_app_enabled is True
+        assert (row.encrypted_token, row.token_version, row.status) == snapshot
+
+
+async def calendar_month(client, target, service, staff=None):
+    result = await client.get("/api/miniapp/client/availability/calendar", params={"year":target.year,"month":target.month,"service_id":service,"staff_id":staff} if staff else {"year":target.year,"month":target.month,"service_id":service})
+    assert result.status_code == 200, result.text
+    return result.json()
+
+
+@pytest.mark.asyncio
+async def test_client_calendar_backend_boundaries_and_tenant_scope(system):
+    client = await login(system)
+    today = datetime.now(UTC).date()
+    data = await calendar_month(client, today, system.services[0].id, system.staffs[0].id)
+    for day in data["days"]:
+        d = datetime.fromisoformat(day["date"]).date()
+        if d < today or d > today + timedelta(days=14):
+            assert not day["available"]
+    assert data["max_date"] == (today+timedelta(days=14)).isoformat()
+    for key, value in [("staff_id",system.staffs[1].id),("service_id",system.services[1].id)]:
+        params={"year":today.year,"month":today.month,"service_id":system.services[0].id,key:value}
+        assert (await client.get("/api/miniapp/client/availability/calendar",params=params)).status_code==404
+
+
+@pytest.mark.asyncio
+async def test_master_calendar_override_custom_reset_immediately_reflects_client(system):
+    client = await login(system)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=system.app),base_url=ORIGIN) as owner:
+        await login(system,11001,client=owner)
+        target=(datetime.now(UTC)+timedelta(days=2)).date()
+        sid=system.staffs[0].id
+        path=f"/master/schedule/dates/{target}"
+        def day(data): return next(row for row in data["days"] if row["date"]==str(target))
+        assert day(await calendar_month(client,target,system.services[0].id,sid))["available"]
+        result=await post(owner,path,{"staff_id":sid,"mode":"day_off"},method="PUT")
+        assert result.status_code==200,result.text
+        assert result.json()["mode"]=="day_off"
+        assert not day(await calendar_month(client,target,system.services[0].id,sid))["available"]
+        # Custom window too short for service + buffer => unavailable.
+        result=await post(owner,path,{"staff_id":sid,"mode":"custom","work_start":"10:00","work_end":"10:30"},method="PUT")
+        assert result.status_code==200,result.text
+        assert not day(await calendar_month(client,target,system.services[0].id,sid))["available"]
+        result=await post(owner,path,{"staff_id":sid,"mode":"custom","work_start":"12:00","work_end":"18:00","breaks":[["13:00","14:00"]]},method="PUT")
+        assert result.status_code==200
+        assert day(await calendar_month(client,target,system.services[0].id,sid))["available"]
+        slots=await client.get("/api/miniapp/client/slots",params={"service_id":system.services[0].id,"staff_id":sid,"target_date":str(target)})
+        assert all("T12:" in t or t[11:16]>="14:00" for t in slots.json()["slots"])
+        refreshed=await owner.get("/api/miniapp/master/schedule/calendar",params={"staff_id":sid,"year":target.year,"month":target.month})
+        assert day(refreshed.json())["has_override"]
+        assert day(refreshed.json())["breaks"]==[["13:00:00","14:00:00"]]
+        assert (await post(owner,path,{"staff_id":sid,"mode":"weekly"},method="PUT")).status_code==200
+        assert day(await calendar_month(client,target,system.services[0].id,sid))["available"]
+        assert not day((await owner.get("/api/miniapp/master/schedule/calendar",params={"staff_id":sid,"year":target.year,"month":target.month})).json())["has_override"]
+
+
+@pytest.mark.asyncio
+async def test_master_date_change_warns_and_never_deletes_existing_appointment(system):
+    client=await login(system)
+    hold=await make_hold(system)
+    target=datetime.fromisoformat(hold["start_time"]).date()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=system.app),base_url=ORIGIN) as owner:
+        await login(system,11001,client=owner)
+        result=await post(owner,f"/master/schedule/dates/{target}",{"staff_id":system.staffs[0].id,"mode":"day_off"},method="PUT")
+        assert result.status_code==200,result.text
+        assert result.json()["appointment_count"]==1
+        assert result.json()["warning"]
+    async with system.factory() as session:
+        assert (await session.get(Appointment,hold["id"])).status.value=="WAITING_PAYMENT"
+
+
+@pytest.mark.asyncio
+async def test_date_calendar_requires_admin_csrf_and_same_tenant(system):
+    today=datetime.now(UTC).date()
+    client=await login(system)
+    path=f"/master/schedule/dates/{today}"
+    body={"staff_id":system.staffs[0].id,"mode":"day_off"}
+    assert (await post(client,path,body,method="PUT")).status_code==403
+    await login(system,11001,raw=signed(11001,query_id="owner"))
+    headers=dict(client.headers)
+    del client.headers["x-csrf-token"]
+    assert (await post(client,path,body,method="PUT")).status_code==403
+    client.headers.update(headers)
+    assert (await post(client,path,{**body,"staff_id":system.staffs[1].id},method="PUT")).status_code==404
+    assert (await post(client,path,{**body,"mode":"custom","work_start":"18:00","work_end":"10:00"},method="PUT")).status_code==422
+    result=await client.get("/api/miniapp/master/schedule/calendar",params={"year":today.year,"month":today.month,"staff_id":system.staffs[1].id})
+    assert result.status_code==404
+
+
+@pytest.mark.asyncio
+async def test_weekly_day_off_can_be_overridden_as_working_date_and_project_override_has_priority(system):
+    client=await login(system)
+    target=(datetime.now(UTC)+timedelta(days=3)).date()
+    sid=system.staffs[0].id
+    async with system.factory() as session:
+        repo=ScheduleRepository(session)
+        await repo.set_template(target.weekday(),True,master_id=system.masters[0].id,staff_id=sid)
+        await session.commit()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=system.app),base_url=ORIGIN) as owner:
+        await login(system,11001,client=owner)
+        path=f"/master/schedule/dates/{target}"
+        result=await post(owner,path,{"staff_id":sid,"mode":"custom","work_start":"10:00","work_end":"18:00"},method="PUT")
+        assert result.status_code==200
+        data=await calendar_month(client,target,system.services[0].id,sid)
+        assert next(d for d in data["days"] if d["date"]==str(target))["available"]
+        assert (await post(owner,path,{"staff_id":sid,"scope":"project","mode":"day_off"},method="PUT")).status_code==200
+        data=await calendar_month(client,target,system.services[0].id,sid)
+        assert not next(d for d in data["days"] if d["date"]==str(target))["available"]
+
+
+@pytest.mark.asyncio
+async def test_project_date_override_warns_about_other_staff_appointments(system):
+    client = await login(system)
+    hold = await make_hold(system)
+    target = datetime.fromisoformat(hold["start_time"]).date()
+    async with system.factory() as session:
+        other = StaffMember(master_id=system.masters[0].id, display_name="Other specialist")
+        session.add(other)
+        await session.flush()
+        appointment = await session.get(Appointment, hold["id"])
+        appointment.staff_id = other.id
+        await session.commit()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=system.app), base_url=ORIGIN) as owner:
+        await login(system, 11001, client=owner)
+        result = await post(owner, f"/master/schedule/dates/{target}",
+                            {"staff_id": system.staffs[0].id, "scope": "project", "mode": "day_off"}, method="PUT")
+        assert result.status_code == 200, result.text
+        assert result.json()["appointment_count"] == 1
+        assert result.json()["warning"]
+    async with system.factory() as session:
+        assert (await session.get(Appointment, hold["id"])).status.value == "WAITING_PAYMENT"

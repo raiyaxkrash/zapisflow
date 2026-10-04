@@ -3,7 +3,7 @@
 import logging
 import secrets
 from typing import List, Optional, Tuple
-from aiogram.types import MenuButtonWebApp, WebAppInfo
+from aiogram.types import MenuButtonCommands, MenuButtonWebApp, WebAppInfo
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,18 +52,38 @@ class BotProvisioningService:
         self.audit_service = AuditService(session)
         self.readiness_service = MasterReadinessService(session)
 
-    async def configure_client_menu(self, bot_instance: BotInstance, token: str) -> bool:
-        """Configure one trusted server-selected bot; never commits or changes bot state.
+    async def configure_client_menu(self, bot_instance: BotInstance, token: str, *, enabled: bool | None = None) -> bool:
+        """Apply per-bot preference; no business data changes or commit."""
+        button = MenuButtonCommands()
+        if (bot_instance.mini_app_enabled if enabled is None else enabled) and settings.mini_app_base_url:
+            url = f"{miniapp_origin(settings.mini_app_base_url)}/b/{bot_instance.public_id}"
+            button = MenuButtonWebApp(text="ZapisFlow", web_app=WebAppInfo(url=url))
+        return await self.gateway.set_chat_menu_button(token, menu_button=button)
 
-        Maintenance callers must authorize the selected instance before invoking this.
-        Empty Mini App configuration leaves the existing menu untouched.
-        """
-        if not settings.mini_app_base_url:
-            return False
-        url = f"{miniapp_origin(settings.mini_app_base_url)}/b/{bot_instance.public_id}"
-        return await self.gateway.set_chat_menu_button(
-            token, menu_button=MenuButtonWebApp(text="ZapisFlow", web_app=WebAppInfo(url=url))
+    async def set_mini_app_enabled(self, bot_instance_id: int, actor_user_id: int, enabled: bool) -> BotInstance:
+        """Owner-only desired state; caller/middleware owns the transaction."""
+        row = await self.bot_repo.get_by_id(bot_instance_id)
+        if row is None:
+            raise AccessDeniedError("Доступ запрещён")
+        master_id = row.master_id
+        await MasterAuthorizationService(self.session).require_owner(master_id, actor_user_id)
+        row = await self.session.scalar(select(BotInstance).where(
+            BotInstance.id == bot_instance_id, BotInstance.master_id == master_id,
+        ).with_for_update().execution_options(populate_existing=True))
+        if not row or not row.is_current or row.status not in {BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED}:
+            raise ProvisioningWebhookError("Выберите текущего подключённого бота")
+        if enabled and not settings.mini_app_base_url:
+            raise ProvisioningWebhookError("Mini App ещё не настроен")
+        token = self.crypto.decrypt(row.encrypted_token, associated_data=row.telegram_bot_id)
+        if not await self.configure_client_menu(row, token, enabled=enabled):
+            raise ProvisioningWebhookError("Не удалось обновить меню Telegram. Повторите позже")
+        row.mini_app_enabled = enabled
+        await self.audit_service.log_event(
+            action="BOT_MINI_APP_CHANGED", actor_user_id=actor_user_id,
+            master_id=master_id, entity_id=row.id, payload_after={"enabled": enabled},
         )
+        await self.session.flush()
+        return row
 
     async def validate_candidate_token(
         self,
@@ -207,6 +227,12 @@ class BotProvisioningService:
                 raise ProvisioningWebhookError("В URL вебхука обнаружены секретные данные.")
             if info.url != webhook_url:
                 raise ProvisioningWebhookError(f"URL вебхука в Telegram ({info.url}) не совпадает с ожидаемым ({webhook_url}).")
+
+            # Menu preference is independent of text booking and webhook status.
+            try:
+                await self.configure_client_menu(bot_instance, clean_token)
+            except TelegramGatewayError:
+                logger.warning("Could not set menu button for bot_instance_id=%s", bot_instance.id)
 
             # Success -> advance status to SETUP_REQUIRED
             bot_instance.status = BotInstanceStatus.SETUP_REQUIRED
@@ -368,11 +394,10 @@ class BotProvisioningService:
                 logger.warning("Could not set commands for bot %s: %s", bot_identity.id, cmd_exc)
 
             # Mini App Menu Button (if configured)
-            if settings.mini_app_base_url:
-                try:
-                    await self.configure_client_menu(bot_instance, clean_token)
-                except Exception as btn_exc:
-                    logger.warning("Could not set menu button for bot %s: %s", bot_identity.id, btn_exc)
+            try:
+                await self.configure_client_menu(bot_instance, clean_token)
+            except Exception as btn_exc:
+                logger.warning("Could not set menu button for bot %s: %s", bot_identity.id, btn_exc)
 
             # Success -> advance status to SETUP_REQUIRED
             bot_instance.status = BotInstanceStatus.SETUP_REQUIRED

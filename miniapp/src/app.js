@@ -1,4 +1,5 @@
 import './style.css';
+import { calendarView, monthKey, monthQuery, shiftMonth } from './calendar.js';
 import { Api } from './api/client.js';
 import { bootstrap, botIdFromPath } from './telegram/bootstrap.js';
 import { setupTheme } from './theme/theme.js';
@@ -8,6 +9,7 @@ const api = new Api();
 const root = document.getElementById('app');
 let tg, theme, ctx, services = [], team = [], chosen, selectedStaff = null, selectedSlot, hold, selectedDate,
   screen = 'home', mode = 'client', busy = false, lastRoute = ['home'], revision = 0, pendingAction = null;
+let clientMonth, scheduleMonth, scheduleDate, scheduleStaff, scheduleDay, dashboardCalendar = false;
 const formValues = form => Object.fromEntries(new FormData(form));
 
 function shell(content) {
@@ -53,10 +55,14 @@ async function render(page, id) {
     return header(chosen.title, 'К кому запишемся?') + (team.length ? `<div class="options">${b('Любой специалист','staff','any','person')}${team.map(s=>b(s.display_name,'staff',s.id,'person')).join('')}</div>` : empty('Нет доступных специалистов'));
   }
   if (page === 'time') {
-    const data = await api.get(`/client/slots?service_id=${chosen.id}&target_date=${selectedDate}${selectedStaff ? `&staff_id=${selectedStaff}` : ''}`);
-    const end = new Date(`${ctx.today}T12:00:00Z`); end.setUTCDate(end.getUTCDate() + ctx.booking_horizon_days);
-    return header(chosen.title,'Когда удобно?') + `<form id="date-form">${f('Дата','date',selectedDate,'date',`min="${ctx.today}" max="${end.toISOString().slice(0,10)}" required`)}<button class="secondary">Показать время</button></form><p class="sub">Часовой пояс студии: ${e(ctx.project.timezone)}</p>` +
-      (data.slots.length ? `<div class="times">${data.slots.map(slot=>b(slot.slice(11,16),'slot',slot,'slot')).join('')}</div>` : empty('На эту дату свободного времени нет. Выберите другой день.'));
+    clientMonth ||= monthKey(ctx.today);
+    const scope = `service_id=${chosen.id}${selectedStaff ? `&staff_id=${selectedStaff}` : ''}`;
+    const month = await api.get(`/client/availability/calendar?${monthQuery(clientMonth)}&${scope}`);
+    const selected = month.days.find(day=>day.date===selectedDate);
+    const data = selected?.available ? await api.get(`/client/slots?${scope}&target_date=${selectedDate}`) : {slots:[]};
+    return header(chosen.title,'Выберите дату') + calendarView(month,{selected:selectedDate,action:'client-date',monthAction:'client-month'}) +
+      `<p class="sub">Часовой пояс студии: ${e(ctx.project.timezone)}</p><h3>${selected?.available?'Свободное время':'Нажмите на доступную дату'}</h3>` +
+      (data.slots.length ? `<div class="times">${data.slots.map(slot=>b(slot.slice(11,16),'slot',slot,'slot')).join('')}</div>` : empty('Выберите дату с доступным временем.'));
   }
   if (page === 'confirm') {
     return header('Время зарезервировано','Всё верно?') + bookingCard(hold) + `<form id="confirm-form">${f('Телефон','phone',ctx.user.phone || '','tel','required autocomplete="tel"')}<label class="check"><input name="policy" type="checkbox" required><span>Согласен с условиями отмены. ${ctx.cancel_policy_hours} ч — срок из настроек студии. Внесённая предоплата при отмене не возвращается.</span></label><button class="primary">${Number(hold.deposit) ? 'Подтвердить и получить реквизиты' : 'Подтвердить запись'}</button></form>`;
@@ -77,7 +83,10 @@ async function render(page, id) {
   if (page === 'contact') return contacts();
   if (page === 'dashboard') {
     const rows = await api.get(`/master/appointments?target_date=${selectedDate}`);
-    return header(ctx.project.name,'Расписание') + `<form id="dashboard-date-form">${f('Дата','date',selectedDate,'date','required')}<button class="secondary">Показать записи</button></form>` +
+    const day = new Date(`${selectedDate}T12:00:00Z`);
+    const controls = `<div class="daily-navigation">${b('‹','daily-shift',-1,'secondary')}<strong>${e(new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',timeZone:'UTC'}).format(day))}</strong>${b('📅','daily-calendar','open','secondary')}${b('›','daily-shift',1,'secondary')}</div>`;
+    const month = {year:day.getUTCFullYear(),month:day.getUTCMonth()+1,today:ctx.today,days:Array.from({length:new Date(Date.UTC(day.getUTCFullYear(),day.getUTCMonth()+1,0)).getUTCDate()},(_,i)=>({date:`${monthKey(selectedDate)}-${String(i+1).padStart(2,'0')}`,available:true}))};
+    return header(ctx.project.name,'Расписание') + controls + (dashboardCalendar?calendarView(month,{selected:selectedDate,master:true,action:'daily-date',monthAction:'daily-month'}):'') +
       (rows.length ? rows.map(a=>bookingCard(a,true)+b('Открыть запись','appointment',a.id,'secondary')).join('') : empty('На эту дату записей нет'));
   }
   if (page === 'appointment') {
@@ -94,7 +103,7 @@ async function render(page, id) {
     const card = await api.get(`/master/clients/${id}`);
     return header('Клиент',card.name) + `<p>${e(card.phone || '')}</p><p>Визитов: ${card.total_bookings} · ${rub(card.total_spent)}</p><form id="notes-form" data-id="${id}">${f('Заметки','notes',card.notes || '', 'text','maxlength="2000"')}<button class="primary">Сохранить заметку</button></form><h3>История</h3>` + card.history.map(a=>bookingCard(a,true)).join('');
   }
-  if (page === 'settings') return header(ctx.project.name,'Управление') + [['manage-services','Услуги'],['team','Команда'],['schedule','График и отдельные даты'],['contacts-edit','Контакты'],['requisites','Предоплата и реквизиты'],['booking-settings','Настройки записи']].map(([p,l])=>b(l,'nav',p,'settings-row')).join('');
+  if (page === 'settings') return header(ctx.project.name,'Управление') + [['manage-services','Услуги'],['team','Команда'],['schedule','Расписание'],['contacts-edit','Контакты'],['requisites','Предоплата и реквизиты'],['booking-settings','Настройки записи']].map(([p,l])=>b(l,'nav',p,'settings-row')).join('');
   if (['contacts-edit','requisites','booking-settings'].includes(page)) {
     const data = await api.get('/master/settings');
     const fields = page === 'contacts-edit' ? {studio_address:'Адрес',studio_phone:'Телефон',whatsapp_phone:'WhatsApp',working_hours_text:'Режим работы',contacts_intro_text:'Вступление',telegram_username:'Telegram username',vk_profile:'ВКонтакте',about_text:'О студии'} : page === 'requisites' ? {bank_name:'Банк',bank_card_number:'Карта / телефон',bank_recipient_name:'Получатель'} : {booking_horizon_days:'Горизонт записи, дней',hold_duration_minutes:'Резервирование, минут',cancel_policy_hours:'Срок отмены, часов',min_advance_hours:'Минимум до визита, часов',grid_step_minutes:'Шаг слотов, минут',default_buffer_minutes:'Буфер, минут'};
@@ -116,16 +125,29 @@ async function render(page, id) {
     const s = team.find(s=>s.id===Number(id)); services = await api.get('/master/services');
     return header('Сотрудник',s.display_name) + `<form id="staff-form" data-id="${id}">${f('Имя','display_name',s.display_name,'text','required')}${f('Специализация','specialization',s.specialization || '')}<label class="check"><input name="is_active" type="checkbox" ${s.is_active?'checked':''}>Активен</label><h3>Услуги</h3>${notice('Если назначения пустые, сотрудник оказывает все активные услуги — правило текущего ZapisFlow.')}${services.map(row=>`<label class="check"><input name="service_ids" value="${row.id}" type="checkbox" ${s.service_ids.includes(row.id)?'checked':''}>${e(row.title)}</label>`).join('')}<button class="primary">Сохранить</button></form>`;
   }
-  if (page === 'schedule') {
+  if (['schedule','schedule-weekly','schedule-dates'].includes(page)) {
     team = await api.get('/master/staff');
     if (!team.length) return empty('Добавьте сотрудника в Telegram-админке');
-    const staffId = Number(id) || team[0].id;
-    const data = await api.get(`/master/schedule?staff_id=${staffId}`);
-    const weekdays = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
-    return header('График','Рабочее время') + `<form id="schedule-staff-form"><label class="field">Сотрудник<select name="staff_id">${team.map(s=>`<option value="${s.id}" ${s.id===staffId?'selected':''}>${e(s.display_name)}</option>`).join('')}</select></label><button class="secondary">Показать график</button></form>` +
-      data.weekly.map(r=>`<p>${weekdays[r.weekday]}: ${r.is_day_off?'выходной':`${e(r.work_start)}–${e(r.work_end)}`}</p>`).join('') +
-      `<form id="schedule-form" data-staff="${staffId}"><label class="field">День недели<select name="weekday"><option value="">Отдельная дата</option>${weekdays.map((w,i)=>`<option value="${i}">${w}</option>`).join('')}</select></label>${f('Или отдельная дата','target_date',ctx.today,'date')}<label class="check"><input type="checkbox" name="is_day_off">Выходной</label>${f('Начало','work_start','10:00','time','required')}${f('Конец','work_end','19:00','time','required')}${f('Перерывы (10:30-11:00, 13:00-14:00)','breaks','')}<button class="primary">Сохранить день</button></form><h3>Отдельные даты</h3>` +
-      data.dates.map(r=>`<p>${r.scope==='project'?'Студия · ':''}${e(r.target_date)}: ${r.is_day_off?'выходной':`${e(r.work_start)}–${e(r.work_end)}`}</p>`).join('');
+    const staffId = Number(id) || scheduleStaff || team[0].id;
+    scheduleStaff = staffId;
+    if (page === 'schedule') return header(ctx.project.name,'Расписание') + b('Еженедельное расписание','nav','schedule-weekly','settings-row') + b('Отдельные даты','nav','schedule-dates','settings-row') + b('Горизонт записи','nav','booking-settings','settings-row');
+    const chooseStaff = `<form id="schedule-staff-form" data-page="${page}"><label class="field">Сотрудник<select name="staff_id">${team.map(row=>`<option value="${row.id}" ${row.id===staffId?'selected':''}>${e(row.display_name)}</option>`).join('')}</select></label><button class="secondary">Показать</button></form>`;
+    if (page === 'schedule-weekly') {
+      const data = await api.get(`/master/schedule?staff_id=${staffId}`);
+      const weekdays = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+      return header('Расписание','Еженедельное расписание') + chooseStaff + data.weekly.map(row=>`<p>${weekdays[row.weekday]}: ${row.is_day_off?'выходной':`${e(row.work_start)}–${e(row.work_end)}`}</p>`).join('') +
+        `<form id="schedule-form" data-staff="${staffId}"><label class="field">День недели<select name="weekday">${weekdays.map((label,i)=>`<option value="${i}">${label}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="is_day_off">Выходной</label>${f('Начало','work_start','10:00','time','required')}${f('Конец','work_end','19:00','time','required')}${f('Перерывы (10:30-11:00, 13:00-14:00)','breaks','')}<button class="primary">Сохранить день</button></form>`;
+    }
+    scheduleMonth ||= monthKey(ctx.today);
+    const data = await api.get(`/master/schedule/calendar?${monthQuery(scheduleMonth)}&staff_id=${staffId}`);
+    scheduleDate ||= ctx.today;
+    scheduleDay = data.days.find(row=>row.date===scheduleDate);
+    const day = scheduleDay;
+    const editor = day ? `<h3>${e(new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',timeZone:'UTC'}).format(new Date(day.date+'T12:00:00Z')))}</h3>` +
+      (day.scope==='project'?notice('Настройка для всей студии. Изменение повлияет на всех специалистов.'):'') +
+      (day.appointment_count?notice(`На эту дату уже есть ${day.appointment_count} записи. Изменение расписания не отменит существующие записи.`):'') +
+      `<form id="date-schedule-form" data-staff="${staffId}" data-date="${day.date}" data-scope="${day.scope}"><label class="field">Режим дня<select name="mode"><option value="weekly" ${!day.has_override?'selected':''}>По обычному расписанию</option><option value="day_off" ${day.has_override&&day.mode==='day_off'?'selected':''}>Выходной</option><option value="custom" ${day.has_override&&day.mode==='custom'?'selected':''}>Особое расписание</option></select></label><div id="custom-hours" ${day.mode==='custom'&&day.has_override?'':'hidden'}>${f('Начало','work_start',(day.work_start || '10:00').slice(0,5),'time')}${f('Конец','work_end',(day.work_end || '18:00').slice(0,5),'time')}${f('Перерывы (10:30-11:00, 13:00-14:00)','breaks',day.breaks.map(pair=>pair.map(t=>t.slice(0,5)).join('-')).join(', '))}</div><button class="primary">Сохранить</button></form>` : empty('Выберите дату');
+    return header('Расписание','Отдельные даты') + chooseStaff + calendarView(data,{selected:scheduleDate,master:true,action:'schedule-date',monthAction:'schedule-month'}) + editor;
   }
   if (page === 'manual') {
     services = await api.get('/master/services'); team = await api.get('/master/staff');
@@ -137,10 +159,11 @@ async function render(page, id) {
 
 async function run(action) {
   if (busy) return; busy = true;
-  root.querySelectorAll('button').forEach(button=>button.disabled=true);
+  const enabledButtons = [...root.querySelectorAll('button')].filter(button=>!button.disabled);
+  enabledButtons.forEach(button=>button.disabled=true);
   try { await action(); pendingAction = null; }
   catch (error) { pendingAction = error.code === 'NETWORK' || error.status === 503 ? action : null; showError(error); }
-  finally { busy = false; root.querySelectorAll('button').forEach(button=>button.disabled=false); }
+  finally { busy = false; enabledButtons.forEach(button=>{ if(button.isConnected)button.disabled=false; }); }
 }
 root.addEventListener('click', event => {
   const target = event.target.closest('[data-action]'); if (!target) return;
@@ -152,7 +175,15 @@ root.addEventListener('click', event => {
     if (action === 'resume') { hold = (await api.get('/client/appointments')).find(a => a.id === Number(id)); if (!hold) throw new Error('Резерв недоступен'); return route('confirm'); }
     if (action === 'mode') { if (id==='master' && !canManage(ctx)) return; mode=id; selectedDate=ctx.today; return route(id==='master'?'dashboard':'home'); }
     if (action === 'choose-service') { if (!ctx.can_book) return route('contact'); chosen=services.find(s=>s.id===Number(id)); return route('staff'); }
-    if (action === 'staff') { selectedStaff=id==='any'?null:Number(id); selectedDate=ctx.today; return route('time'); }
+    if (action === 'staff') { selectedStaff=id==='any'?null:Number(id); selectedDate=ctx.today; clientMonth=monthKey(ctx.today); return route('time'); }
+    if (action === 'client-date') { selectedDate=id; return route('time'); }
+    if (action === 'client-month') { clientMonth=id; return route('time'); }
+    if (action === 'schedule-date') { scheduleDate=id; return route('schedule-dates',scheduleStaff); }
+    if (action === 'schedule-month') { scheduleMonth=id; scheduleDate=null; return route('schedule-dates',scheduleStaff); }
+    if (action === 'daily-calendar') { dashboardCalendar=!dashboardCalendar; return route('dashboard'); }
+    if (action === 'daily-date') { selectedDate=id; dashboardCalendar=false; return route('dashboard'); }
+    if (action === 'daily-month') { selectedDate=id+'-01'; return route('dashboard'); }
+    if (action === 'daily-shift') { const day=new Date(selectedDate+'T12:00:00Z');day.setUTCDate(day.getUTCDate()+Number(id));selectedDate=day.toISOString().slice(0,10);return route('dashboard'); }
     if (action === 'slot') { selectedSlot=id; hold=await api.mutate('/client/holds',{service_id:chosen.id,staff_id:selectedStaff,start_time:selectedSlot}); return route('confirm'); }
     if (action === 'payment') return route('payment',id);
     if (action === 'cancel') { if (!window.confirm('Отменить запись? Внесённая предоплата не возвращается.')) return; await api.mutate(`/client/appointments/${id}/cancel`,{}); return route('bookings'); }
@@ -161,6 +192,7 @@ root.addEventListener('click', event => {
   });
 });
 root.addEventListener('change', event=>{
+  if (event.target.name === 'mode' && event.target.form?.id==='date-schedule-form') root.querySelector('#custom-hours').hidden=event.target.value!=='custom';
   if (event.target.id === 'theme') theme.set(event.target.value);
   if (event.target.id === 'proof-file' && event.target.files[0]) {
     const image=root.querySelector('#proof-preview'); if(image.src.startsWith('blob:')) URL.revokeObjectURL(image.src);
@@ -199,12 +231,20 @@ root.addEventListener('submit', event=>{
       data.is_active=form.elements.is_active.checked;data.service_ids=new FormData(form).getAll('service_ids').map(Number);
       await api.mutate(`/master/staff/${form.dataset.id}`,data,'PUT');return route('team');
     }
-    if (form.id === 'schedule-staff-form') return route('schedule',data.staff_id);
+    if (form.id === 'schedule-staff-form') return route(form.dataset.page || 'schedule',data.staff_id);
     if (form.id === 'schedule-form') {
       const body={staff_id:Number(form.dataset.staff),is_day_off:form.elements.is_day_off.checked,work_start:data.work_start,work_end:data.work_end,
         breaks:data.breaks?data.breaks.split(',').map(item=>item.trim().split('-').map(s=>s.trim())):[]};
       if(data.weekday!=='')body.weekday=Number(data.weekday);else body.target_date=data.target_date;
-      await api.mutate('/master/schedule',body,'PUT');return route('schedule',body.staff_id);
+      await api.mutate('/master/schedule',body,'PUT');return route('schedule-weekly',body.staff_id);
+    }
+    if (form.id === 'date-schedule-form') {
+      const body={staff_id:Number(form.dataset.staff),scope:form.dataset.scope,mode:data.mode};
+      if (data.mode==='custom') { body.work_start=data.work_start;body.work_end=data.work_end;body.breaks=data.breaks?data.breaks.split(',').map(item=>item.trim().split('-').map(s=>s.trim())):[]; }
+      const result=await api.mutate(`/master/schedule/dates/${form.dataset.date}`,body,'PUT');
+      await route('schedule-dates',body.staff_id);
+      if(result.warning) root.querySelector('main').insertAdjacentHTML('beforeend',notice(result.warning));
+      return;
     }
     if (form.id === 'manual-form') {
       // Browser timezone never decides the studio instant: obtain matching

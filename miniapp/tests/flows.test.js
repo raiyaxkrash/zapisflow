@@ -3,16 +3,19 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
 import * as ui from '../src/ui.js';
+import * as calendar from '../src/calendar.js';
 
 const source = (await readFile(new URL('../src/app.js', import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
 const visit = {id:7,service:'Haircut',staff:'Master',price:'499',deposit:'0',payment:[],start_time:'2026-10-05T10:00:00+03:00',status:'WAITING_PAYMENT',status_label:'Резерв',cancel_allowed:true,policy_agreed:false};
 const offering = {id:1,title:'Haircut',price:'499',duration_min:60,buffer_min:15,deposit_type:'FIXED',deposit_value:'0',is_active:true};
 const flush = () => new Promise(resolve=>setTimeout(resolve,10));
 
-async function harness({owner=false,networkFailures=0,deposit='0',authFailure=false,authDelay=0}={}) {
+async function harness({owner=false,networkFailures=0,deposit='0',authFailure=false,authDelay=0,horizon=14}={}) {
   const dom = new JSDOM('<html><div id="app"></div></html>',{url:'https://app.test/b/11111111-2222-3333-4444-555555555555',runScripts:'outside-only'});
+  const overrides = new Map();
   const calls = []; let current = {...visit,deposit}, failures = networkFailures;
-  const ctx = {project:{name:'Real studio',timezone:'Europe/Moscow'},user:{first_name:'Client',phone:'+79991234567'},contacts:{studio_address:'<script>bad</script>'},today:'2026-10-05',booking_horizon_days:14,cancel_policy_hours:24,can_book:true,capabilities:{can_manage:owner,can_edit_project:owner}};
+  const maxDate=new Date(Date.UTC(2026,9,5+horizon)).toISOString().slice(0,10);
+  const ctx = {project:{name:'Real studio',timezone:'Europe/Moscow'},user:{first_name:'Client',phone:'+79991234567'},contacts:{studio_address:'<script>bad</script>'},today:'2026-10-05',booking_horizon_days:horizon,cancel_policy_hours:24,can_book:true,capabilities:{can_manage:owner,can_edit_project:owner}};
   class Api {
     async auth(...args){calls.push(['auth',...args]);if(authDelay)await new Promise(resolve=>setTimeout(resolve,authDelay));if(authFailure){const error=Error('Вход недоступен');error.status=401;throw error}return {csrf_token:'csrf'}}
     async get(path){
@@ -20,6 +23,11 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
       if(path==='/context')return ctx;
       if(path.includes('/services'))return path.endsWith('/1')?offering:[offering];
       if(path.includes('/staff'))return [{id:2,display_name:'Master',is_active:true,service_ids:[1]}];
+      if(path.includes('/calendar')) {
+        const query=new URLSearchParams(path.split('?')[1]);const year=Number(query.get('year')),month=Number(query.get('month'));
+        const days=Array.from({length:new Date(Date.UTC(year,month,0)).getUTCDate()},(_,i)=>{const date=`${year}-${String(month).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`;return {date,available:date>=ctx.today&&date<=maxDate,reason:date<ctx.today?'past':'horizon',mode:'weekly',has_override:false,scope:'staff',breaks:[],appointment_count:0,...overrides.get(date)}});
+        return {year,month,today:ctx.today,min_date:ctx.today,max_date:maxDate,days};
+      }
       if(path.includes('/slots'))return {slots:[visit.start_time]};
       if(path.endsWith('/payment'))return {appointment:current,requisites:{bank_name:'Bank',bank_card_number:'Test',bank_recipient_name:'Master'}};
       if(path.includes('/appointments/'))return {...current,client:'Client'};
@@ -32,6 +40,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
     }
     async mutate(path,body,method){
       calls.push(['mutate',path,body,method]);
+      if(path.startsWith('/master/schedule/dates/')) { const date=path.split('/').at(-1);overrides.set(date,{...body,has_override:body.mode!=='weekly'});return {date,...body}; }
       if(path==='/client/holds' && failures-->0){const error=Error('Offline');error.code='NETWORK';throw error}
       if(path==='/client/appointments')current={...current,policy_agreed:true,status:Number(deposit)?'WAITING_PAYMENT':'CONFIRMED',payment:Number(deposit)?[{id:9,status:'PENDING',amount:deposit,proofs:[]}]:[]};
       if(path.endsWith('/cancel'))current={...current,status:'CANCELLED_BY_CLIENT',cancel_allowed:false};
@@ -39,7 +48,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
     }
     async upload(path,file,progress){calls.push(['upload',path,file.type]);progress(100);current={...current,status:'PAYMENT_PROOF_SENT',payment:[{id:9,status:'SUBMITTED',amount:deposit,proofs:[{id:11}]}]};return {appointment:current}}
   }
-  Object.assign(dom.window,{Api,...ui,e:ui.escape,b:ui.button,f:ui.field,
+  Object.assign(dom.window,{Api,...calendar,...ui,e:ui.escape,b:ui.button,f:ui.field,
     bootstrap:()=>({initData:'signed',BackButton:{hide(){},show(){},onClick(){}}}),
     setupTheme:()=>({get:()=> 'system',set(){}}),botIdFromPath:()=> '11111111-2222-3333-4444-555555555555'});
   dom.window.confirm=()=>true;
@@ -87,8 +96,8 @@ test('Owner UI edits service, CRM notes and irregular schedule through tenant AP
   assert.ok(h.calls.find(c=>c[1]==='/master/services/1'&&c[3]==='PUT'));
   await h.dom.window.testApp.route('client',3);h.dom.window.document.querySelector('[name=notes]').value='Tenant notes';await h.submit('notes-form');
   assert.equal(h.calls.find(c=>c[1]==='/master/clients/3'&&c[0]==='mutate')[2].notes,'Tenant notes');
-  await h.dom.window.testApp.route('schedule',2);await h.submit('schedule-form');
-  assert.ok(h.calls.find(c=>c[1]==='/master/schedule'&&c[0]==='mutate')[2].target_date);
+  await h.dom.window.testApp.route('schedule-dates',2);await h.submit('date-schedule-form');
+  assert.ok(h.calls.find(c=>c[1]==='/master/schedule/dates/2026-10-05'&&c[0]==='mutate'));
   h.dom.window.close();
 });
 
@@ -112,4 +121,46 @@ test('Owner manual booking submits only scoped identifiers and optional phone',a
   const request=h.calls.find(c=>c[0]==='mutate'&&c[1]==='/master/appointments');assert.ok(request);
   assert.equal(request[2].phone,'+79991234567');assert.equal(request[2].staff_id,2);
   assert.ok(!('master_id' in request[2])&&!('price' in request[2]));h.dom.window.close();
+});
+
+
+test('Client month picker keeps past/unavailable/horizon disabled and selection loads slots', async()=>{
+  const h=await harness();await h.click('choose-service',1);await h.click('staff','any');
+  assert.ok(h.root.querySelector('[data-id="2026-10-04"]').disabled);
+  assert.ok(h.root.querySelector('[data-id="2026-10-20"]').disabled);
+  await h.click('client-date','2026-10-06');
+  assert.ok(h.calls.find(c=>c[1]?.includes('/client/slots?')&&c[1].includes('target_date=2026-10-06')));
+  assert.equal(h.root.querySelector('[data-id="2026-10-06"]').getAttribute('aria-pressed'),'true');
+  assert.ok(h.root.querySelector('[data-id="2026-10-20"]').disabled);
+  assert.ok(h.root.querySelector('[data-action="client-month"][data-id="2026-11"]').disabled);
+  h.dom.window.close();
+});
+
+test('Weekly and separate dates have distinct screens; date edit persists and reset uses weekly', async()=>{
+  const h=await harness({owner:true});await h.click('mode','master');await h.dom.window.testApp.route('schedule',2);
+  assert.ok(!h.root.querySelector('#schedule-form'));await h.click('nav','schedule-weekly');assert.ok(h.root.querySelector('#schedule-form'));
+  await h.dom.window.testApp.route('schedule-dates',2);await h.click('schedule-date','2026-10-10');
+  h.root.querySelector('[name=mode]').value='custom';await h.submit('date-schedule-form');
+  const request=h.calls.find(c=>c[1]==='/master/schedule/dates/2026-10-10');assert.equal(request[2].mode,'custom');
+  assert.equal(h.root.querySelector('[name=mode]').value,'custom');
+  h.root.querySelector('[name=mode]').value='weekly';await h.submit('date-schedule-form');assert.equal(h.root.querySelector('[name=mode]').value,'weekly');
+  h.dom.window.close();
+});
+
+test('Master daily date picker navigates without changing appointment query contract',async()=>{
+  const h=await harness({owner:true});await h.click('mode','master');await h.click('daily-calendar','open');await h.click('daily-date','2026-10-09');
+  assert.ok(h.calls.find(c=>c[1]==='/master/appointments?target_date=2026-10-09'));h.dom.window.close();
+});
+
+
+test('Client month navigation crosses months and restores the previous calendar', async()=>{
+  const h=await harness({horizon:40});await h.click('choose-service',1);await h.click('staff','any');
+  assert.equal(h.root.querySelector('[data-id="2026-11"]').disabled,false);
+  await h.click('client-month','2026-11');
+  assert.ok(h.calls.find(c=>c[1]?.includes('/client/availability/calendar?')&&c[1].includes('month=11')));
+  assert.ok(h.root.querySelector('[data-id="2026-11-15"]').disabled);
+  await h.click('client-month','2026-10');
+  assert.ok(h.root.querySelector('[data-id="2026-10-04"]').disabled);
+  assert.equal(calendar.shiftMonth('2026-12',1),'2027-01');
+  assert.equal(calendar.shiftMonth('2026-01',-1),'2025-12');h.dom.window.close();
 });

@@ -72,6 +72,7 @@ async def test_production_gateway_fails_closed_on_dns_or_verification_error(monk
 @pytest.fixture
 async def connected_bot(pg_session, monkeypatch):
     monkeypatch.setattr(settings, "webhook_base_url", "https://current.example.test")
+    monkeypatch.setattr(settings, "mini_app_base_url", "")
     owner = User(telegram_id=88001001, first_name="Owner")
     pg_session.add(owner)
     await pg_session.flush()
@@ -181,5 +182,8 @@ async def test_all_lifecycle_paths_install_current_hostname_url(pg_session, conn
     else:
         instance.status = BotInstanceStatus.DISABLED
         result = await service.enable_bot(instance.id, owner.id, commit=False)
+    if action in ("provision", "managed"):
+        from aiogram.types import MenuButtonCommands
+        assert isinstance(gateway.set_chat_menu_button.call_args.kwargs["menu_button"], MenuButtonCommands)
     assert calls[-1]["url"] == f"https://current.example.test/telegram/webhook/{result.public_id}"
     assert calls[-1]["secret_token"] == result.webhook_secret

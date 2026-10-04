@@ -6,6 +6,7 @@ No endpoint accepts a tenant, role, user, price or status as booking authority.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import html
 import io
@@ -33,7 +34,7 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 
 from app.config.settings import settings
@@ -89,6 +90,7 @@ from app.web.miniapp_contracts import (
     AuthInput,
     ConfirmInput,
     DecisionInput,
+    DateScheduleInput,
     HoldInput,
     ManualInput,
     NotesInput,
@@ -169,6 +171,11 @@ def available(bot, master):
     )
 
 
+def require_mini_app(bot):
+    if not bot.mini_app_enabled:
+        fail("MINI_APP_DISABLED", "Mini App отключён владельцем", 403)
+
+
 @dataclass
 class Context:
     session: object
@@ -203,6 +210,7 @@ async def context(request: Request, session=DB_SESSION):
         or request.headers.get("x-miniapp-bot") != str(bot.public_id)
     ):
         fail("SESSION_EXPIRED", "Откройте приложение заново из Telegram", 401)
+    require_mini_app(bot)
     user = await session.get(User, record.user_id)
     if user is None:
         fail("SESSION_EXPIRED", "Откройте приложение заново из Telegram", 401)
@@ -226,6 +234,7 @@ async def context(request: Request, session=DB_SESSION):
         )
         if not available(bot, master) or bot.token_version != record.token_version:
             fail("SESSION_EXPIRED", "Откройте приложение заново из Telegram", 401)
+    require_mini_app(bot)
     auth = MasterAuthorizationService(session)
     role = await auth.get_role(master.id, user.id)
     staff_id = (
@@ -267,6 +276,7 @@ async def auth(
     master = await session.get(Master, bot.master_id) if bot else None
     if not available(bot, master):
         fail("AUTH_INVALID", "Откройте доступного бота проекта", 401)
+    require_mini_app(bot)
     try:
         token = TokenCrypto().decrypt(
             bot.encrypted_token, associated_data=bot.telegram_bot_id
@@ -582,6 +592,35 @@ async def slots(
         "timezone": c.master.timezone,
         "slots": [s.isoformat() for s in sorted(times)],
     }
+
+
+@router.get("/client/availability/calendar")
+async def client_calendar(year: int = Query(ge=2000, le=2100), month: int = Query(ge=1, le=12),
+                          service_id: int = Query(gt=0), staff_id: int | None = Query(default=None, gt=0), c=TENANT_CONTEXT):
+    if c.bot.status != BotInstanceStatus.ACTIVE or not await SubscriptionAccessPolicy(c.session).can_accept_new_booking(c.master.id):
+        fail("BOOKING_UNAVAILABLE", "Онлайн-запись недоступна. Свяжитесь с мастером", 403)
+    choices = await eligible_staff(c, service_id)
+    if staff_id is not None:
+        choices = [row for row in choices if row.id == staff_id]
+        if not choices:
+            fail()
+    config = await MasterSettingsRepository(c.session).get_or_create(c.master.id)
+    today = datetime.now(ZoneInfo(c.master.timezone)).date()
+    maximum = today + timedelta(days=config.booking_horizon_days)
+    engine = SlotEngine(c.session)
+    days = []
+    for number in range(1, calendar.monthrange(year, month)[1] + 1):
+        target = date(year, month, number)
+        reason = "past" if target < today else "horizon" if target > maximum else "no_slots"
+        found = False
+        if today <= target <= maximum:
+            for member in choices:
+                if await engine.get_available_slots(service_id, target, c.master.id, staff_id=member.id):
+                    found = True
+                    break
+        days.append({"date": target.isoformat(), "available": found, "reason": None if found else reason})
+    return {"year": year, "month": month, "today": today.isoformat(), "min_date": today.isoformat(),
+            "max_date": maximum.isoformat(), "timezone": c.master.timezone, "days": days}
 
 
 @router.post(
@@ -1191,6 +1230,73 @@ async def edit_schedule(body: ScheduleInput, request: Request, c=TENANT_CONTEXT)
         return await get_schedule(body.staff_id, c)
 
     return await mutation(c, request, body.model_dump(), execute)
+
+
+def schedule_day_dto(row):
+    return {"work_start": row.work_start.isoformat() if row and row.work_start else None,
+            "work_end": row.work_end.isoformat() if row and row.work_end else None,
+            "breaks": [[b.break_start.isoformat(), b.break_end.isoformat()] for b in row.breaks] if row else []}
+
+
+@router.get("/master/schedule/calendar")
+async def master_calendar(year: int = Query(ge=2000, le=2100), month: int = Query(ge=1, le=12),
+                          staff_id: int = Query(gt=0), c=TENANT_CONTEXT):
+    c.admin()
+    if await StaffRepository(c.session).get_by_id(staff_id, c.master.id) is None:
+        fail()
+    first = date(year, month, 1)
+    last = date(year, month, calendar.monthrange(year, month)[1])
+    repo = ScheduleRepository(c.session)
+    weekly = {row.day_of_week: row for row in await repo.get_weekly_templates(c.master.id, staff_id)}
+    overrides = (await c.session.scalars(select(ScheduleException).where(
+        ScheduleException.master_id == c.master.id, ScheduleException.date >= first, ScheduleException.date <= last,
+        (ScheduleException.staff_id == staff_id) | ScheduleException.staff_id.is_(None),
+    ).options(selectinload(ScheduleException.breaks)))).all()
+    personal = {row.date: row for row in overrides if row.staff_id is not None}
+    studio = {row.date: row for row in overrides if row.staff_id is None}
+    local_date = func.date(func.timezone(c.master.timezone, Appointment.start_time))
+    count_rows = (await c.session.execute(select(local_date, Appointment.staff_id, func.count()).where(
+        Appointment.master_id == c.master.id,
+        local_date >= first, local_date <= last,
+        Appointment.status.in_([AppointmentStatus.WAITING_PAYMENT, AppointmentStatus.PAYMENT_PROOF_SENT, AppointmentStatus.CONFIRMED]),
+    ).group_by(local_date, Appointment.staff_id))).all()
+    counts, studio_counts = {}, {}
+    for day, member_id, count in count_rows:
+        studio_counts[day] = studio_counts.get(day, 0) + count
+        if member_id == staff_id:
+            counts[day] = count
+    today = datetime.now(ZoneInfo(c.master.timezone)).date()
+    days = []
+    for number in range(1, last.day + 1):
+        target = date(year, month, number)
+        override = studio.get(target) or personal.get(target)
+        row = override or weekly.get(target.weekday())
+        mode = "day_off" if row is None or row.is_day_off else "custom" if override else "weekly"
+        days.append({"date": target.isoformat(), "mode": mode, "has_override": override is not None,
+                     "scope": "project" if target in studio else "staff", "appointment_count": (studio_counts if target in studio else counts).get(target, 0),
+                     **schedule_day_dto(row)})
+    return {"year": year, "month": month, "today": today.isoformat(), "days": days}
+
+
+@router.put("/master/schedule/dates/{target_date}")
+async def edit_schedule_date(target_date: date, body: DateScheduleInput, request: Request, c=TENANT_CONTEXT):
+    c.admin()
+    async def execute():
+        if await StaffRepository(c.session).get_by_id(body.staff_id, c.master.id) is None:
+            fail()
+        repo = ScheduleRepository(c.session)
+        await lock(c.session, f"miniapp-date:{c.master.id}:{target_date}")
+        staff_id = None if body.scope == "project" else body.staff_id
+        if body.mode == "weekly":
+            await repo.delete_date_exception(target_date, c.master.id, staff_id)
+        else:
+            await repo.set_date_exception(target_date, body.mode == "day_off", body.work_start,
+                                          body.work_end, breaks=body.breaks, master_id=c.master.id, staff_id=staff_id)
+        month = await master_calendar(target_date.year, target_date.month, body.staff_id, c)
+        day = next(row for row in month["days"] if row["date"] == target_date.isoformat())
+        day["warning"] = "Изменение расписания не отменяет существующие записи" if day["appointment_count"] else None
+        return day
+    return await mutation(c, request, {"target_date": target_date, **body.model_dump()}, execute)
 
 
 def install_miniapp(app):

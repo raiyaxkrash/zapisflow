@@ -56,6 +56,7 @@ def project_card_keyboard(
     bot_instance: Optional[BotInstance] = None,
     is_ready: bool = False,
     is_staff_only: bool = False,
+    can_configure_bot: bool = True,
 ) -> InlineKeyboardMarkup:
     """Action buttons for a single Master project."""
     rows = []
@@ -170,6 +171,9 @@ def project_card_keyboard(
         rows.append([InlineKeyboardButton(
             text="🔄 Обновить webhook", callback_data=f"mgr:bot:resync:{bot_instance.id}",
         )])
+
+    if can_configure_bot and bot_instance and bot_instance.status in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED):
+        rows.append([InlineKeyboardButton(text="🤖 Настройки бота → Mini App", callback_data=f"mgr:bot:miniapp:{bot_instance.id}:view")])
 
     # Business & CRM features
     rows.append([

@@ -27,9 +27,10 @@ async def update(args):
         )
         if bot is None:
             raise SystemExit("No eligible current bot for the specified owner")
-        if not settings.mini_app_base_url:
-            raise SystemExit("MINI_APP_BASE_URL is empty; menu unchanged")
-        print(f"BotInstance {bot.id}: ZapisFlow -> {miniapp_origin(settings.mini_app_base_url)}/b/{bot.public_id}")
+        if bot.mini_app_enabled and settings.mini_app_base_url:
+            print(f"BotInstance {bot.id}: ZapisFlow -> {miniapp_origin(settings.mini_app_base_url)}/b/{bot.public_id}")
+        else:
+            print(f"BotInstance {bot.id}: standard command menu (Mini App disabled/unconfigured)")
         if not args.apply:
             print("Preview only. Add --apply to update this one bot.")
             return

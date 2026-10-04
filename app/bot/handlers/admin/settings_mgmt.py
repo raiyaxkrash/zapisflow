@@ -63,6 +63,7 @@ async def format_settings_text(session: AsyncSession, master_id: int) -> tuple[s
                     callback_data="adm_set:edit:bank_recipient_name",
                 ),
             ],
+            [InlineKeyboardButton(text="🤖 Настройки бота → Mini App", callback_data="adm_bot:miniapp:view")],
             [InlineKeyboardButton(text="📞 Контакты", callback_data="adm_contact:view")],
             [
                 InlineKeyboardButton(

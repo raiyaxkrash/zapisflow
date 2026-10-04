@@ -142,6 +142,9 @@ class BotInstance(Base):
     is_current: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true"), nullable=False
     )
+    mini_app_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     token_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     provisioning_source: Mapped[str] = mapped_column(

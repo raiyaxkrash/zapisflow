@@ -965,7 +965,7 @@ async def cb_project_card(callback: CallbackQuery, state: FSMContext, session: A
     )
     await callback.message.edit_text(
         text,
-        reply_markup=project_card_keyboard(master, bot_instance, is_ready, is_staff_only=False),
+        reply_markup=project_card_keyboard(master, bot_instance, is_ready, is_staff_only=False, can_configure_bot=role == AdminRole.OWNER),
     )
     await callback.answer()
 
@@ -1677,6 +1677,29 @@ async def cb_activate_bot(
 # ---------------------------------------------------------------------------
 # Retry Provisioning, Disable, Enable & Token Rotation
 # ---------------------------------------------------------------------------
+
+@manager_router.callback_query(F.data.startswith("mgr:bot:miniapp:"))
+async def cb_bot_mini_app(callback: CallbackQuery, session: AsyncSession) -> None:
+    user = await _get_or_create_user(session, callback.from_user)
+    parts = callback.data.split(":")
+    try:
+        bot_id, action = int(parts[3]), parts[4]
+        if action not in {"view", "on", "off"}:
+            raise ValueError
+        instance = await BotInstanceRepository(session).get_by_id(bot_id)
+        if not instance:
+            raise AccessDeniedError("Бот недоступен")
+        await MasterAuthorizationService(session).require_owner(instance.master_id, user.id)
+        await _answer_bot_callback(callback)
+        if action != "view":
+            instance = await BotProvisioningService(session).set_mini_app_enabled(bot_id, user.id, action == "on")
+        from app.bot.handlers.admin.bot_settings import mini_app_card
+        text, keyboard = mini_app_card(instance, prefix=f"mgr:bot:miniapp:{bot_id}:", back=f"mgr:master:{instance.master_id}")
+        if callback.message:
+            await callback.message.answer(text, reply_markup=keyboard)
+    except (AccessDeniedError, ProvisioningWebhookError, ValueError, IndexError):
+        await _answer_bot_callback(callback, "Настройка доступна владельцу подключённого бота. Повторите позже.", show_alert=True)
+
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:resync:"))
 async def cb_resync_webhook(callback: CallbackQuery, session: AsyncSession) -> None:
