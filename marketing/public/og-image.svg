@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B132B"/>
+      <stop offset="100%" stop-color="#1C2541"/>
+    </linearGradient>
+    <linearGradient id="blueGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#38BDF8"/>
+    </linearGradient>
+  </defs>
+  
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  
+  <!-- Subtle decorative grid -->
+  <circle cx="950" cy="180" r="300" fill="#2563EB" opacity="0.1" filter="blur(80px)"/>
+  
+  <!-- Logo container -->
+  <rect x="100" y="90" width="64" height="64" rx="16" fill="url(#blueGlow)"/>
+  <path d="M118 110H146L126 132H146" stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="146" cy="134" r="3.5" fill="#38BDF8"/>
+  
+  <text x="180" y="136" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif" font-size="34" font-weight="700" fill="#FFFFFF" letter-spacing="-0.5">ZapisFlow</text>
+  
+  <!-- Main Heading -->
+  <text x="100" y="240" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif" font-size="54" font-weight="800" fill="#FFFFFF" letter-spacing="-1">
+    Запись клиентов
+  </text>
+  <text x="100" y="305" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif" font-size="54" font-weight="800" fill="#60A5FA" letter-spacing="-1">
+    прямо в Telegram
+  </text>
+  
+  <!-- Subtitle -->
+  <text x="100" y="380" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="400" fill="#94A3B8">
+    Собственный Telegram-бот для вашего бизнеса.
+  </text>
+  <text x="100" y="415" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="400" fill="#94A3B8">
+    Запись, расписание, CRM, сотрудники и напоминания — в одном месте.
+  </text>
+  
+  <!-- Badges -->
+  <rect x="100" y="480" width="220" height="50" rx="25" fill="#1E293B" stroke="#334155" stroke-width="1.5"/>
+  <text x="135" y="512" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif" font-size="18" font-weight="600" fill="#E2E8F0">14 дней бесплатно</text>
+  
+  <rect x="340" y="480" width="220" height="50" rx="25" fill="#1E293B" stroke="#334155" stroke-width="1.5"/>
+  <text x="375" y="512" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif" font-size="18" font-weight="600" fill="#E2E8F0">Свой Telegram-бот</text>
+  
+  <rect x="580" y="480" width="200" height="50" rx="25" fill="#1E293B" stroke="#334155" stroke-width="1.5"/>
+  <text x="615" y="512" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif" font-size="18" font-weight="600" fill="#E2E8F0">Чат или Mini App</text>
+</svg>
