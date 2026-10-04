@@ -920,7 +920,6 @@ async def test_two_clients_race_for_same_slot(system):
 def test_miniapp_url_configuration_and_menu_binding(monkeypatch):
     from pydantic import ValidationError
 
-    from app.bot.handlers.client.start import miniapp_url
     from app.bot.keyboards.client import MenuCallback, get_main_menu_keyboard
     from app.config.settings import Settings
 
@@ -929,12 +928,10 @@ def test_miniapp_url_configuration_and_menu_binding(monkeypatch):
             _env_file=None, MINI_APP_BASE_URL="https://user:password@example.test/path"
         )
     monkeypatch.setattr(settings, "mini_app_base_url", ORIGIN)
-    bot = SimpleNamespace(public_id=uuid.uuid4())
-    url = miniapp_url(bot)
-    button = get_main_menu_keyboard(miniapp_url=url).inline_keyboard[0][0]
+    button = get_main_menu_keyboard().inline_keyboard[0][0]
     assert (
-        button.web_app.url == f"{ORIGIN}/b/{bot.public_id}"
-        and button.callback_data is None
+        button.web_app is None
+        and MenuCallback.unpack(button.callback_data).action == "book"
     )
     assert (
         MenuCallback.unpack(

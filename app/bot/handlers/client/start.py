@@ -12,16 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.client import MenuCallback, get_main_menu_keyboard
 from app.database.models.master import BotInstance, BotInstanceStatus
 from app.database.models.user import User
-from app.config.settings import settings
-from app.config.url_validation import miniapp_origin
 
 router = Router(name="client_start")
-
-
-def miniapp_url(bot_instance: Optional[BotInstance]) -> str | None:
-    if not settings.mini_app_base_url or bot_instance is None:
-        return None
-    return f"{miniapp_origin(settings.mini_app_base_url)}/b/{bot_instance.public_id}"
 
 
 @router.message(CommandStart())
@@ -73,7 +65,7 @@ async def cmd_start(
 
     await message.answer(
         text=text,
-        reply_markup=get_main_menu_keyboard(is_admin=is_admin, miniapp_url=miniapp_url(bot_instance)),
+        reply_markup=get_main_menu_keyboard(is_admin=is_admin),
     )
 
 
@@ -96,7 +88,7 @@ async def cb_main_menu(
     if callback.message:
         await callback.message.edit_text(
             text=text,
-            reply_markup=get_main_menu_keyboard(is_admin=is_admin, miniapp_url=miniapp_url(bot_instance)),
+            reply_markup=get_main_menu_keyboard(is_admin=is_admin),
         )
     await callback.answer()
 
@@ -119,5 +111,5 @@ async def cmd_cancel(
     )
     await message.answer(
         "Вы вернулись в главное меню:",
-        reply_markup=get_main_menu_keyboard(is_admin=is_admin, miniapp_url=miniapp_url(bot_instance)),
+        reply_markup=get_main_menu_keyboard(is_admin=is_admin),
     )

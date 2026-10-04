@@ -145,8 +145,9 @@ class TestManagedBotKeyboards:
 
 @requires_postgres
 @pytest.mark.asyncio
-async def test_provision_managed_bot_lifecycle(pg_session: AsyncSession):
+async def test_provision_managed_bot_lifecycle(pg_session: AsyncSession, monkeypatch):
     """Test full managed bot provisioning: encryption, DB record, and idempotency."""
+    monkeypatch.setattr(settings, "mini_app_base_url", "https://miniapp.example.test")
     # 1. Setup Master and Owner
     user = User(telegram_id=999001, first_name="Master Owner", username="owner_test")
     pg_session.add(user)
@@ -216,6 +217,10 @@ async def test_provision_managed_bot_lifecycle(pg_session: AsyncSession):
     # Verify network gateway calls
     gateway.set_webhook.assert_awaited_once()
     gateway.set_my_commands.assert_awaited_once()
+    gateway.set_chat_menu_button.assert_awaited_once()
+    menu = gateway.set_chat_menu_button.call_args.kwargs["menu_button"]
+    assert menu.text == "ZapisFlow"
+    assert menu.web_app.url == f"https://miniapp.example.test/b/{bot_instance.public_id}"
 
     # 4. Test Idempotency: re-provisioning same bot for same master should return existing instance
     duplicate_call_instance = await service.provision_managed_bot(

@@ -3,6 +3,7 @@
 import logging
 import secrets
 from typing import List, Optional, Tuple
+from aiogram.types import MenuButtonWebApp, WebAppInfo
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +50,19 @@ class BotProvisioningService:
         self.master_repo = MasterRepository(session)
         self.audit_service = AuditService(session)
         self.readiness_service = MasterReadinessService(session)
+
+    async def configure_client_menu(self, bot_instance: BotInstance, token: str) -> bool:
+        """Configure one trusted server-selected bot; never commits or changes bot state.
+
+        Maintenance callers must authorize the selected instance before invoking this.
+        Empty Mini App configuration leaves the existing menu untouched.
+        """
+        if not settings.mini_app_base_url:
+            return False
+        url = f"{miniapp_origin(settings.mini_app_base_url)}/b/{bot_instance.public_id}"
+        return await self.gateway.set_chat_menu_button(
+            token, menu_button=MenuButtonWebApp(text="ZapisFlow", web_app=WebAppInfo(url=url))
+        )
 
     async def validate_candidate_token(
         self,
@@ -355,8 +369,7 @@ class BotProvisioningService:
             # Mini App Menu Button (if configured)
             if settings.mini_app_base_url:
                 try:
-                    menu_url = f"{miniapp_origin(settings.mini_app_base_url)}/b/{bot_instance.public_id}"
-                    await self.gateway.set_chat_menu_button(clean_token, mini_app_url=menu_url)
+                    await self.configure_client_menu(bot_instance, clean_token)
                 except Exception as btn_exc:
                     logger.warning("Could not set menu button for bot %s: %s", bot_identity.id, btn_exc)
 
