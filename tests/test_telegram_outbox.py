@@ -293,3 +293,33 @@ async def test_transient_delivery_failure_uses_backoff_then_retries(pg_engine: A
         row = await session.get(TelegramOutbox, row_id)
         assert row.status == TelegramOutboxStatus.SENT
         assert row.attempts == 2
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_manager_payment_notice_is_durable_and_dispatches_without_tenant_bot(pg_engine, monkeypatch):
+    from app.config.settings import settings
+    from app.services.telegram_outbox import enqueue_manager_message
+    from unittest.mock import patch
+    sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        master, instance = await _tenant(session)
+        owner = await session.get(User, master.owner_user_id)
+        owner_chat = owner.telegram_id
+        master_id = master.id
+        row = await enqueue_manager_message(session, master_id=master.id,
+            chat_id=owner_chat, text="Оплата успешно обработана", idempotency_key=f"manager-test:{uuid.uuid4()}")
+        row_id = row.id
+        assert row.bot_instance_id is None
+    bot = AsyncMock()
+    monkeypatch.setattr(settings, "manager_bot_token", "123456:fake-test-token")
+    with patch("app.scheduler.jobs.telegram_outbox_worker.Bot", return_value=bot):
+        assert await dispatch_telegram_outbox(registry=AsyncMock(), session_maker=sessions) == 1
+    bot.send_message.assert_awaited_once()
+    bot.session.close.assert_awaited_once()
+    async with sessions() as session:
+        assert (await session.get(TelegramOutbox, row_id)).status == TelegramOutboxStatus.SENT
+    async with sessions.begin() as session:
+        with pytest.raises(ValueError, match="tenant owner"):
+            await enqueue_manager_message(session, master_id=master_id, chat_id=owner_chat+1,
+                text="Wrong tenant", idempotency_key=f"manager-test:{uuid.uuid4()}")

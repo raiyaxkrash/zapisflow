@@ -48,6 +48,8 @@ class FakeYooKassaClient:
                 "payment_id": str(kwargs["payment_id"]),
                 "user_id": str(kwargs["user_id"]),
                 "plan_id": str(kwargs["plan_id"]),
+                **{key: str(kwargs[key]) for key in
+                   ("master_id", "actor_user_id", "plan_code") if kwargs.get(key) is not None},
             },
         )
         self.payments[payment.id] = payment
@@ -153,7 +155,7 @@ async def test_direct_checkout_refuses_merchant_receipt_mode_without_email(
     owner_id, master_id, code = await seed_project(sessions)
     monkeypatch.setattr(settings, "yookassa_fiscal_mode", "merchant_receipt")
     checkout = YooKassaCheckoutService(sessions, FakeYooKassaClient())
-    with pytest.raises(SubscriptionError, match="режима чеков"):
+    with pytest.raises(SubscriptionError, match="email"):
         await checkout.open_direct_checkout(
             actor_user_id=owner_id, master_id=master_id, plan_code=code,
         )
@@ -612,3 +614,107 @@ async def test_two_reconciliation_workers_claim_one_payment_once(
             SubscriptionPeriod.subscription_payment_id == payment_id
         ))
         assert count == 1
+
+
+async def test_canonical_provider_stages_order_without_external_call(pg_engine, checkout_config, monkeypatch):
+    from app.services.subscription_service import SubscriptionService
+    monkeypatch.setattr(settings, "payment_provider", "yookassa")
+    monkeypatch.setattr(settings, "yookassa_test_shop_id", "test-shop")
+    monkeypatch.setattr(settings, "yookassa_test_secret_key", SecretStr("test-only-secret"))
+    sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    owner, master, plan_code = await seed_project(sessions)
+    async with sessions.begin() as session:
+        with patch("app.services.billing.yookassa_client.YooKassaClient.create_payment") as post:
+            payment, intent = await SubscriptionService(session).create_subscription_payment(master, owner, plan_code)
+            assert payment.status == "PENDING"
+            assert intent.payment_url is None
+            assert intent.provider_payment_id.startswith("checkout:")
+            post.assert_not_called()
+            ref = payment.checkout_ref
+    client = FakeYooKassaClient()
+    redirect = await YooKassaCheckoutService(sessions, client).start_checkout(checkout_ref=ref, actor_user_id=owner)
+    assert redirect.confirmation_url
+    assert client.create_calls[0]["master_id"] == master
+    assert client.create_calls[0]["actor_user_id"] == owner
+    assert client.create_calls[0]["plan_code"] == plan_code
+
+
+@pytest.mark.parametrize("key", ["master_id", "actor_user_id", "plan_code"])
+async def test_new_order_metadata_forgery_rejected(pg_engine, checkout_config, key):
+    sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    owner, master, code = await seed_project(sessions)
+    client = FakeYooKassaClient()
+    service = YooKassaCheckoutService(sessions, client)
+    order = await service.create_order(actor_user_id=owner, master_id=master, plan_code=code)
+    await service.start_checkout(checkout_ref=order.checkout_ref, actor_user_id=owner)
+    remote = next(iter(client.payments.values()))
+    client.replace(remote.id, status="succeeded", paid=True, metadata={**remote.metadata, key: "forged"})
+    with pytest.raises(SubscriptionError, match="не совпадают"):
+        await service.reconcile(remote.id)
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_payment_id == order.payment_id)) == 0
+
+
+async def test_merchant_receipt_direct_checkout_uses_validated_email_and_snapshot(pg_engine, checkout_config, monkeypatch):
+    monkeypatch.setattr(settings, "yookassa_fiscal_mode", "merchant_receipt")
+    monkeypatch.setattr(settings, "yookassa_receipt_vat_code", "1")
+    monkeypatch.setattr(settings, "yookassa_receipt_payment_subject", "service")
+    monkeypatch.setattr(settings, "yookassa_receipt_payment_mode", "full_prepayment")
+    sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    owner, master, code = await seed_project(sessions)
+    client = FakeYooKassaClient()
+    service = YooKassaCheckoutService(sessions, client)
+    with pytest.raises(SubscriptionError, match="email"):
+        await service.open_direct_checkout(actor_user_id=owner, master_id=master, plan_code=code)
+    order, redirect = await service.open_direct_checkout(
+        actor_user_id=owner, master_id=master, plan_code=code, receipt_email="Buyer@example.test")
+    assert redirect.confirmation_url
+    receipt = client.create_calls[0]["receipt"]
+    assert receipt["customer"]["email"] == "buyer@example.test"
+    assert receipt["items"][0]["amount"]["value"] == "499.00"
+    assert receipt["items"][0]["payment_subject"] == "service"
+    assert receipt["items"][0]["payment_mode"] == "full_prepayment"
+
+
+async def test_waiting_for_capture_never_activates_subscription(pg_engine, checkout_config):
+    sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    owner, master, code = await seed_project(sessions)
+    client = FakeYooKassaClient()
+    service = YooKassaCheckoutService(sessions, client)
+    order = await service.create_order(actor_user_id=owner, master_id=master, plan_code=code)
+    await service.start_checkout(checkout_ref=order.checkout_ref, actor_user_id=owner)
+    remote = next(iter(client.payments.values()))
+    client.replace(remote.id, status="waiting_for_capture", confirmation_url=None)
+    redirect = await service.start_checkout(checkout_ref=order.checkout_ref, actor_user_id=owner)
+    assert redirect.status == "WAITING_FOR_CAPTURE"
+    assert await service.reconcile(remote.id) is False
+    async with sessions() as session:
+        payment = await session.get(SubscriptionPayment, order.payment_id)
+        assert payment.status == "PENDING"
+
+
+async def test_uncertain_post_retries_with_immutable_receipt_and_request(pg_engine, checkout_config, monkeypatch):
+    sessions = async_sessionmaker(pg_engine, expire_on_commit=False)
+    owner, master, code = await seed_project(sessions)
+    client = FakeYooKassaClient()
+    service = YooKassaCheckoutService(sessions, client)
+    order = await service.create_order(actor_user_id=owner, master_id=master, plan_code=code)
+    real_create = client.create_payment
+    requests = []
+    async def uncertain(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            raise YooKassaGatewayError("Uncertain response")
+        return await real_create(**kwargs)
+    client.create_payment = uncertain
+    receipt = {"customer": {"email": "original@example.test"}, "items": []}
+    with pytest.raises(YooKassaGatewayError):
+        await service.start_checkout(checkout_ref=order.checkout_ref, actor_user_id=owner, receipt=receipt)
+    monkeypatch.setattr(settings, "billing_return_url", "https://new.example.test/return")
+    async with sessions.begin() as session:
+        plan = await session.get(SubscriptionPlan, order.plan_id)
+        plan.name = "Renamed after uncertain POST"
+    await service.start_checkout(checkout_ref=order.checkout_ref, actor_user_id=owner,
+                                 receipt={"customer": {"email": "changed@example.test"}})
+    assert requests[0] == requests[1]

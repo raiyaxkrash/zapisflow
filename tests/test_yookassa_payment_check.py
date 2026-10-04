@@ -433,9 +433,12 @@ async def test_yookassa_check_payment_idor(
 # 10. Concurrent race: Webhook + Check payment race
 # ---------------------------------------------------------------------------
 async def test_concurrent_webhook_and_manual_check_race(
-    pg_session: AsyncSession, checkout_config: None
+    pg_engine, checkout_config: None
 ) -> None:
-    user, master, plan, payment = await _seed_data(pg_session)
+    session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_maker.begin() as seed_session:
+        user, master, plan, payment = await _seed_data(seed_session)
+    master_id, payment_id = master.id, payment.id
     client = FakeYooKassaClient()
     client.add_remote_payment(
         payment.provider_payment_id,
@@ -452,7 +455,6 @@ async def test_concurrent_webhook_and_manual_check_race(
         },
     )
 
-    session_maker = async_sessionmaker(pg_session.bind, expire_on_commit=False)
     service = YooKassaCheckoutService(session_maker, client)
 
     # Run reconcile (webhook simulation) and check_payment concurrently
@@ -461,8 +463,16 @@ async def test_concurrent_webhook_and_manual_check_race(
         service.check_payment(payment_id=payment.id, actor_user_id=user.id),
     )
 
-    await pg_session.refresh(master)
-    await pg_session.refresh(payment)
+    from sqlalchemy import func
+    from app.database.models.subscription import SubscriptionPeriod
+    from app.database.models.telegram_outbox import TelegramOutbox
+    async with session_maker() as read_session:
+        master = await read_session.get(Master, master_id)
+        payment = await read_session.get(SubscriptionPayment, payment_id)
+        assert await read_session.scalar(select(func.count()).select_from(SubscriptionPeriod).where(
+            SubscriptionPeriod.subscription_payment_id == payment_id)) == 1
+        assert await read_session.scalar(select(func.count()).select_from(TelegramOutbox).where(
+            TelegramOutbox.idempotency_key == f"sub_notice:success:{payment_id}")) == 1
 
     assert payment.status == "SUCCEEDED"
     assert master.subscription_status == SubscriptionStatus.ACTIVE

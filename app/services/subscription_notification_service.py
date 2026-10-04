@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.settings import settings
 from app.database.models.audit import AuditLog
 from app.database.models.master import Master, SubscriptionStatus
-from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPayment, SubscriptionPlan
+from app.database.models.subscription import EffectiveSubscriptionStatus, SubscriptionPayment, SubscriptionPlan, SubscriptionPeriod
 from app.database.models.user import User
 from app.services.subscription_service import SubscriptionService
 
@@ -46,7 +46,7 @@ class SubscriptionNotificationService:
         payment_id: int,
     ) -> bool:
         """
-        Send confirmation notification to project owner after successful subscription payment.
+        Queue confirmation in the same transaction as payment activation.
         """
         master = await self.session.get(Master, master_id)
         if not master:
@@ -58,12 +58,21 @@ class SubscriptionNotificationService:
 
         payment = await self.session.get(SubscriptionPayment, payment_id)
         plan_name = "ZapisFlow Basic"
-        if payment and payment.plan_id:
+        if payment is None or payment.master_id != master_id:
+            return False
+        if payment.plan_id:
             plan = await self.session.get(SubscriptionPlan, payment.plan_id)
             if plan:
                 plan_name = plan.name
 
-        paid_str = master.paid_until.strftime("%d.%m.%Y") if master.paid_until else "—"
+        # A notice for one payment must not vary when a subsequent payment
+        # extends Master.paid_until or a concurrent session has a stale Master.
+        period_end = await self.session.scalar(select(SubscriptionPeriod.ends_at).where(
+            SubscriptionPeriod.subscription_payment_id == payment_id,
+            SubscriptionPeriod.master_id == master_id,
+        ))
+        paid_until = period_end or master.paid_until
+        paid_str = paid_until.strftime("%d.%m.%Y") if paid_until else "—"
 
         text = (
             "🎉 <b>Оплата прошла успешно!</b>\n\n"
@@ -90,17 +99,11 @@ class SubscriptionNotificationService:
         if existing_log:
             return True
 
-        bot = await self.get_or_create_bot()
-        if bot:
-            try:
-                await bot.send_message(
-                    chat_id=owner.telegram_id,
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                )
-            except Exception as exc:
-                logger.warning("Failed to send payment success notification to user #%s: %s", owner.id, exc)
+        from app.services.telegram_outbox import enqueue_manager_message
+        await enqueue_manager_message(
+            self.session, master_id=master_id, chat_id=owner.telegram_id,
+            text=text, reply_markup=keyboard, idempotency_key=idempotency_key,
+        )
 
         audit = AuditLog(
             master_id=master_id,

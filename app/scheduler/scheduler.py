@@ -140,7 +140,7 @@ class MultiTenantScheduler:
             },
         )
 
-        if settings.payment_provider.lower() == "yookassa_web":
+        if settings.uses_yookassa:
             self._scheduler.add_job(
                 reconcile_pending_yookassa,
                 trigger="interval",

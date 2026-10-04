@@ -245,7 +245,7 @@ def subscription_card_keyboard(
     # A callback performs the owner check. No amount or payment URL is accepted
     # from callback_data; the backend reads the plan and creates the redirect.
     show_pay_action = (
-        settings.payment_provider.lower() == "yookassa_web"
+        settings.uses_yookassa
         or (settings.payment_provider.lower() == "manual" and not settings.is_production)
     ) and status != EffectiveSubscriptionStatus.SUSPENDED and can_pay
     for plan in (plans if show_pay_action else ()):
@@ -279,7 +279,7 @@ def subscription_checkout_keyboard(
 ) -> InlineKeyboardMarkup:
     """Provider-confirmed redirect returned by YooKassa for this order with status check button."""
     rows = [
-        [InlineKeyboardButton(text="🔗 Перейти к оплате", url=url)],
+        [InlineKeyboardButton(text="💳 Оплатить", url=url)],
     ]
     if payment_id is not None:
         rows.append([
@@ -301,7 +301,7 @@ def subscription_pending_keyboard(
     """Pending payment status screen keyboard."""
     rows = []
     if payment_url:
-        rows.append([InlineKeyboardButton(text="🔗 Перейти к оплате", url=payment_url)])
+        rows.append([InlineKeyboardButton(text="💳 Оплатить", url=payment_url)])
     rows.append([
         InlineKeyboardButton(
             text="🔄 Проверить оплату",

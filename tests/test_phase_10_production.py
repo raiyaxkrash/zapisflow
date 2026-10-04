@@ -48,6 +48,7 @@ def test_production_config_validation_passes_valid() -> None:
     prod_settings = Settings(
         _env_file=None,
         APP_ENV="production",
+        PAYMENT_PROVIDER="disabled",
         APP_MODE="webhook",
         WEBHOOK_BASE_URL="https://api.example.com",
         MANAGER_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ",

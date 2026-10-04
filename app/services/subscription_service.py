@@ -245,6 +245,27 @@ class SubscriptionService:
             )
 
         plan = await self.get_active_plan(plan_code)
+        if provider is None and settings.uses_yookassa:
+            # Stage only: the caller owns commit. POST to YooKassa must happen
+            # afterwards through start_checkout, never before this row is durable.
+            from sqlalchemy.ext.asyncio import async_sessionmaker
+            from app.services.billing.yookassa_client import YooKassaClient
+            from app.services.billing.yookassa_checkout import YooKassaCheckoutService
+            shop_id, key = settings.yookassa_credentials
+            checkout = YooKassaCheckoutService(
+                async_sessionmaker(self.session.bind, expire_on_commit=False),
+                YooKassaClient(shop_id, key),
+            )
+            order = await checkout.create_order_in_session(
+                self.session, actor_user_id=actor_user_id,
+                master_id=master_id, plan_code=plan_code,
+            )
+            payment = await self.session.get(SubscriptionPayment, order.payment_id)
+            return payment, PaymentIntent(
+                provider="YOOKASSA", provider_payment_id=payment.provider_payment_id,
+                amount=order.amount, currency=order.currency,
+                metadata={"checkout_ref": str(order.checkout_ref)},
+            )
         if provider is None and (settings.is_production or settings.payment_provider.lower() != "manual"):
             raise SubscriptionError("Автоматическая оплата временно недоступна. Обратитесь в поддержку.")
         billing_prov = provider or ManualBillingProvider()

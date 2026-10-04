@@ -319,7 +319,7 @@ def create_app(
 
     @app.get("/billing/checkout/{token}", tags=["billing"])
     async def billing_checkout_page(token: str) -> HTMLResponse:
-        if settings.payment_provider.lower() != "yookassa_web":
+        if not settings.uses_yookassa:
             raise HTTPException(status_code=404, detail="Not found")
         if settings.yookassa_fiscal_mode == "self_employed":
             return HTMLResponse(
@@ -341,7 +341,7 @@ def create_app(
 
     @app.post("/billing/checkout/{token}/pay", tags=["billing"])
     async def billing_checkout_pay(token: str, request: Request) -> Response:
-        if settings.payment_provider.lower() != "yookassa_web":
+        if not settings.uses_yookassa:
             raise HTTPException(status_code=404, detail="Not found")
         if settings.yookassa_fiscal_mode == "self_employed":
             return HTMLResponse(
@@ -427,7 +427,7 @@ def create_app(
         The notification body is only a lookup hint. It never activates a
         subscription on its own, and no browser redirect can call this path.
         """
-        if settings.payment_provider.lower() != "yookassa_web":
+        if not settings.uses_yookassa:
             raise HTTPException(status_code=404, detail="Not found")
         raw_body = await read_limited_request_body(request, min(settings.webhook_max_body_bytes, 65536))
         try:

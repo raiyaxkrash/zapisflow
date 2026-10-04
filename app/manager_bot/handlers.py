@@ -142,6 +142,7 @@ from app.manager_bot.states import (
     MasterContactStates,
     MasterOnboardingStates,
     RotateTokenStates,
+    SubscriptionCheckoutStates,
 )
 from app.database.models.staff import StaffMember
 from app.repositories.bot_instance_repository import BotInstanceRepository
@@ -2052,7 +2053,7 @@ async def _show_subscription_screen(callback: CallbackQuery, master: Master, ses
     footer = (
         "Здесь отображается статус подписки вашего проекта. "
         f"По вопросам обращайтесь в поддержку: {settings.support_tag}."
-        if not can_pay or settings.payment_provider.lower() not in {"manual", "yookassa_web"} or (
+        if not can_pay or settings.payment_provider.lower() not in {"manual", "yookassa", "yookassa_web"} or (
             settings.payment_provider.lower() == "manual" and settings.is_production
         )
         else "Выберите тариф для оплаты:"
@@ -2136,7 +2137,7 @@ async def cb_subscription_screen(callback: CallbackQuery, state: FSMContext, ses
 
 
 @manager_router.callback_query(F.data.startswith("mgr:sub:pay:"))
-async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) -> None:
+async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession, state: FSMContext | None = None) -> None:
     """Initiate subscription payment for a chosen plan."""
     parts = callback.data.split(":")
     if len(parts) != 5 or not parts[3].isdigit() or not parts[4]:
@@ -2157,7 +2158,17 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
         await callback.answer("Ошибка: доступ запрещён.", show_alert=True)
         return
 
-    if settings.payment_provider.lower() == "yookassa_web":
+    if settings.uses_yookassa:
+        if settings.yookassa_fiscal_mode == "merchant_receipt":
+            if state is None:
+                await _answer_bot_callback(callback, "Откройте раздел подписки заново.", show_alert=True)
+                return
+            await state.update_data(billing_master_id=master.id, billing_plan_code=plan_code)
+            await state.set_state(SubscriptionCheckoutStates.waiting_for_email)
+            await callback.message.answer("Введите email для получения кассового чека. Для отмены: /cancel")
+            await _answer_bot_callback(callback)
+            return
+        await _answer_bot_callback(callback)
         try:
             shop_id, secret_key = settings.yookassa_credentials
             checkout_service = YooKassaCheckoutService(
@@ -2183,12 +2194,14 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
                 f"Для активации или продления подписки, пожалуйста, свяжитесь с поддержкой: {settings.support_tag}",
                 reply_markup=fallback_kb,
             )
-            await callback.answer()
+            await _answer_bot_callback(callback)
             return
 
         if redirect.confirmation_url is None:
             await callback.answer(
-                "Этот платёж уже завершён. Обновите статус подписки.", show_alert=True
+                ("Платёж ожидает списания. Проверьте статус позже."
+                 if redirect.status == "WAITING_FOR_CAPTURE" else
+                 "Этот платёж уже завершён. Обновите статус подписки."), show_alert=True
             )
             return
         amount = f"{order.amount:,.2f}".replace(",", " ").removesuffix(".00")
@@ -2204,7 +2217,7 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
                 master.id, redirect.confirmation_url, order.payment_id
             ),
         )
-        await callback.answer()
+        await _answer_bot_callback(callback)
         return
 
     if settings.is_production:
@@ -2221,7 +2234,7 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
             f"Пожалуйста, напишите в поддержку {settings.support_tag}, чтобы активировать подписку.",
             reply_markup=fallback_kb,
         )
-        await callback.answer()
+        await _answer_bot_callback(callback)
         return
 
     sub_service = SubscriptionService(session)
@@ -2255,7 +2268,43 @@ async def cb_subscription_pay(callback: CallbackQuery, session: AsyncSession) ->
         text,
         reply_markup=subscription_payment_keyboard(master.id, payment.id, intent.payment_url),
     )
-    await callback.answer()
+    await _answer_bot_callback(callback)
+
+
+@manager_router.message(SubscriptionCheckoutStates.waiting_for_email, F.text)
+async def msg_subscription_receipt_email(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Collect fiscal email; price and ownership are resolved again from DB."""
+    from app.services.billing.checkout_session import _receipt_email
+    try:
+        email = _receipt_email(message.text or "")
+    except SubscriptionError:
+        await message.answer("Укажите корректный email для чека или /cancel.")
+        return
+    data = await state.get_data()
+    user = await _get_or_create_user(session, message.from_user)
+    try:
+        if not settings.uses_yookassa or settings.yookassa_fiscal_mode != "merchant_receipt":
+            raise SubscriptionError("Режим оплаты изменился; откройте подписку заново")
+        shop_id, key = settings.yookassa_credentials
+        service = YooKassaCheckoutService(async_session_factory, YooKassaClient(shop_id, key))
+        order, redirect = await service.open_direct_checkout(
+            actor_user_id=user.id, master_id=int(data.get("billing_master_id", 0)),
+            plan_code=data.get("billing_plan_code", ""), receipt_email=email,
+        )
+    except (SubscriptionError, YooKassaGatewayError, ValueError):
+        logger.warning("Merchant receipt checkout unavailable")
+        await message.answer(f"Не удалось подготовить оплату. Поддержка: {settings.support_tag}")
+        return
+    await state.clear()
+    if redirect.confirmation_url is None:
+        await message.answer("Проверьте статус платежа в разделе подписки.")
+        return
+    await message.answer(
+        f"💳 <b>{escape(order.plan_name)}</b>\n{order.amount:.2f} ₽ / {order.period_days} дней",
+        reply_markup=subscription_checkout_keyboard(
+            int(data["billing_master_id"]), redirect.confirmation_url, order.payment_id
+        ),
+    )
 
 
 @manager_router.callback_query(F.data.startswith("mgr:sub:confirm:"))
@@ -2281,6 +2330,10 @@ async def cb_subscription_confirm(callback: CallbackQuery, session: AsyncSession
     payment = await session.get(SubscriptionPayment, payment_id)
     if not payment or payment.master_id != master.id:
         await callback.answer("Платеж не найден.", show_alert=True)
+        return
+
+    if payment.provider != "MANUAL":
+        await callback.answer("Платёж проверяется только через API провайдера.", show_alert=True)
         return
 
     sub_service = SubscriptionService(session)

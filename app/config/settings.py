@@ -192,17 +192,34 @@ class Settings(BaseSettings):
             }],
         }
 
+    @property
+    def uses_yookassa(self) -> bool:
+        """Canonical provider name and backwards-compatible deployed alias."""
+        return self.payment_provider.lower() in {"yookassa", "yookassa_web"}
+
     def validate_receipt_configuration(self) -> None:
         if not self.yookassa_receipt_vat_code.isdigit() or int(self.yookassa_receipt_vat_code) not in range(1, 13):
             raise ValueError("YOOKASSA_RECEIPT_VAT_CODE must be merchant-confirmed (1-12)")
-        if not re.fullmatch(r"[a-z_]{2,32}", self.yookassa_receipt_payment_subject):
+        if self.yookassa_receipt_payment_subject not in {
+            "commodity", "excise", "job", "service", "gambling_bet",
+            "gambling_prize", "lottery", "lottery_prize", "intellectual_activity",
+            "payment", "agent_commission", "another", "casino",
+            "property_right", "non_operating_gain", "sales_tax", "resort_fee",
+            "marked", "non_marked", "marked_excise", "non_marked_excise",
+            "fine", "tax", "lien", "cost", "agent_withdrawals",
+            "pension_insurance_without_payouts", "pension_insurance_with_payouts",
+            "health_insurance_without_payouts", "health_insurance_with_payouts",
+            "health_insurance",
+        }:
             raise ValueError("YOOKASSA_RECEIPT_PAYMENT_SUBJECT must be merchant-confirmed")
         if self.yookassa_receipt_payment_mode not in {"full_payment", "full_prepayment"}:
             raise ValueError("YOOKASSA_RECEIPT_PAYMENT_MODE must be merchant-confirmed")
 
     def validate_payment_configuration(self) -> None:
         """Fail closed when YooKassa is enabled without its dependencies."""
-        if self.payment_provider.lower() != "yookassa_web":
+        if self.payment_provider.lower() not in {"disabled", "manual", "yookassa", "yookassa_web"}:
+            raise ValueError("Unsupported PAYMENT_PROVIDER")
+        if not self.uses_yookassa:
             return
         errors: list[str] = []
         if self.payment_currency != "RUB":
@@ -254,6 +271,8 @@ class Settings(BaseSettings):
         self.validate_payment_configuration()
 
         errors: list[str] = []
+        if self.payment_provider.lower() == "manual":
+            errors.append("PAYMENT_PROVIDER=manual is forbidden in production")
 
         if self.app_mode.lower() != "webhook":
             errors.append(f"APP_MODE must be 'webhook' in production, got '{self.app_mode}'")

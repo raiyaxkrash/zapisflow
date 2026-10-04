@@ -137,3 +137,9 @@ class AdminProjectStates(StatesGroup):
     """FSM states for project administrative actions."""
 
     waiting_for_delete_confirm = State()
+
+
+class SubscriptionCheckoutStates(StatesGroup):
+    """Email required only for merchant fiscal receipt."""
+
+    waiting_for_email = State()

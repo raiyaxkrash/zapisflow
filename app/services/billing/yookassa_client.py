@@ -29,6 +29,7 @@ class YooKassaPayment:
     checkout_ref: str | None
     confirmation_url: str | None
     metadata: dict[str, str] = field(default_factory=dict)
+    test: bool | None = None
 
 
 def _parse_payment(data: Mapping[str, Any]) -> YooKassaPayment:
@@ -54,6 +55,7 @@ def _parse_payment(data: Mapping[str, Any]) -> YooKassaPayment:
         not isinstance(payment_id, str)
         or not payment_id
         or not isinstance(status, str)
+        or status not in {"pending", "waiting_for_capture", "succeeded", "canceled"}
         or not isinstance(currency, str)
         or not amount.is_finite()
         or amount <= 0
@@ -76,6 +78,7 @@ def _parse_payment(data: Mapping[str, Any]) -> YooKassaPayment:
         checkout_ref=checkout_ref,
         confirmation_url=confirmation_url,
         metadata=metadata,
+        test=data.get("test") if isinstance(data.get("test"), bool) else None,
     )
 
 
@@ -156,6 +159,9 @@ class YooKassaClient:
         payment_id: int | None = None,
         user_id: int | None = None,
         plan_id: int | None = None,
+        master_id: int | None = None,
+        actor_user_id: int | None = None,
+        plan_code: str | None = None,
     ) -> YooKassaPayment:
         parsed_return = urlsplit(return_url)
         if (
@@ -177,6 +183,9 @@ class YooKassaClient:
                 **({"payment_id": str(payment_id)} if payment_id is not None else {}),
                 **({"user_id": str(user_id)} if user_id is not None else {}),
                 **({"plan_id": str(plan_id)} if plan_id is not None else {}),
+                **({"master_id": str(master_id)} if master_id is not None else {}),
+                **({"actor_user_id": str(actor_user_id)} if actor_user_id is not None else {}),
+                **({"plan_code": plan_code} if plan_code is not None else {}),
             },
         }
         if receipt is not None:

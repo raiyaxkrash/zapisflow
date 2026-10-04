@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import uuid
+import json
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,6 +20,7 @@ from app.database.models.master import Master, SubscriptionStatus
 from app.database.models.subscription import SubscriptionPayment, SubscriptionPlan
 from app.database.models.user import User
 from app.services.billing.yookassa_client import YooKassaClient, YooKassaGatewayError, YooKassaPayment
+from app.services.billing.yookassa_provider import YooKassaProvider
 from app.services.exceptions import BillingIDORViolationError, PlanNotFoundError, SubscriptionError
 from app.services.subscription_service import SubscriptionService
 
@@ -70,6 +72,7 @@ class YooKassaCheckoutService:
     ) -> None:
         self.session_maker = session_maker
         self.client = client
+        self.provider = YooKassaProvider(client)
 
     async def create_order(
         self,
@@ -87,13 +90,15 @@ class YooKassaCheckoutService:
             )
 
     async def open_direct_checkout(
-        self, *, actor_user_id: int, master_id: int, plan_code: str
+        self, *, actor_user_id: int, master_id: int, plan_code: str, receipt_email: str | None = None
     ) -> tuple[CheckoutOrder, CheckoutRedirect]:
         """Reuse a pending local order; create a provider redirect after DB commit."""
-        if settings.payment_provider.lower() != "yookassa_web":
+        if not settings.uses_yookassa:
             raise SubscriptionError("Оплата сейчас недоступна")
-        if settings.yookassa_fiscal_mode != "self_employed":
-            raise SubscriptionError("Прямая оплата недоступна для текущего режима чеков")
+        if settings.yookassa_fiscal_mode == "merchant_receipt":
+            from app.services.billing.checkout_session import _receipt_email
+            receipt_email = _receipt_email(receipt_email or "")
+            settings.validate_receipt_configuration()
         for _ in range(2):
             async with self.session_maker.begin() as session:
                 master = await session.scalar(
@@ -139,6 +144,11 @@ class YooKassaCheckoutService:
                     )
             redirect = await self.start_checkout(
                 checkout_ref=order.checkout_ref, actor_user_id=actor_user_id,
+                receipt=(settings.build_yookassa_receipt(
+                    email=receipt_email,
+                    description=f"{order.plan_name} — подписка на {order.period_days} дней",
+                    amount=order.amount
+                ) if settings.yookassa_fiscal_mode == "merchant_receipt" else None),
             )
             if redirect.status != "CANCELED":
                 return order, redirect
@@ -153,7 +163,7 @@ class YooKassaCheckoutService:
         plan_code: str,
     ) -> CheckoutOrder:
         """Stage an order in the caller's transaction, without committing."""
-        if settings.payment_provider.lower() != "yookassa_web":
+        if not settings.uses_yookassa:
             raise SubscriptionError("Оплата на сайте сейчас недоступна")
         if not plan_code or len(plan_code) > 32:
             raise PlanNotFoundError("Тариф не найден")
@@ -192,6 +202,9 @@ class YooKassaCheckoutService:
             currency=plan.currency,
             status="PENDING",
             period_days=plan.duration_days,
+            metadata_json=json.dumps({"master_id": master.id,
+                                      "actor_user_id": actor_user_id,
+                                      "plan_code": plan.code}),
         )
         session.add(payment)
         await session.flush()
@@ -226,12 +239,12 @@ class YooKassaCheckoutService:
         receipt: dict | None = None,
     ) -> CheckoutRedirect:
         """Call YooKassa after local order commit; reuse the same key on retry."""
-        async with self.session_maker() as session:
+        async with self.session_maker.begin() as session:
             payment = await session.scalar(
                 select(SubscriptionPayment).where(
                     SubscriptionPayment.checkout_ref == checkout_ref,
                     SubscriptionPayment.provider == PROVIDER_CODE,
-                )
+                ).with_for_update().execution_options(populate_existing=True)
             )
             if payment is None:
                 raise SubscriptionError("Платёж не найден")
@@ -250,10 +263,28 @@ class YooKassaCheckoutService:
             provider_id = payment.provider_payment_id
             local_payment_id = payment.id
             local_plan_id = payment.plan_id
+            trusted_metadata = self._order_metadata(payment)
             plan = await session.get(SubscriptionPlan, payment.plan_id)
             if plan is None or not plan.is_active:
                 raise SubscriptionError("Тариф платежа не найден")
             description = f"{plan.name} — подписка на {payment.period_days} дней"
+            local_master_id = master.id
+            local_plan_code = trusted_metadata.get("plan_code", plan.code)
+            # Persist the entire safe request body before the first POST. A
+            # retry must not change fiscal email, description or return URL.
+            data = json.loads(payment.metadata_json) if payment.metadata_json else {}
+            request_snapshot = data.get("request_snapshot")
+            if request_snapshot is None:
+                request_snapshot = {"description": description,
+                                    "return_url": settings.billing_return_url,
+                                    "receipt": receipt, "mode": settings.yookassa_mode.lower()}
+                data["request_snapshot"] = request_snapshot
+                payment.metadata_json = json.dumps(data, ensure_ascii=False)
+            elif request_snapshot["mode"] != settings.yookassa_mode.lower():
+                raise SubscriptionError("Режим оплаты заказа изменился; обратитесь в поддержку")
+            description = request_snapshot["description"]
+            receipt = request_snapshot["receipt"]
+            return_url = request_snapshot["return_url"]
 
         if provider_id.startswith(UNCREATED_PREFIX):
             if created_at.tzinfo is None:
@@ -261,27 +292,31 @@ class YooKassaCheckoutService:
             if datetime.now(timezone.utc) - created_at >= IDEMPOTENCY_RETRY_LIMIT:
                 # YooKassa's key expires after 24h. A second POST could charge twice.
                 raise SubscriptionError("Время создания платежа истекло; обратитесь в поддержку")
-            remote = await self.client.create_payment(
+            remote = await self.provider.create_checkout_payment(
                 checkout_ref=str(checkout_ref),
                 amount=amount,
                 currency=currency,
                 description=description,
-                return_url=settings.billing_return_url,
+                return_url=return_url,
                 receipt=receipt,
                 payment_id=local_payment_id,
                 user_id=actor_user_id,
                 plan_id=local_plan_id,
+                master_id=local_master_id,
+                actor_user_id=actor_user_id,
+                plan_code=local_plan_code,
             )
         else:
             remote = await self.client.get_payment(provider_id)
         self._verify_remote(
             remote, checkout_ref, amount, currency,
             payment_id=local_payment_id, user_id=actor_user_id, plan_id=local_plan_id,
+            trusted_metadata=trusted_metadata,
         )
         if remote.status in {"succeeded", "canceled"}:
             await self.reconcile(remote.id)
             return CheckoutRedirect(checkout_ref, None, remote.status.upper())
-        if remote.status != "pending" or not remote.confirmation_url:
+        if remote.status not in {"pending", "waiting_for_capture"} or (remote.status == "pending" and not remote.confirmation_url):
             raise SubscriptionError("ЮKassa не вернула страницу ожидающего платежа")
 
         async with self.session_maker.begin() as session:
@@ -312,7 +347,7 @@ class YooKassaCheckoutService:
                 raise SubscriptionError("Конфликт идентификатора платежа")
             await session.flush()
 
-        return CheckoutRedirect(checkout_ref, remote.confirmation_url, "PENDING")
+        return CheckoutRedirect(checkout_ref, remote.confirmation_url, remote.status.upper())
 
     async def reconcile(self, provider_payment_id: str) -> bool:
         """Verify provider truth over authenticated GET, then activate once in DB."""
@@ -339,6 +374,7 @@ class YooKassaCheckoutService:
             self._verify_remote(
                 remote, checkout_ref, payment.amount, payment.currency,
                 payment_id=payment.id, user_id=master.owner_user_id, plan_id=payment.plan_id,
+                trusted_metadata=self._order_metadata(payment),
             )
             if payment.provider_payment_id.startswith(UNCREATED_PREFIX):
                 payment.provider_payment_id = remote.id
@@ -350,13 +386,10 @@ class YooKassaCheckoutService:
                 ok = await SubscriptionService(session).process_successful_payment(
                     PROVIDER_CODE, remote.id
                 )
-                try:
-                    from app.services.subscription_notification_service import SubscriptionNotificationService
-                    await SubscriptionNotificationService(session).send_payment_success_notification(
-                        payment.master_id, payment.id
-                    )
-                except Exception:
-                    pass
+                from app.services.subscription_notification_service import SubscriptionNotificationService
+                await SubscriptionNotificationService(session).send_payment_success_notification(
+                    payment.master_id, payment.id
+                )
                 return ok
             if remote.status == "canceled" and payment.status == "PENDING":
                 payment.status = "CANCELLED"
@@ -426,6 +459,7 @@ class YooKassaCheckoutService:
             plan_code = plan.code
             period_days = payment.period_days
             local_plan_id = payment.plan_id
+            trusted_metadata = self._order_metadata(payment)
 
             if provider_payment_id.startswith(UNCREATED_PREFIX) or checkout_ref is None:
                 return PaymentCheckResult(
@@ -463,6 +497,7 @@ class YooKassaCheckoutService:
             payment_id=payment_id,
             user_id=actor_user_id,
             plan_id=local_plan_id,
+            trusted_metadata=trusted_metadata,
         )
 
         async with self.session_maker.begin() as session:
@@ -496,13 +531,10 @@ class YooKassaCheckoutService:
                     PROVIDER_CODE, remote.id
                 )
                 await session.refresh(master)
-                try:
-                    from app.services.subscription_notification_service import SubscriptionNotificationService
-                    await SubscriptionNotificationService(session).send_payment_success_notification(
-                        payment.master_id, payment.id
-                    )
-                except Exception:
-                    pass
+                from app.services.subscription_notification_service import SubscriptionNotificationService
+                await SubscriptionNotificationService(session).send_payment_success_notification(
+                    payment.master_id, payment.id
+                )
                 return PaymentCheckResult(
                     status="SUCCEEDED",
                     payment_id=payment.id,
@@ -539,6 +571,18 @@ class YooKassaCheckoutService:
             )
 
     @staticmethod
+    def _order_metadata(payment: SubscriptionPayment) -> dict:
+        # Immutable trusted creation snapshot; older payments have no snapshot.
+        if not payment.metadata_json:
+            return {}
+        try:
+            data = json.loads(payment.metadata_json)
+        except (ValueError, TypeError):
+            raise SubscriptionError("Метаданные заказа некорректны") from None
+        return {key: str(data[key]) for key in ("master_id", "actor_user_id", "plan_code")
+                if key in data}
+
+    @staticmethod
     def _verify_remote(
         remote: YooKassaPayment,
         checkout_ref: uuid.UUID,
@@ -548,7 +592,10 @@ class YooKassaCheckoutService:
         payment_id: int,
         user_id: int,
         plan_id: int | None,
+        trusted_metadata: dict | None = None,
     ) -> None:
+        if remote.test is not None and remote.test != (settings.yookassa_mode.lower() == "test"):
+            raise SubscriptionError("Режим ЮKassa не совпадает с конфигурацией")
         if (
             remote.checkout_ref != str(checkout_ref)
             or remote.amount != amount
@@ -562,6 +609,11 @@ class YooKassaCheckoutService:
             "user_id": str(user_id),
             "plan_id": str(plan_id),
         }
+        # New orders require all tenant metadata. Legacy ref-only orders remain
+        # safe through UUID, amount, currency and local provider ID matching.
+        if trusted_metadata and any(remote.metadata.get(key) != value
+                                    for key, value in {**expected, **trusted_metadata}.items()):
+            raise SubscriptionError("Параметры ЮKassa не совпадают с заказом")
         if any(
             key in remote.metadata and remote.metadata[key] != value
             for key, value in expected.items()

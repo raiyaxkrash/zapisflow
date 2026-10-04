@@ -27,7 +27,7 @@ async def reconcile_pending_yookassa(
     client: YooKassaClient | None = None,
 ) -> int:
     """Check a bounded batch; subscription row locks make replicas idempotent."""
-    if settings.payment_provider.lower() != "yookassa_web":
+    if not settings.uses_yookassa:
         return 0
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
