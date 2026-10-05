@@ -239,3 +239,13 @@ production deployment и реальный Telegram UAT требуют отдел
 Поддержка платформы: [@zapisflow](https://t.me/zapisflow).
 
 Подробнее о конфигурации live/test, чеках и выкатке: [YooKassa billing](docs/yookassa-billing.md).
+
+
+## Веб-запись (опциональный канал)
+
+Маркетинговый сайт остаётся на `/`; `/book/<bot_public_id>` использует общие
+BookingService/SlotEngine и PostgreSQL записи. Каталог и слоты доступны без
+входа, создание записи и `/account/bookings` требуют Telegram OIDC Login.
+Веб-канал включается отдельно владельцем, default false, независимо от Mini App.
+Настройка auth bot, HTTPS proxy, environment и ручной UAT:
+[WEB_BOOKING_TELEGRAM_LOGIN.md](docs/WEB_BOOKING_TELEGRAM_LOGIN.md).

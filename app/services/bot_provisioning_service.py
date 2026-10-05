@@ -85,6 +85,25 @@ class BotProvisioningService:
         await self.session.flush()
         return row
 
+    async def set_web_booking_enabled(self, bot_instance_id: int, actor_user_id: int, enabled: bool) -> BotInstance:
+        """Explicit owner opt-in, transaction owned by webhook middleware."""
+        row = await self.bot_repo.get_by_id(bot_instance_id)
+        if row is None:
+            raise AccessDeniedError("Доступ запрещён")
+        await MasterAuthorizationService(self.session).require_owner(row.master_id, actor_user_id)
+        row = await self.session.scalar(select(BotInstance).where(BotInstance.id == bot_instance_id)
+                                        .with_for_update().execution_options(populate_existing=True))
+        if not row or not row.is_current:
+            raise AccessDeniedError("Доступ запрещён")
+        if enabled and (not settings.web_booking_base_url or not settings.telegram_login_client_id
+                        or not settings.telegram_login_client_secret.get_secret_value() or not settings.telegram_login_redirect_uri):
+            raise ProvisioningWebhookError("Веб-запись ещё не настроена платформой")
+        row.web_booking_enabled = enabled
+        await self.audit_service.log_event(action="BOT_WEB_BOOKING_CHANGED", actor_user_id=actor_user_id,
+                                          master_id=row.master_id, entity_id=row.id, payload_after={"enabled": enabled})
+        await self.session.flush()
+        return row
+
     async def validate_candidate_token(
         self,
         actor_user_id: int,

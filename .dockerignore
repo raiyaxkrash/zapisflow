@@ -7,6 +7,8 @@
 .planning/
 miniapp/node_modules/
 miniapp/dist/
+marketing/node_modules/
+marketing/dist/
 **/__pycache__
 **/.pytest_cache
 **/.mypy_cache

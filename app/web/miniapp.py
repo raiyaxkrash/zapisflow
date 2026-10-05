@@ -787,6 +787,14 @@ async def upload(
     raw = await file.read(MAX_UPLOAD + 1)
     await file.close()
     image = safe_image(raw, file.content_type)
+    return await submit_uploaded_proof(c, id, request, image, c.user.telegram_id)
+
+
+async def submit_uploaded_proof(c, id, request, image, storage_chat_id):
+    """Shared trusted adapter: same tenant bot stores media in an existing chat."""
+    a = await appointment(c, id)
+    if not a.cancel_policy_agreed:
+        fail("POLICY_REQUIRED", "Сначала подтвердите запись")
 
     async def execute():
         if not a.payments:
@@ -807,7 +815,7 @@ async def upload(
             MediaType.DOCUMENT,
         )
         sent = await bot.send_document(
-            c.user.telegram_id,
+            storage_chat_id,
             BufferedInputFile(image, filename="receipt.jpg"),
             caption="Чек для проверки мастером",
         )
@@ -1304,7 +1312,7 @@ def install_miniapp(app):
 
     @app.middleware("http")
     async def miniapp_safety(request, call_next):
-        if not request.url.path.startswith("/api/miniapp"):
+        if not request.url.path.startswith(("/api/miniapp", "/api/web-booking", "/api/auth")):
             return await call_next(request)
         started = time.monotonic()
         # Bound raw multipart/JSON body before parsers can buffer arbitrary data.

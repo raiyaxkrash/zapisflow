@@ -1,4 +1,5 @@
 import React from 'react';
+import { WebBooking } from './WebBooking';
 import { Header } from './components/Header.tsx';
 import { Hero } from './components/Hero.tsx';
 import { SocialProof } from './components/SocialProof.tsx';
@@ -13,6 +14,7 @@ import { FinalCTA } from './components/FinalCTA.tsx';
 import { Footer } from './components/Footer.tsx';
 
 export const App: React.FC = () => {
+  if (window.location.pathname.startsWith("/book/") || window.location.pathname === "/account/bookings") return <WebBooking />;
   return (
     <div className="site-wrapper">
       <Header />

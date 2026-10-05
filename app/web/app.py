@@ -293,6 +293,8 @@ def create_app(
 
     from app.web.miniapp import install_miniapp
     install_miniapp(app)
+    from app.web.web_booking import router as web_booking_router
+    app.include_router(web_booking_router)
 
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next: Any) -> Response:

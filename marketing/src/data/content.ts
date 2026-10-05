@@ -11,7 +11,7 @@ export const NAV_LINKS: NavMenuItem[] = [
 export const EXTERNAL_LINKS = {
   demoBot: 'https://t.me/zapisflowsbot',
   support: 'https://t.me/zapisflow',
-  createBot: 'https://t.me/zapisflow',
+  createBot: 'https://t.me/zapisflowsbot',
 };
 
 export const SOCIAL_PROOF_BADGES = [

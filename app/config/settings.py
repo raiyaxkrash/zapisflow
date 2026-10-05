@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     # Environment
     app_env: str = Field(default="development", alias="APP_ENV")
 
+    # Website OIDC credentials stay server-side; opt-in only.
+    web_booking_base_url: str = Field(default="", alias="WEB_BOOKING_BASE_URL")
+    telegram_login_client_id: str = Field(default="", alias="TELEGRAM_LOGIN_CLIENT_ID")
+    telegram_login_client_secret: SecretStr = Field(default="", alias="TELEGRAM_LOGIN_CLIENT_SECRET")
+    telegram_login_redirect_uri: str = Field(default="", alias="TELEGRAM_LOGIN_REDIRECT_URI")
+    web_session_ttl_seconds: int = Field(default=86400, ge=300, le=604800, alias="WEB_SESSION_TTL_SECONDS")
+
     # Telegram Bot
     bot_token: str = Field(default="dummy_token_for_init", alias="BOT_TOKEN")
     admin_ids: List[int] = Field(default_factory=list, alias="ADMIN_IDS")
@@ -89,6 +96,16 @@ class Settings(BaseSettings):
     mini_app_base_url: str = Field(default="", alias="MINI_APP_BASE_URL")
     mini_app_session_seconds: int = Field(default=1800, ge=60, le=3600, alias="MINI_APP_SESSION_SECONDS")
     mini_app_auth_max_age_seconds: int = Field(default=300, ge=30, le=600, alias="MINI_APP_AUTH_MAX_AGE_SECONDS")
+
+    @field_validator("web_booking_base_url")
+    @classmethod
+    def validate_web_booking_url(cls, value: str) -> str:
+        if not value:
+            return ""
+        try:
+            return miniapp_origin(value)
+        except ValueError:
+            raise ValueError("WEB_BOOKING_BASE_URL must be a website origin without credentials") from None
 
     @field_validator("mini_app_base_url")
     @classmethod
@@ -271,6 +288,18 @@ class Settings(BaseSettings):
         self.validate_payment_configuration()
 
         errors: list[str] = []
+        if self.web_booking_base_url:
+            parsed = urlsplit(self.web_booking_base_url)
+            redirect = urlsplit(self.telegram_login_redirect_uri)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                    or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+                errors.append("WEB_BOOKING_BASE_URL must be an HTTPS origin without credentials")
+            if not self.telegram_login_client_id or not self.telegram_login_client_secret.get_secret_value():
+                errors.append("Telegram Login credentials are required for website booking")
+            if (redirect.scheme != "https" or redirect.netloc != parsed.netloc or redirect.username
+                    or redirect.password or redirect.path != "/api/auth/telegram/callback"
+                    or redirect.query or redirect.fragment):
+                errors.append("TELEGRAM_LOGIN_REDIRECT_URI must be the same-origin /api/auth/telegram/callback")
         if self.payment_provider.lower() == "manual":
             errors.append("PAYMENT_PROVIDER=manual is forbidden in production")
 

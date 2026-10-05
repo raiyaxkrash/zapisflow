@@ -174,6 +174,7 @@ def project_card_keyboard(
 
     if can_configure_bot and bot_instance and bot_instance.status in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED):
         rows.append([InlineKeyboardButton(text="🤖 Настройки бота → Mini App", callback_data=f"mgr:bot:miniapp:{bot_instance.id}:view")])
+        rows.append([InlineKeyboardButton(text="🌐 Запись через сайт", callback_data=f"mgr:bot:web:{bot_instance.id}:view")])
 
     # Business & CRM features
     rows.append([

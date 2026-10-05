@@ -11,7 +11,7 @@ describe('ZapisFlow Marketing Site Data Tests', () => {
   it('contains valid and secure external links without invented usernames', () => {
     expect(EXTERNAL_LINKS.demoBot).toBe('https://t.me/zapisflowsbot');
     expect(EXTERNAL_LINKS.support).toBe('https://t.me/zapisflow');
-    expect(EXTERNAL_LINKS.createBot).toBe('https://t.me/zapisflow');
+    expect(EXTERNAL_LINKS.createBot).toBe('https://t.me/zapisflowsbot');
   });
 
   it('contains all required navigation items', () => {
