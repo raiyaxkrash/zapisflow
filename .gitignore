@@ -52,3 +52,18 @@
 /miniapp/node_modules/
 /miniapp/dist/
 
+# Marketing website source and configuration (build artifacts stay local).
+!/marketing/
+!/marketing/**/
+!/marketing/**/*.ts
+!/marketing/**/*.tsx
+!/marketing/**/*.js
+!/marketing/**/*.css
+!/marketing/**/*.html
+!/marketing/**/*.json
+!/marketing/**/*.svg
+!/marketing/**/*.xml
+!/marketing/**/*.txt
+/marketing/node_modules/
+/marketing/dist/
+
