@@ -226,3 +226,38 @@ async def test_branding_one_project_across_bot_miniapp_and_website(system, monke
     assert (await client.get("/api/miniapp/context")).json()["branding"][
         "brand_name"
     ] == "Barber House"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["forbidden", "bad_parameter", "network"])
+async def test_profile_failure_preserves_local_brand_and_bot(system, failure):
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+    from aiogram.methods import SetMyName
+
+    client = await owner(system)
+    await base.post(
+        client,
+        "/master/branding",
+        BrandingInput(brand_name="Saved brand").model_dump(),
+        method="PUT",
+    )
+    errors = {
+        "forbidden": TelegramForbiddenError(
+            method=SetMyName(name="Saved brand"), message="Forbidden"
+        ),
+        "bad_parameter": TelegramBadRequest(
+            method=SetMyName(name="Saved brand"), message="Invalid parameter"
+        ),
+        "network": OSError("Network unavailable"),
+    }
+    bot = AsyncMock()
+    bot.set_my_name.side_effect = errors[failure]
+    system.registry.get_by_instance_id = AsyncMock(return_value=bot)
+    result = await base.post(client, "/master/branding/sync-telegram", {})
+    assert result.status_code == 200 and not result.json()["ok"]
+    assert (await client.get("/api/miniapp/context")).json()["branding"][
+        "brand_name"
+    ] == "Saved brand"
+    async with system.factory() as session:
+        row = await session.get(base.BotInstance, system.bots[0].id)
+        assert row.status == base.BotInstanceStatus.ACTIVE and row.is_current

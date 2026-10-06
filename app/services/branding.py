@@ -62,8 +62,10 @@ async def branding_context(session, master, bot=None):
     brand["description"] = brand["description"] or config.about_text or ""
     brand["powered_by"] = "Работает на ZapisFlow"
     assets = (
-        await session.scalars(
-            select(MasterBrandAsset).where(MasterBrandAsset.master_id == master.id)
+        await session.execute(
+            select(MasterBrandAsset.kind, MasterBrandAsset.revision).where(
+                MasterBrandAsset.master_id == master.id
+            )
         )
     ).all()
     for kind in ("logo", "cover"):
