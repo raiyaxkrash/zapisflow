@@ -9,10 +9,11 @@ let occupied = false;
 let deposit = '0';
 let restored = false;
 let hasBookings = false;
+let branding:Record<string,unknown>|undefined;
 const requests: {path: string; init?: RequestInit}[] = [];
 
 beforeEach(() => {
-  signedIn = false; occupied = false; deposit = '0'; restored = false; hasBookings = false; requests.length = 0;
+  branding=undefined;localStorage.clear();signedIn = false; occupied = false; deposit = '0'; restored = false; hasBookings = false; requests.length = 0;
   window.history.replaceState({}, '', '/book/test-public');
   vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
     requests.push({path, init});
@@ -21,7 +22,7 @@ beforeEach(() => {
     if (path === '/api/auth/me') {
       status = signedIn ? 200 : 401;
       data = {first_name:'Клиент',phone:'+79991234567',csrf_token:'test-csrf',intent:restored ? {bot_public_id:'test-public',service_id:1,staff_id:2,start_time:slot} : {}};
-    } else if (path.endsWith('/context')) data = {project:{name:'Студия',about:'Стрижки',timezone:'UTC'},bot_username:'test_bot',cancel_policy_hours:24};
+    } else if (path.endsWith('/context')) data = {branding,contacts:{studio_phone:'+79990000000'},project:{name:branding?.brand_name||'Студия',about:'Стрижки',timezone:'UTC'},bot_username:'test_bot',cancel_policy_hours:24};
     else if (path.endsWith('/services')) data = [{id:1,title:'Стрижка',price:'499',duration_min:60}];
     else if (path.includes('/staff?')) data = [{id:2,display_name:'Мастер'}];
     else if (path.includes('/availability/calendar?')) data = {days:[{date,available:true,reason:null}]};
@@ -113,4 +114,16 @@ describe('Website booking transport', () => {
     expect(screen.getByRole('heading', {name:'Предстоящие'})).toBeTruthy();
     expect(screen.getByRole('heading', {name:'Прошедшие'})).toBeTruthy();
   });
+});
+
+
+it('renders project branding, theme, appearance and customized booking CTA safely',async()=>{
+ branding={brand_name:'Barber House',booking_cta_label:'Выбрать время',tagline:'Стрижки и уход',accent_color:'#000000',theme_mode:'dark',appearance_preset:'soft',show_contacts:false,show_reviews:false,show_portfolio:false};
+ const view=render(<WebBooking/>);
+ expect(await screen.findByRole('heading',{name:'Barber House'})).toBeTruthy();
+ expect(screen.getByRole('link',{name:'Выбрать время'}).getAttribute('href')).toBe('#web-services');
+ expect(view.container.querySelector('.wb')?.getAttribute('data-theme')).toBe('dark');
+ expect(view.container.querySelector('.wb')?.getAttribute('data-appearance')).toBe('soft');
+ expect(view.container.querySelector('[aria-label="Контакты"]')).toBeNull();
+ expect(view.container.textContent).toContain('Работает на ZapisFlow');
 });
