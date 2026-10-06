@@ -381,3 +381,108 @@ async def test_admin_cannot_manage_owner_branding(system, action):
             {},
         )
     assert result.status_code == 403, result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["logo", "cover"])
+async def test_anonymous_public_brand_assets_are_intentional(system, kind):
+    import httpx
+
+    raw = io.BytesIO()
+    Image.new("RGB", (80, 80), "green").save(raw, format="PNG")
+    content = normalize_brand_image(raw.getvalue(), "image/png", kind)
+    async with system.factory() as session:
+        session.add(
+            MasterBrandAsset(
+                master_id=system.masters[1].id,
+                kind=kind,
+                revision="public-contract-test",
+                content=content,
+            )
+        )
+        await session.commit()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=system.app), base_url=base.ORIGIN
+    ) as anonymous:
+        result = await anonymous.get(
+            f"/api/branding/{system.bots[1].public_id}/assets/{kind}"
+        )
+        assert result.status_code == 200 and result.content == content
+        assert result.headers["content-type"] == "image/webp"
+        assert result.headers["x-content-type-options"] == "nosniff"
+        assert result.headers["cache-control"] == "no-store"
+        assert "content-disposition" not in result.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "unknown",
+        "proof",
+        "portfolio",
+        "crm",
+        "client",
+        "internal",
+        "master",
+        "..%2F..%2Fetc%2Fpasswd",
+    ],
+)
+async def test_public_brand_assets_reject_non_allowlisted_kind(system, kind):
+    result = await system.client.get(
+        f"/api/branding/{system.bots[1].public_id}/assets/{kind}"
+    )
+    assert result.status_code in (404, 422)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "public_id", ["1", "not-a-uuid", "00000000-0000-0000-0000-000000000000"]
+)
+async def test_public_brand_assets_reject_invalid_or_unknown_public_id(
+    system, public_id
+):
+    result = await system.client.get(f"/api/branding/{public_id}/assets/logo")
+    assert result.status_code in (404, 422)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["update", "upload", "delete", "reset", "sync"])
+async def test_owner_a_cannot_mutate_business_b_branding(system, action):
+    system.registry.bot.set_my_name = AsyncMock()
+    client = await owner(system)
+    # A's valid session cannot select B by substituting the trusted bot header.
+    headers = {
+        "X-MiniApp-Bot": str(system.bots[1].public_id),
+        "Idempotency-Key": str(uuid.uuid4()),
+    }
+    if action == "upload":
+        result = await client.post(
+            "/api/miniapp/master/branding/assets/logo",
+            headers=headers,
+            files={"file": ("logo.png", b"invalid", "image/png")},
+        )
+    else:
+        path, method = {
+            "update": ("/branding", "PUT"),
+            "delete": ("/branding/assets/logo", "DELETE"),
+            "reset": ("/branding/reset", "POST"),
+            "sync": ("/branding/sync-telegram", "POST"),
+        }[action]
+        result = await client.request(
+            method,
+            "/api/miniapp/master" + path,
+            headers=headers,
+            json=BrandingInput().model_dump() if action == "update" else {},
+        )
+    assert result.status_code == 401
+    # Even authenticated in B's bot, A is not B's owner.
+    client = await base.login(system, user=11001, bot_index=1)
+    assert (await base.post(client, "/master/branding/reset", {})).status_code == 403
+    async with system.factory() as session:
+        settings = await session.get(MasterSettings, system.masters[1].id)
+        assert settings.branding == {}
+        assert (
+            await session.get(MasterBrandAsset, (system.masters[1].id, "logo")) is None
+        )
+    system.registry.bot.set_my_name.assert_not_awaited()
