@@ -61,7 +61,21 @@ Extend existing MasterSettings with bounded validated branding JSON; existing co
 Nearest slot deferred until bounded SlotEngine endpoint justified; no browser scanning.
 
 ## Risks
-Actual Telegram clients and live profile sync need manual UAT. Assets need persistent shared deployment storage. Branding must not bypass subscription/channel gates or hide payment/policy. Existing6 backend warnings identified; baseline initially failed due missing DB/Redis, then WIN1251 default cluster; isolated UTF8 PostgreSQL configured. Test-only Redis Windows vendor runtime is older than production Redis7; final report must disclose rather than claim exact parity.
+Actual Telegram clients and live profile sync need manual UAT. Assets are bounded normalized binary rows in PostgreSQL, included in existing backups; no separate storage volume. Branding must not bypass subscription/channel gates or hide payment/policy. Existing6 backend warnings identified; baseline initially failed due missing DB/Redis, then WIN1251 default cluster; isolated UTF8 PostgreSQL configured. Test-only Redis Windows vendor runtime is older than production Redis7; final report must disclose rather than claim exact parity.
 
 ## Implementation plan
 Baseline complete before application changes → shared tokens + branding schema/service/assets → owner APIs/context → cross-channel bot/web integration → Mini App shell/editor/client/master → targeted/full regression/security/visual QA → logical commits and feature push only. No production deployment.
+
+
+## Implementation decisions and verification
+Selected low-risk improvements: booking progress + sticky summary, repeat service/staff with new date, owner client preview, readable payment/success states. ICS and nearest-slot endpoint are deferred, not advertised as implemented. No React migration, auth bypass, domain rewrite or production deployment.
+
+Owner editor is lazy-loaded. Initial JS grew from32.66KB to 42.54KB (+30.3%, 9.88KB absolute); no runtime/UI library was added. This exceeds the preferred25% budget modestly and is an explicit trade-off for cross-channel branding, gallery/reviews, navigation and keyboard support. CSS decreased from17.68KB to 10.55KB. Final numbers are build outputs, not production TTI claims.
+
+BEFORE136 screenshots at four widths. AFTER280 Mini App screenshots at seven widths and both themes. Axe checks40 screens at390px with WCAG2A/AA/2.1AA tags: no violations at check time. These mocked local checks are not real Telegram client certification or production UAT. Browser engines and real uploads/profile sync not checked are listed explicitly in the final report.
+
+Final backend verification:752 passed,0 failed,0 skipped,6 pre-existing warnings. Frontend verification:37 Mini App tests and34 Marketing/Web tests. Owner editor and master settings are separate lazy chunks. app.js is below1000 formatted lines after extracting stateless presentation. Fresh upgrade to0029 and0028→0029 preserve existing studio/contact/horizon data.
+
+Final visual QA includes80 branded Mini App screens (Studio Anna and Barber House) plus28 web journeys. Axe:40 default Mini App screens +80 branded screens +4 web variants, no violations. Screenshots remain local. Browser transport/auth are test mocks; actual Telegram/Web OIDC UAT is not claimed. Optional owner setup prompt is non-blocking and uses only verified bot context, without fabricated schedule completion.
+
+Initial JS+CSS total:53.09KB versus50.34KB baseline (+5.5%); gzip17.97KB versus15.94KB (+12.7%). Owner chunks:editor3.80KB,settings1.40KB. Marketing app75.99KB+vendor141.78KB,CSS34.57KB. npm audit:0 vulnerabilities in both frontends. Browser QA uses Chromium; real Safari/Firefox and Telegram clients remain manual UAT.

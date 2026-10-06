@@ -249,3 +249,7 @@ BookingService/SlotEngine и PostgreSQL записи. Каталог и слот
 Веб-канал включается отдельно владельцем, default false, независимо от Mini App.
 Настройка auth bot, HTTPS proxy, environment и ручной UAT:
 [WEB_BOOKING_TELEGRAM_LOGIN.md](docs/WEB_BOOKING_TELEGRAM_LOGIN.md).
+
+## Оформление бизнеса и Mini App
+
+Владелец может настроить название, изображения, акцент, тему, тексты и клиентские разделы. Telegram, Mini App и веб-страница записи используют настройки одного проекта. Инструкции и ограничения: [Оформление и Mini App](docs/BRANDING_AND_MINIAPP.md), [дизайн-система](docs/ZAPISFLOW_DESIGN_SYSTEM.md).
