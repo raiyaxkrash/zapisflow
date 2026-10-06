@@ -124,70 +124,24 @@ export async function settingsEditor(page, data, projectName) {
   );
 }
 
-export function serviceEditor(s, id) {
-  return (
-    header("Услуга", id === "new" ? "Новая услуга" : s.title) +
-    `<form id="service-form" data-id="${e(id)}">${f("Название", "title", s.title, "text", 'required maxlength="255"')}${f("Описание", "description", s.description || "")}${f("Цена, ₽", "price", s.price, "number", 'min="0" step="0.01" required')}${f("Длительность, мин", "duration_min", s.duration_min, "number", 'min="1" required')}${f("Буфер, мин", "buffer_min", s.buffer_min, "number", 'min="0" required')}<label class="field">Тип предоплаты<select name="deposit_type"><option value="FIXED" ${s.deposit_type === "FIXED" ? "selected" : ""}>Сумма</option><option value="PERCENT" ${s.deposit_type === "PERCENT" ? "selected" : ""}>Процент</option></select></label>${f("Предоплата", "deposit_value", s.deposit_value, "number", 'min="0" step="0.01" required')}<label class="check"><input name="is_active" type="checkbox" ${s.is_active ? "checked" : ""}>Услуга активна</label><button class="primary">Сохранить</button></form>`
-  );
+export async function serviceEditor(...args) {
+  return (await import("./master/views.js")).serviceEditor(...args);
 }
 
 const e = escape,
   f = field,
   b = button;
 
-export function settingsMenu(ctx) {
-  return (
-    header(ctx.project.name, "Управление") +
-    [
-      ["manage-services", "Услуги"],
-      ["team", "Команда"],
-      ["schedule", "Расписание"],
-      ["contacts-edit", "Контакты"],
-      ["requisites", "Предоплата и реквизиты"],
-      ["booking-settings", "Настройки записи"],
-      ...(ctx.capabilities.role === "owner"
-        ? [["branding", "Оформление"]]
-        : []),
-      ["manual", "Добавить запись"],
-    ]
-      .map(([p, l]) => b(l, "nav", p, "settings-row"))
-      .join("")
-  );
+export async function settingsMenu(...args) {
+  return (await import("./master/views.js")).settingsMenu(...args);
 }
 
-export function staffEditor(s, services, id) {
-  return (
-    header("Сотрудник", s.display_name) +
-    `<form id="staff-form" data-id="${id}">${f("Имя", "display_name", s.display_name, "text", "required")}${f("Специализация", "specialization", s.specialization || "")}<label class="check"><input name="is_active" type="checkbox" ${s.is_active ? "checked" : ""}>Активен</label><h3>Услуги</h3>${notice("Если назначения пустые, сотрудник оказывает все активные услуги — правило текущего ZapisFlow.")}${services.map((row) => `<label class="check"><input name="service_ids" value="${row.id}" type="checkbox" ${s.service_ids.includes(row.id) ? "checked" : ""}>${e(row.title)}</label>`).join("")}<button class="primary">Сохранить</button></form>`
-  );
+export async function staffEditor(...args) {
+  return (await import("./master/views.js")).staffEditor(...args);
 }
 
-export function manualEditor(ctx, clients, services, team) {
-  return (
-    header("Расписание", "Добавить запись") +
-    (clients.length
-      ? `<form id="manual-form">${[
-          ["master_client_id", "Клиент", clients.map((c) => [c.id, c.name])],
-          [
-            "service_id",
-            "Услуга",
-            services.filter((s) => s.is_active).map((s) => [s.id, s.title]),
-          ],
-          [
-            "staff_id",
-            "Сотрудник",
-            team.filter((s) => s.is_active).map((s) => [s.id, s.display_name]),
-          ],
-        ]
-          .map(
-            ([key, label, rows]) =>
-              `<label class="field">${label}<select name="${key}">${rows.map(([v, l]) => `<option value="${v}">${e(l)}</option>`).join("")}</select></label>`,
-          )
-          .join(
-            "",
-          )}${f("Дата", "date", ctx.today, "date", "required")}${f("Время (по часовому поясу студии)", "time", "10:00", "time", "required")}${f("Телефон клиента (необязательно)", "phone", "", "tel")}${f("Заметки", "notes", "")}<button class="primary">Проверить время и создать</button></form>`
-      : empty("Сначала добавьте клиента через Telegram-админку"))
-  );
+export async function manualEditor(...args) {
+  return (await import("./master/views.js")).manualEditor(...args);
 }
 
 export function reviewsView(rows, projectName) {
@@ -208,16 +162,15 @@ export function portfolioView(rows, projectName) {
   return (
     header(projectName, "Наши работы") +
     (rows.length
-      ? `<div class="gallery">${rows.map((r) => `<figure><img src="${e(r.image_url)}" loading="lazy" alt="${e(r.title || "Работа мастера")}"><figcaption>${e(r.caption || r.title || "")}</figcaption></figure>`).join("")}</div>`
+      ? `<div class="gallery">${rows.map((r) => `<figure><img data-private-image="${e(r.image_url.replace(/^\/api\/miniapp/, ""))}" loading="lazy" alt="${e(r.title || "Работа мастера")}"><figcaption>${e(r.caption || r.title || "")}</figcaption></figure>`).join("")}</div>`
       : empty(
           "Мастер пока не добавил работы. Посмотрите услуги или свяжитесь с нами.",
         ))
   );
 }
 
-export function setupChecklist(ctx) {
-  if (ctx.capabilities.role !== "owner") return "";
-  return `<details class="setup-checklist"><summary>Подготовьте приложение для клиентов</summary><p>✓ Бот подключён</p><p>Проверьте услуги и расписание перед первой записью.</p>${b("Проверить услуги", "nav", "manage-services", "secondary")}${b("Проверить расписание", "nav", "schedule", "secondary")}<p>Добавьте логотип и цвет по желанию. Это не требуется для записи.</p>${b("Оформить бизнес", "nav", "branding", "secondary")}</details>`;
+export async function setupChecklist(...args) {
+  return (await import("./master/views.js")).setupChecklist(...args);
 }
 
 export function staffRows(rows) {

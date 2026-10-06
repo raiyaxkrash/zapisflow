@@ -678,3 +678,38 @@ summary {
   color: var(--zf-text-muted);
   font-size: 14px;
 }
+
+/* Long user content remains inside flexible cards at narrow widths. */
+.detail strong,
+.detail small,
+.summary-row strong,
+.booking-summary {
+  overflow-wrap: anywhere;
+}
+.price {
+  white-space: normal;
+  max-width: 44%;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.service-icon {
+  flex-shrink: 0;
+}
+.app-shell {
+  padding-left: var(--app-safe-left, env(safe-area-inset-left));
+  padding-right: var(--app-safe-right, env(safe-area-inset-right));
+}
+.app-nav {
+  padding-left: calc(8px + var(--app-safe-left, env(safe-area-inset-left)));
+  padding-right: calc(8px + var(--app-safe-right, env(safe-area-inset-right)));
+}
+/* The full selection remains in confirmation; the sticky recap stays compact. */
+.booking-summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.options:has(.person) {
+  grid-template-columns: 1fr;
+}

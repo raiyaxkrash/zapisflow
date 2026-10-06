@@ -257,3 +257,12 @@
 .wb[data-appearance="compact"] .wb-options button {
   padding: 12px;
 }
+
+.wb h1,
+.wb h2,
+.wb h3,
+.wb button,
+.wb p,
+.wb .wb-cta {
+  overflow-wrap: anywhere;
+}

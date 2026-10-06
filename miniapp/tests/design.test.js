@@ -21,6 +21,9 @@ test("Shared semantic tokens match marketing build boundary", async () => {
 });
 for (const accent of [
   "#FFFFCC",
+  "#FFFF00",
+  "#0000FF",
+  "#7C3AED",
   "#FF0000",
   "#000080",
   "#000000",
@@ -75,10 +78,10 @@ test("Deployment gateway routes generated brand assets to backend", async () => 
   assert.match(gateway, /@api path \/api\/miniapp\/\* \/api\/branding\/\*/);
 });
 
-test("Optional owner setup does not block booking or expose branding to staff", () => {
+test("Optional owner setup does not block booking or expose branding to staff", async () => {
   assert.match(
-    setupChecklist({ capabilities: { role: "owner" } }),
+    await setupChecklist({ capabilities: { role: "owner" } }),
     /по желанию/,
   );
-  assert.equal(setupChecklist({ capabilities: { role: "staff" } }), "");
+  assert.equal(await setupChecklist({ capabilities: { role: "staff" } }), "");
 });

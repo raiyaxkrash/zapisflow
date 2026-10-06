@@ -1,3 +1,4 @@
+import { bindPortfolioMedia } from "./media.js";
 import "./style.css";
 import { calendarView, monthKey, monthQuery, shiftMonth } from "./calendar.js";
 import { Api } from "./api/client.js";
@@ -49,6 +50,7 @@ let tg,
   revision = 0,
   pendingAction = null;
 let brandingDirty = false;
+let cleanMedia = () => {};
 let clientMonth,
   scheduleMonth,
   scheduleDate,
@@ -58,6 +60,7 @@ let clientMonth,
 const formValues = (form) => Object.fromEntries(new FormData(form));
 
 function shell(content) {
+  cleanMedia();
   applyBrand(ctx?.branding, document.documentElement);
   content =
     bookingProgress(screen) +
@@ -96,6 +99,7 @@ function shell(content) {
             .join("")}</nav>`
         : ""
     }</div>`;
+  cleanMedia = bindPortfolioMedia(root, api);
   if (theme) root.querySelector("#theme").value = theme.get();
   tg?.BackButton[
     screen === "home" || screen === "dashboard" ? "hide" : "show"
@@ -344,7 +348,7 @@ async function render(page, id) {
     };
     return (
       header(ctx.project.name, "Сегодня и расписание") +
-      setupChecklist(ctx) +
+      (await setupChecklist(ctx)) +
       `<p class="sub">Записей на выбранную дату: ${rows.length}</p>` +
       controls +
       (dashboardCalendar
@@ -375,7 +379,7 @@ async function render(page, id) {
       a.payment
         .map(
           (p) =>
-            `<h3>Предоплата ${rub(p.amount)}</h3><p>${e(p.status)}</p>` +
+            `<h3>Предоплата ${rub(p.amount)}</h3><p>${e(paymentLabel(p.status))}</p>` +
             p.proofs
               .map(
                 (proof) =>
@@ -567,6 +571,7 @@ root.addEventListener("click", (event) => {
       !window.confirm("Изменения не сохранены. Выйти?")
     )
       return;
+    if (["nav", "mode"].includes(action)) brandingDirty = false;
     if (action === "nav") return route(id);
     if (action === "retry")
       return retryAction ? retryAction() : ctx ? route(...lastRoute) : start();
@@ -957,6 +962,7 @@ async function start() {
       }[screen];
       if (brandingDirty && !window.confirm("Изменения не сохранены. Выйти?"))
         return;
+      brandingDirty = false;
       route(previous || (mode === "client" ? "home" : "dashboard"));
     });
     await route("home");

@@ -145,6 +145,19 @@ async def test_brand_asset_upload_replay_and_tenant_scope(system):
     async with system.factory() as session:
         rows = (await session.scalars(select(MasterBrandAsset))).all()
         assert len(rows) == 1 and rows[0].master_id == system.masters[0].id
+        # Public logos are intentionally anonymous; private mutations stay scoped.
+        other_content = normalize_brand_image(data.getvalue(), "image/png", "logo")
+        session.add(
+            MasterBrandAsset(
+                master_id=system.masters[1].id,
+                kind="logo",
+                revision="audit-public-logo",
+                content=other_content,
+            )
+        )
+        await session.commit()
+    public_other = await client.get(other_url)
+    assert public_other.status_code == 200 and public_other.content == other_content
     result = await client.post(
         "/api/miniapp/master/branding/assets/cover",
         files={"file": ("image.svg", b'<svg onload="alert(1)"/>', "image/svg+xml")},
@@ -261,3 +274,110 @@ async def test_profile_failure_preserves_local_brand_and_bot(system, failure):
     async with system.factory() as session:
         row = await session.get(base.BotInstance, system.bots[0].id)
         assert row.status == base.BotInstanceStatus.ACTIVE and row.is_current
+
+
+@pytest.mark.asyncio
+async def test_private_portfolio_image_keeps_tenant_header_and_scope(system):
+    from types import SimpleNamespace
+
+    from app.database.models import PortfolioCategory, PortfolioItem
+
+    async with system.factory() as session:
+        category = PortfolioCategory(master_id=system.masters[0].id, title="Works")
+        session.add(category)
+        await session.flush()
+        item = PortfolioItem(
+            master_id=system.masters[0].id,
+            category_id=category.id,
+            telegram_file_id="local-fixture",
+            telegram_file_unique_id="local-unique",
+            title="Work",
+        )
+        session.add(item)
+        await session.commit()
+        item_id = item.id
+    raw = io.BytesIO()
+    Image.new("RGB", (32, 32), "blue").save(raw, format="JPEG")
+    bot = AsyncMock()
+    bot.get_file.return_value = SimpleNamespace(
+        file_size=len(raw.getvalue()), file_path="local.jpg"
+    )
+
+    async def download(path, destination, **kwargs):
+        destination.write(raw.getvalue())
+        return destination
+
+    bot.download_file.side_effect = download
+    system.registry.get_by_instance_id = AsyncMock(return_value=bot)
+    client = await base.login(system)
+    url = (await client.get("/api/miniapp/client/portfolio")).json()[0]["image_url"]
+    assert (await client.get(url, headers={"X-MiniApp-Bot": ""})).status_code == 401
+    response = await client.get(url)
+    assert (
+        response.status_code == 200 and response.headers["content-type"] == "image/jpeg"
+    )
+    client = await base.login(system, bot_index=1)
+    assert (
+        await client.get(f"/api/miniapp/client/portfolio/{item_id}/image")
+    ).status_code == 404
+
+
+def test_fake_mime_executable_and_large_header_rejected():
+    import struct
+    import zlib
+
+    with pytest.raises(ValueError):
+        normalize_brand_image(b"MZ executable data", "image/png", "logo")
+    raw = io.BytesIO()
+    Image.new("RGB", (1, 1)).save(raw, format="PNG")
+    data = bytearray(raw.getvalue())
+    data[16:24] = struct.pack(">II", 5000, 5000)
+    data[29:33] = struct.pack(">I", zlib.crc32(data[12:29]))
+    with pytest.raises(ValueError, match="Недопустимое"):
+        normalize_brand_image(bytes(data), "image/png", "cover")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action", ["read", "save", "reset", "upload", "delete", "sync"]
+)
+async def test_admin_cannot_manage_owner_branding(system, action):
+    from app.database.models import MasterAdmin, User
+    from app.database.models.master import MasterAdminRole
+
+    async with system.factory() as session:
+        user = User(telegram_id=13001, first_name="Project admin")
+        session.add(user)
+        await session.flush()
+        session.add(
+            MasterAdmin(
+                master_id=system.masters[0].id,
+                user_id=user.id,
+                role=MasterAdminRole.ADMIN,
+                is_active=True,
+            )
+        )
+        await session.commit()
+    client = await base.login(system, user=13001)
+    if action == "read":
+        result = await client.get("/api/miniapp/master/branding")
+    elif action == "save":
+        result = await base.post(
+            client, "/master/branding", BrandingInput().model_dump(), method="PUT"
+        )
+    elif action == "upload":
+        result = await client.post(
+            "/api/miniapp/master/branding/assets/logo",
+            files={"file": ("logo.png", b"invalid", "image/png")},
+        )
+    elif action == "delete":
+        result = await base.post(
+            client, "/master/branding/assets/logo", {}, method="DELETE"
+        )
+    else:
+        result = await base.post(
+            client,
+            "/master/branding/" + ("sync-telegram" if action == "sync" else "reset"),
+            {},
+        )
+    assert result.status_code == 403, result.text

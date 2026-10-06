@@ -79,3 +79,15 @@ Final backend verification:752 passed,0 failed,0 skipped,6 pre-existing warnings
 Final visual QA includes80 branded Mini App screens (Studio Anna and Barber House) plus28 web journeys. Axe:40 default Mini App screens +80 branded screens +4 web variants, no violations. Screenshots remain local. Browser transport/auth are test mocks; actual Telegram/Web OIDC UAT is not claimed. Optional owner setup prompt is non-blocking and uses only verified bot context, without fabricated schedule completion.
 
 Initial JS+CSS total:53.09KB versus50.34KB baseline (+5.5%); gzip17.97KB versus15.94KB (+12.7%). Owner chunks:editor3.80KB,settings1.40KB. Marketing app75.99KB+vendor141.78KB,CSS34.57KB. npm audit:0 vulnerabilities in both frontends. Browser QA uses Chromium; real Safari/Firefox and Telegram clients remain manual UAT.
+
+## Независимая финальная проверка ветки
+
+Проверка начата с `9c314c75ff7812763c88ed6428423c948d27fd0d` и чистого рабочего дерева. Исправлены: отсутствие tenant-заголовка при загрузке приватного портфолио, повторные предупреждения после отказа от черновика оформления, переполнение длинного текста в сводке и карточках, технический статус оплаты в карточке мастера. Статические формы мастера вынесены в ленивый модуль.
+
+Логотип и обложка — **публичные материалы бизнеса**: anonymous web-booking должен отображать их без авторизации. URL другого публичного бизнеса возвращает его публичный ресурс, а не ресурс текущей сессии. Это не закрытое хранилище. Изменение/удаление требуют владельца и tenant-scoped Mini App session/CSRF; приватное портфолио требует session и `X-MiniApp-Bot`. Не использовать публичные assets для конфиденциальных изображений.
+
+Независимые результаты: backend 760 passed / 0 failed / 0 skipped; Mini App 43 passed; marketing/web 34 passed. Production-сборки проверены в локальном Chromium с тестовыми транспортами: 14 client journeys, owner workspace, ошибки 401/403/404/409/422/500 и 28 web journeys. Реальные Telegram/OIDC и другие browser engines остаются ручным UAT. Проверены PostgreSQL16 fresh upgrade и 0028→0029 с сохранением контактов/горизонта. Локальный Redis для тестов — Windows3, а не production Redis7.
+
+Актуальная Mini App production-сборка: initial JS40.55KB, CSS11.19KB; base JS32.66KB, CSS17.68KB. Общий initial JS+CSS51.74KB против50.34KB (+2.8%). JS +24.2%; owner chunks не загружаются клиентскому режиму. Оба npm audit без уязвимостей. Полный Ruff содержит прежний долг:1788 замечаний против1795 в base; изменённые branding service/router/tests проходят целевую проверку. Эти цифры относятся к этой проверке, а не являются постоянными гарантиями или production TTI.
+
+Критерий финального задания «Tenant A не может читать Tenant B logo» **не выполнен буквально**: проверка с сохранённым ресурсом B возвращает200, как предусмотрено публичным endpoint. Этот контракт требует разрешения перед merge: либо принять публичность logo/cover, либо согласовать новую модель доставки публичных изображений. Приватные операции и портфолио fail-closed. Итог независимого аудита при текущем буквальном критерии: NOT READY FOR MERGE.

@@ -70,3 +70,11 @@ test('Slot conflict and session expiry preserve safe error codes',async()=>{
     await assert.rejects(api.get('/client/slots'),error=>error.code===code && error.status===status);
   }
 });
+
+
+test('Private portfolio image carries session credentials and explicit tenant header',async()=>{
+ let request;const blob=new Blob(['image'],{type:'image/jpeg'});
+ const api=new Api(async(url,options)=>{request={url,options};return {ok:true,blob:async()=>blob}});api.botId='tenant-a';
+ assert.equal(await api.image('/client/portfolio/1/image'),blob);
+ assert.equal(request.url,'/api/miniapp/client/portfolio/1/image');assert.equal(request.options.headers['X-MiniApp-Bot'],'tenant-a');assert.equal(request.options.credentials,'same-origin');
+});

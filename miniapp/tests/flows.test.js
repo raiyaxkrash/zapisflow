@@ -1,3 +1,4 @@
+import {bindPortfolioMedia} from "../src/media.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -51,7 +52,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
     }
     async upload(path,file,progress){calls.push(['upload',path,file.type]);progress(100);current={...current,status:'PAYMENT_PROOF_SENT',payment:[{id:9,status:'SUBMITTED',amount:deposit,proofs:[{id:11}]}]};return {appointment:current}}
   }
-  Object.assign(dom.window,{Api,...calendar,...ui,e:ui.escape,b:ui.button,f:ui.field,
+  Object.assign(dom.window,{bindPortfolioMedia,Api,...calendar,...ui,e:ui.escape,b:ui.button,f:ui.field,
     bootstrap:()=>({initData:'signed',BackButton:{hide(){},show(){},onClick(){}}}),
     setupTheme:()=>({get:()=> 'system',set(){}}),botIdFromPath:()=> '11111111-2222-3333-4444-555555555555'});
   dom.window.confirm=()=>true;
@@ -175,4 +176,12 @@ test('Owner branding draft remains local until save and then changes client prev
  assert.equal(h.root.querySelector('#brand-preview h3').textContent,'Barber House');assert.equal(h.calls.filter(c=>c[0]==='mutate').length,0);
  await h.submit('branding-form');assert.ok(h.calls.some(c=>c[0]==='mutate'&&c[1]==='/master/branding'&&c[2].brand_name==='Barber House'));assert.ok(h.root.textContent.includes('Оформление сохранено'));
  await h.click('mode','client');assert.ok(h.root.textContent.includes('Barber House'));h.dom.window.close();
+});
+
+
+test('Discarding a branding draft clears the warning for subsequent client navigation',async()=>{
+ const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','settings');await h.click('nav','branding');
+ const name=h.root.querySelector('[name=brand_name]');name.value='Unsaved';name.dispatchEvent(new h.dom.window.Event('input',{bubbles:true}));
+ let warnings=0;h.dom.window.confirm=()=>{warnings++;return true};
+ await h.click('mode','client');await h.click('nav','bookings');assert.equal(warnings,1);assert.equal(h.calls.filter(c=>c[0]==='mutate').length,0);h.dom.window.close();
 });
