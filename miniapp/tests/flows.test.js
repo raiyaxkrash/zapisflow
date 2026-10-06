@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom';
 import * as ui from '../src/ui.js';
 import * as calendar from '../src/calendar.js';
 
-const source = (await readFile(new URL('../src/app.js', import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
+const source = (await readFile(new URL('../src/app.js', import.meta.url),'utf8')).replace(/^import[\s\S]*?;\r?\n/gm,'');
 const visit = {id:7,service:'Haircut',staff:'Master',price:'499',deposit:'0',payment:[],start_time:'2026-10-05T10:00:00+03:00',status:'WAITING_PAYMENT',status_label:'Резерв',cancel_allowed:true,policy_agreed:false};
 const offering = {id:1,title:'Haircut',price:'499',duration_min:60,buffer_min:15,deposit_type:'FIXED',deposit_value:'0',is_active:true};
 const flush = () => new Promise(resolve=>setTimeout(resolve,10));
@@ -15,12 +15,13 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
   const overrides = new Map();
   const calls = []; let current = {...visit,deposit}, failures = networkFailures;
   const maxDate=new Date(Date.UTC(2026,9,5+horizon)).toISOString().slice(0,10);
-  const ctx = {project:{name:'Real studio',timezone:'Europe/Moscow'},user:{first_name:'Client',phone:'+79991234567'},contacts:{studio_address:'<script>bad</script>'},today:'2026-10-05',booking_horizon_days:horizon,cancel_policy_hours:24,can_book:true,capabilities:{can_manage:owner,can_edit_project:owner}};
+  const ctx = {project:{name:'Real studio',timezone:'Europe/Moscow'},user:{first_name:'Client',phone:'+79991234567'},contacts:{studio_address:'<script>bad</script>'},today:'2026-10-05',booking_horizon_days:horizon,cancel_policy_hours:24,can_book:true,capabilities:{can_manage:owner,can_edit_project:owner,role:owner?'owner':'none'}};
   class Api {
     async auth(...args){calls.push(['auth',...args]);if(authDelay)await new Promise(resolve=>setTimeout(resolve,authDelay));if(authFailure){const error=Error('Вход недоступен');error.status=401;throw error}return {csrf_token:'csrf'}}
     async get(path){
       calls.push(['get',path]);
       if(path==='/context')return ctx;
+      if(path==='/master/branding')return ctx.branding||{brand_name:'Real studio',accent_color:'#1D72FE',theme_mode:'system',appearance_preset:'clean',booking_cta_label:'Записаться',show_portfolio:true,show_reviews:true,show_contacts:true,show_staff:true};
       if(path.includes('/services'))return path.endsWith('/1')?offering:[offering];
       if(path.includes('/staff'))return [{id:2,display_name:'Master',is_active:true,service_ids:[1]}];
       if(path.includes('/calendar')) {
@@ -40,6 +41,8 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
     }
     async mutate(path,body,method){
       calls.push(['mutate',path,body,method]);
+      if(path==='/master/branding'){ctx.branding=body;ctx.project.name=body.brand_name;return body;}
+      if(path==='/master/branding/reset'){ctx.branding=null;ctx.project.name='Real studio';return {};}
       if(path.startsWith('/master/schedule/dates/')) { const date=path.split('/').at(-1);overrides.set(date,{...body,has_override:body.mode!=='weekly'});return {date,...body}; }
       if(path==='/client/holds' && failures-->0){const error=Error('Offline');error.code='NETWORK';throw error}
       if(path==='/client/appointments')current={...current,policy_agreed:true,status:Number(deposit)?'WAITING_PAYMENT':'CONFIRMED',payment:Number(deposit)?[{id:9,status:'PENDING',amount:deposit,proofs:[]}]:[]};
@@ -66,7 +69,7 @@ test('Client UI drives service/staff/slot/hold/confirmation/my bookings/cancel t
   await h.submit('confirm-form');assert.ok(h.root.textContent.includes('Мои записи'));
   assert.equal(h.calls.filter(c=>c[0]==='mutate'&&c[1]==='/client/holds').length,1);
   assert.ok(h.calls.find(c=>c[1]==='/client/appointments')[2].policy_agreed);
-  await h.click('cancel',7);assert.ok(h.calls.find(c=>c[1]==='/client/appointments/7/cancel'));
+  await h.click('nav','bookings');await h.click('cancel',7);assert.ok(h.calls.find(c=>c[1]==='/client/appointments/7/cancel'));
   h.dom.window.close();
 });
 
@@ -102,7 +105,7 @@ test('Owner UI edits service, CRM notes and irregular schedule through tenant AP
 });
 
 test('Contact text is escaped by the real page renderer',async()=>{
-  const h=await harness();await h.click('nav','contact');assert.ok(!h.root.querySelector('script'));assert.ok(h.root.textContent.includes('<script>bad</script>'));h.dom.window.close();
+  const h=await harness();await h.click('nav','more');await h.click('nav','contact');assert.ok(!h.root.querySelector('script'));assert.ok(h.root.textContent.includes('<script>bad</script>'));h.dom.window.close();
 });
 
 test('Auth loading transitions to authenticated client home',async()=>{
@@ -116,7 +119,7 @@ test('Auth failure never exposes client or master data',async()=>{
 });
 
 test('Owner manual booking submits only scoped identifiers and optional phone',async()=>{
-  const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','manual');
+  const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','settings');await h.click('nav','manual');
   h.dom.window.document.querySelector('[name=phone]').value='+79991234567';await h.submit('manual-form');
   const request=h.calls.find(c=>c[0]==='mutate'&&c[1]==='/master/appointments');assert.ok(request);
   assert.equal(request[2].phone,'+79991234567');assert.equal(request[2].staff_id,2);
@@ -163,4 +166,13 @@ test('Client month navigation crosses months and restores the previous calendar'
   assert.ok(h.root.querySelector('[data-id="2026-10-04"]').disabled);
   assert.equal(calendar.shiftMonth('2026-12',1),'2027-01');
   assert.equal(calendar.shiftMonth('2026-01',-1),'2025-12');h.dom.window.close();
+});
+
+
+test('Owner branding draft remains local until save and then changes client preview',async()=>{
+ const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','settings');await h.click('nav','branding');
+ const name=h.root.querySelector('[name=brand_name]');name.value='Barber House';name.dispatchEvent(new h.dom.window.Event('input',{bubbles:true}));
+ assert.equal(h.root.querySelector('#brand-preview h3').textContent,'Barber House');assert.equal(h.calls.filter(c=>c[0]==='mutate').length,0);
+ await h.submit('branding-form');assert.ok(h.calls.some(c=>c[0]==='mutate'&&c[1]==='/master/branding'&&c[2].brand_name==='Barber House'));assert.ok(h.root.textContent.includes('Оформление сохранено'));
+ await h.click('mode','client');assert.ok(h.root.textContent.includes('Barber House'));h.dom.window.close();
 });

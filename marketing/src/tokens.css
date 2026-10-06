@@ -1,0 +1,45 @@
+/* ZapisFlow semantic tokens; mirrored across build boundaries and tested for parity. */
+:root,
+[data-theme="light"] {
+  --zf-bg: #fafafc;
+  --zf-surface: #ffffff;
+  --zf-surface-elevated: #f1f5f9;
+  --zf-text: #0f172a;
+  --zf-text-muted: #475569;
+  --zf-border: #cbd5e1;
+  --zf-accent: #1d72fe;
+  --zf-accent-hover: #155de0;
+  --zf-accent-soft: #ebf3ff;
+  --zf-accent-foreground: #ffffff;
+  --zf-focus: #0f172a;
+  --zf-danger: #b42318;
+  --zf-success: #087a55;
+  --zf-warning: #8a5700;
+  --zf-radius-sm: 6px;
+  --zf-radius-md: 10px;
+  --zf-radius-lg: 16px;
+  --zf-radius-xl: 24px;
+  --zf-shadow-sm: 0 1px 3px #0f172a0a;
+  --zf-shadow-md: 0 8px 24px #0f172a0c;
+  --zf-space-1: 4px;
+  --zf-space-2: 8px;
+  --zf-space-3: 12px;
+  --zf-space-4: 16px;
+  --zf-space-6: 24px;
+  --zf-space-8: 32px;
+  --zf-motion: 150ms ease;
+}
+[data-theme="dark"] {
+  --zf-bg: #090d16;
+  --zf-surface: #101626;
+  --zf-surface-elevated: #161f36;
+  --zf-text: #f8fafc;
+  --zf-text-muted: #b6c2d3;
+  --zf-border: #46546a;
+  --zf-accent-soft: #162e52;
+  --zf-focus: #f8fafc;
+  --zf-danger: #ffb4ab;
+  --zf-success: #78ddb3;
+  --zf-warning: #f4ce81;
+  --zf-shadow-md: none;
+}

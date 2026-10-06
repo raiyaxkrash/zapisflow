@@ -42,11 +42,11 @@ export class Api {
       xhr.setRequestHeader('X-MiniApp-Bot', this.botId);
       xhr.setRequestHeader('X-CSRF-Token', this.csrf); xhr.setRequestHeader('Idempotency-Key', key);
       xhr.upload.onprogress = e => { if (e.lengthComputable) progress(Math.round(e.loaded / e.total * 100)); };
-      xhr.onerror = () => reject(new ApiError('NETWORK', 'Не удалось загрузить чек. Повторите попытку'));
+      xhr.onerror = () => reject(new ApiError('NETWORK', 'Не удалось загрузить файл. Повторите попытку'));
       xhr.ontimeout = () => reject(new ApiError('NETWORK', 'Загрузка заняла слишком много времени. Повторите попытку'));
       xhr.onload = () => { let data; try { data = JSON.parse(xhr.responseText); } catch { data = {}; }
         if (xhr.status >= 200 && xhr.status < 300) { this.pending.delete(fingerprint); resolve(data); }
-        else reject(new ApiError(data.code || 'UPLOAD_FAILED', data.message || 'Не удалось загрузить чек', xhr.status)); };
+        else reject(new ApiError(data.code || 'UPLOAD_FAILED', data.message || 'Не удалось загрузить файл', xhr.status)); };
       const form = new FormData(); form.append('file', file); xhr.send(form);
     });
   }

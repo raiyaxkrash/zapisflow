@@ -110,7 +110,7 @@
 		Referrer-Policy no-referrer
 		-Server
 	}
-	@api path /api/miniapp/*
+	@api path /api/miniapp/* /api/branding/*
 	handle @api {
 		reverse_proxy http://backend:8000
 	}
