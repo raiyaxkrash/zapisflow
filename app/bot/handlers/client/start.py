@@ -2,7 +2,8 @@
 Start command, main menu and global cancel handlers for clients.
 """
 
-from typing import Optional
+import html
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -16,15 +17,35 @@ from app.database.models.user import User
 router = Router(name="client_start")
 
 
+async def client_brand(session, instance):
+    if session is None or instance is None:
+        return None
+    from app.database.models import Master
+    from app.services.branding import branding_context
+
+    master = await session.get(Master, instance.master_id)
+    return await branding_context(session, master, instance) if master else None
+
+
+def client_menu(is_admin, brand):
+    return get_main_menu_keyboard(
+        is_admin=is_admin,
+        has_portfolio=brand["show_portfolio"] if brand else True,
+        has_reviews=brand["show_reviews"] if brand else True,
+        has_contacts=brand["show_contacts"] if brand else True,
+        booking_label=brand["booking_cta_label"] if brand else "Записаться",
+    )
+
+
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,
     state: FSMContext,
     db_user: User,
     is_admin: bool,
-    command: Optional[CommandObject] = None,
-    bot_instance: Optional[BotInstance] = None,
-    session: Optional[AsyncSession] = None,
+    command: CommandObject | None = None,
+    bot_instance: BotInstance | None = None,
+    session: AsyncSession | None = None,
 ) -> None:
     """
     Handle /start command: greets user and renders the main inline menu.
@@ -33,24 +54,41 @@ async def cmd_start(
     await state.clear()
 
     # 1. Support /start admin deep link (Section 39)
-    if command and command.args == "admin":
-        if is_admin and session:
-            from app.bot.handlers.admin.dashboard import cmd_admin_dashboard
-            await cmd_admin_dashboard(message, state, db_user, session)
-            return
+    if command and command.args == "admin" and is_admin and session:
+        from app.bot.handlers.admin.dashboard import cmd_admin_dashboard
+
+        await cmd_admin_dashboard(message, state, db_user, session)
+        return
+
+    brand = await client_brand(session, bot_instance)
 
     # 2. Customer behavior during SETUP_REQUIRED (Section 33)
-    if bot_instance and bot_instance.status == BotInstanceStatus.SETUP_REQUIRED and not is_admin:
-        first_name = db_user.first_name if db_user else message.from_user.first_name
+    if (
+        bot_instance
+        and bot_instance.status == BotInstanceStatus.SETUP_REQUIRED
+        and not is_admin
+    ):
+        first_name = html.escape(
+            db_user.first_name if db_user else message.from_user.first_name
+        )
         text = (
             f"Здравствуйте, {first_name}! 🌸\n\n"
             "💅 Онлайн-запись пока настраивается мастером.\n"
             "Пожалуйста, загляните чуть позже — запись скоро будет открыта!"
         )
+        if brand:
+            text = (
+                html.escape(brand["brand_name"])
+                + "\n\n"
+                + text
+                + "\n\nРаботает на ZapisFlow"
+            )
         await message.answer(text=text)
         return
 
-    first_name = db_user.first_name if db_user else message.from_user.first_name
+    first_name = html.escape(
+        db_user.first_name if db_user else message.from_user.first_name
+    )
 
     text = (
         f"Здравствуйте, {first_name}! 🌸\n\n"
@@ -63,32 +101,46 @@ async def cmd_start(
         "Выберите интересующий раздел в меню ниже 👇"
     )
 
-    await message.answer(
-        text=text,
-        reply_markup=get_main_menu_keyboard(is_admin=is_admin),
-    )
+    if brand:
+        text = (
+            f"Здравствуйте, {first_name}!\n\n<b>{html.escape(brand['brand_name'])}</b>\n\n"
+            + html.escape(
+                brand["welcome_text"] or "Выберите услугу и удобное время для визита."
+            )
+            + "\n\nРаботает на ZapisFlow"
+        )
+    await message.answer(text=text, reply_markup=client_menu(is_admin, brand))
 
 
 @router.callback_query(MenuCallback.filter(F.action == "main"))
 async def cb_main_menu(
-    callback: CallbackQuery, state: FSMContext, db_user: User, is_admin: bool,
-    bot_instance: Optional[BotInstance] = None,
+    callback: CallbackQuery,
+    state: FSMContext,
+    db_user: User,
+    is_admin: bool,
+    bot_instance: BotInstance | None = None,
+    session: AsyncSession | None = None,
 ) -> None:
     """
     Return to main menu from any inline screen.
     """
     await state.clear()
-    first_name = db_user.first_name if db_user else callback.from_user.first_name
-
-    text = (
-        f"Главное меню 🌸\n\n"
-        f"Рады видеть вас снова, {first_name}! Чем могу помочь?"
+    first_name = html.escape(
+        db_user.first_name if db_user else callback.from_user.first_name
     )
 
+    text = f"Главное меню 🌸\n\nРады видеть вас снова, {first_name}! Чем могу помочь?"
+
+    brand = await client_brand(session, bot_instance)
+    if brand:
+        text = (
+            html.escape(brand["brand_name"])
+            + "\n\nЧто вы хотите сделать?\n\nРаботает на ZapisFlow"
+        )
     if callback.message:
         await callback.message.edit_text(
             text=text,
-            reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+            reply_markup=client_menu(is_admin, brand),
         )
     await callback.answer()
 
@@ -96,20 +148,24 @@ async def cb_main_menu(
 @router.message(Command("cancel"))
 @router.message(F.text.casefold() == "❌ отмена")
 async def cmd_cancel(
-    message: Message, state: FSMContext, db_user: User, is_admin: bool,
-    bot_instance: Optional[BotInstance] = None,
+    message: Message,
+    state: FSMContext,
+    db_user: User,
+    is_admin: bool,
+    bot_instance: BotInstance | None = None,
+    session: AsyncSession | None = None,
 ) -> None:
     """
     Global cancellation handler that clears FSM state and removes reply keyboards.
     """
-    current_state = await state.get_state()
     await state.clear()
 
     await message.answer(
         "Действие отменено ↩️",
         reply_markup=ReplyKeyboardRemove(),
     )
+    brand = await client_brand(session, bot_instance)
     await message.answer(
         "Вы вернулись в главное меню:",
-        reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+        reply_markup=client_menu(is_admin, brand),
     )

@@ -7,6 +7,7 @@ import enum
 from typing import TYPE_CHECKING, List, Optional
 import uuid
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     DateTime,
@@ -213,6 +214,7 @@ class MasterSettings(Base):
     master_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("masters.id", ondelete="CASCADE"), primary_key=True
     )
+    branding: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"), nullable=False)
     bank_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     bank_card_number: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     bank_recipient_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)

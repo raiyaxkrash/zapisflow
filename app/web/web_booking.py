@@ -299,9 +299,12 @@ async def logout(request: Request, response: Response, account=IDENTITY):
 @router.get("/web-booking/{bot_public_id}/context")
 async def business(c=PUBLIC):
     config = await shared.MasterSettingsRepository(c.session).get_or_create(c.master.id)
+    from app.services.branding import branding_context
+    brand = await branding_context(c.session, c.master, c.bot)
     return {
+        "branding": brand,
         "project": {
-            "name": c.master.display_name,
+            "name": brand["brand_name"],
             "about": config.about_text,
             "timezone": c.master.timezone,
         },
@@ -326,7 +329,7 @@ async def calendar(
     year: int = Query(ge=2000, le=2100),
     month: int = Query(ge=1, le=12),
     service_id: int = Query(gt=0),
-    staff_id: int = Query(gt=0),
+    staff_id: int | None = Query(default=None, gt=0),
     c=PUBLIC,
 ):
     return await shared.client_calendar(
@@ -338,7 +341,7 @@ async def calendar(
 async def slots(
     target_date: shared.date,
     service_id: int = Query(gt=0),
-    staff_id: int = Query(gt=0),
+    staff_id: int | None = Query(default=None, gt=0),
     c=PUBLIC,
 ):
     return await shared.slots(
@@ -422,3 +425,24 @@ async def upload_proof(
     if owner is None:
         shared.fail("PAYMENT_UNAVAILABLE", "Свяжитесь с мастером", 409)
     return await shared.submit_uploaded_proof(c, id, request, image, owner.telegram_id)
+
+
+@router.get("/web-booking/{bot_public_id}/reviews")
+async def public_reviews(c=PUBLIC):
+    from app.web.branding import reviews
+    return await reviews(c)
+
+
+@router.get("/web-booking/{bot_public_id}/portfolio")
+async def public_portfolio(c=PUBLIC):
+    from app.web.branding import portfolio
+    rows = await portfolio(c)
+    for row in rows:
+        row["image_url"] = f"/api/web-booking/{c.bot.public_id}/portfolio/{row['id']}/image"
+    return rows
+
+
+@router.get("/web-booking/{bot_public_id}/portfolio/{id}/image")
+async def public_portfolio_image(id: int, request: Request, c=PUBLIC):
+    from app.web.branding import portfolio_image
+    return await portfolio_image(id, request, c)

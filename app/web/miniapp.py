@@ -418,6 +418,8 @@ def staff_dto(s):
 def appointment_dto(a, *, manager=False, tz="UTC"):
     result = {
         "id": a.id,
+        "service_id": a.service_id,
+        "staff_id": a.staff_id,
         "service": a.snapshot_service_title,
         "staff": a.staff.display_name,
         "start_time": a.start_time.astimezone(ZoneInfo(tz)).isoformat(),
@@ -505,9 +507,12 @@ async def notify(c, a, action, *, event_id=""):
 async def get_context(c=TENANT_CONTEXT):
     config = await MasterSettingsRepository(c.session).get_or_create(c.master.id)
     contacts = {name: getattr(config, name) for name in CONTACT_FIELD_LABELS}
+    from app.services.branding import branding_context
+    brand = await branding_context(c.session, c.master, c.bot)
     return {
+        "branding": brand,
         "project": {
-            "name": c.master.display_name,
+            "name": brand["brand_name"],
             "timezone": c.master.timezone,
             "about": config.about_text,
         },
@@ -1312,7 +1317,7 @@ def install_miniapp(app):
 
     @app.middleware("http")
     async def miniapp_safety(request, call_next):
-        if not request.url.path.startswith(("/api/miniapp", "/api/web-booking", "/api/auth")):
+        if not request.url.path.startswith(("/api/miniapp", "/api/web-booking", "/api/auth", "/api/branding")):
             return await call_next(request)
         started = time.monotonic()
         # Bound raw multipart/JSON body before parsers can buffer arbitrary data.

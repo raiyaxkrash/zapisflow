@@ -58,8 +58,8 @@ def test_alembic_revision_graph_consistency() -> None:
     assert "2026_10_03_0023" in rev_ids
     assert "2026_10_03_0024" in rev_ids
     assert "2026_10_03_0025" in rev_ids
-    # Website channel opt-in migration is head; 0001 is base.
-    assert rev_ids[0] == "2026_10_05_0028"
+    # Tenant branding migration is head; 0001 is base.
+    assert rev_ids[0] == "2026_10_05_0029"
     assert rev_ids[-1] == "2026_09_30_0001"
 
 

@@ -57,7 +57,10 @@ from app.database.models.managed_bot_request import (
     ManagedBotRequestStatus,
 )
 
+from app.database.models.branding import MasterBrandAsset
+
 __all__ = [
+    "MasterBrandAsset",
     "Base",
     "TimestampMixin",
     "User",

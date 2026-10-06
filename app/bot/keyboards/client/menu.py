@@ -12,6 +12,8 @@ def get_main_menu_keyboard(
     is_admin: bool = False,
     has_portfolio: bool = True,
     has_reviews: bool = True,
+    has_contacts: bool = True,
+    booking_label: str = "Записаться",
 ) -> InlineKeyboardMarkup:
     """
     Build client main menu keyboard. Adds admin panel button if user is admin.
@@ -20,7 +22,7 @@ def get_main_menu_keyboard(
 
     builder.row(
         InlineKeyboardButton(
-            text="📅 Записаться",
+            text=f"📅 {booking_label or 'Записаться'}",
             callback_data=MenuCallback(action="book").pack(),
         )
     )
@@ -39,16 +41,18 @@ def get_main_menu_keyboard(
         )
     builder.row(*row_2)
 
-    builder.row(
+    service_row = [
         InlineKeyboardButton(
             text="💰 Услуги и цены",
             callback_data=MenuCallback(action="services").pack(),
         ),
-        InlineKeyboardButton(
+    ]
+    if has_contacts:
+        service_row.append(InlineKeyboardButton(
             text="📍 Контакты",
             callback_data=MenuCallback(action="contact").pack(),
-        ),
-    )
+        ))
+    builder.row(*service_row)
 
     row_4 = []
     if has_reviews:
