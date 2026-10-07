@@ -520,7 +520,7 @@ async def get_context(c=TENANT_CONTEXT):
         "project": {
             "name": brand["brand_name"],
             "timezone": c.master.timezone,
-            "about": config.about_text,
+            "about": brand["description"],
         },
         "user": {"first_name": c.user.first_name, "phone": c.user.phone},
         "contacts": contacts,

@@ -63,6 +63,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
       if(path.endsWith('/cancel'))current={...current,status:'CANCELLED_BY_CLIENT',cancel_allowed:false};
       return current;
     }
+    async saveBranding(body,files){calls.push(['saveBranding','/master/branding/save',body]);ctx.branding=body.branding;ctx.contacts={...ctx.contacts,...body.contacts};ctx.project.name=body.branding.brand_name;return body.branding;}
     async image(path){calls.push(['image',path]);return new dom.window.Blob(['receipt'],{type:'application/octet-stream'});}
     async upload(path,file,progress){calls.push(['upload',path,file.type]);progress(100);current={...current,status:'PAYMENT_PROOF_SENT',payment:[{id:9,status:'SUBMITTED',amount:deposit,proofs:[{id:11}]}]};return {appointment:current}}
   }
@@ -188,8 +189,8 @@ test('Client month navigation crosses months and restores the previous calendar'
 test('Owner branding draft remains local until save and then changes client preview',async()=>{
  const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','settings');await h.click('nav','branding');
  const name=h.root.querySelector('[name=brand_name]');name.value='Barber House';name.dispatchEvent(new h.dom.window.Event('input',{bubbles:true}));
- assert.equal(h.root.querySelector('#brand-preview h3').textContent,'Barber House');assert.equal(h.calls.filter(c=>c[0]==='mutate').length,0);
- await h.submit('branding-form');assert.ok(h.calls.some(c=>c[0]==='mutate'&&c[1]==='/master/branding'&&c[2].brand_name==='Barber House'));assert.ok(h.root.textContent.includes('Оформление сохранено'));
+ await flush();assert.equal(h.root.querySelector('#brand-preview h3').textContent,'Barber House');assert.equal(h.calls.filter(c=>c[0]==='mutate').length,0);
+ await h.submit('branding-form');assert.ok(h.calls.some(c=>c[0]==='saveBranding'&&c[1]==='/master/branding/save'&&c[2].branding.brand_name==='Barber House'));assert.ok(h.root.textContent.includes('Оформление сохранено'));
  await h.click('mode','client');assert.ok(h.root.textContent.includes('Barber House'));h.dom.window.close();
 });
 

@@ -45,8 +45,8 @@ export function bookingProgress(page) {
   return `<ol class="booking-progress" aria-label="Этапы записи">${["Услуга", "Мастер", "Время", "Подтверждение"].map((label, i) => `<li ${i === active ? 'aria-current="step"' : ""}>${i + 1}. ${label}</li>`).join("")}</ol>`;
 }
 
-export async function brandingEditor(brand) {
-  return (await import("./branding/editor.js")).editor(brand);
+export async function brandingEditor(...args) {
+  return (await import("./branding/editor.js")).editor(...args);
 }
 
 export function empty(text) {
@@ -154,3 +154,6 @@ export function staffRows(rows) {
 export async function masterWorkspace(...args){return (await import("./master/render.js")).renderMaster(...args);}
 
 export const notice=text=>`<div class="notice">${escape(text)}</div>`;
+
+export async function readBrandDraft(...args){return (await import("./branding/editor.js")).draft(...args);}
+export async function updateBrandPreview(...args){return (await import("./branding/editor.js")).renderPreview(...args);}

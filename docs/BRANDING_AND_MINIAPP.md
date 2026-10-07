@@ -6,7 +6,7 @@
 Mini App остаётся Vite + ES modules: текущая кодовая база не оправдывает стоимость React runtime. Редактор оформления загружается отдельным chunk только при открытии владельцем. CSS tokens зеркалируются между независимыми Docker build contexts; автоматический тест проверяет равенство. Маркетинговый сайт остаётся React18/TypeScript; браузерная запись удалена.
 
 ## Настройки владельца
-Управление → Ещё → Оформление: название, логотип, обложка, tagline, описание, приветствие, подпись CTA, акцент #RRGGBB, System/Light/Dark, Clean/Soft/Compact, портфолио/отзывы/контакты/команда. Контакты и соцсети редактируются через существующий экран контактов, без дублирования полей.
+Управление → Ещё → Оформление: название, логотип, обложка, tagline, описание, приветствие, подпись CTA, акцент #RRGGBB, System/Light/Dark, Clean/Soft/Compact, портфолио/отзывы/контакты/команда. Контакты и соцсети доступны и в редакторе оформления; используются те же поля MasterSettings, без дублирующей модели.
 
 Черновик и локальные image previews применяются только после «Сохранить». Save отображает явное подтверждение. Reset требует подтверждения, удаляет брендовые изображения и возвращает defaults. Просмотр глазами клиента сохраняет текущую session/capabilities, не подменяет identity. Подпись «Работает на ZapisFlow» обязательна. Настройки не вводят платные entitlement.
 
@@ -22,7 +22,7 @@ PNG/JPEG/WebP до 4 МБ и 16 млн пикселей; SVG запрещён. P
 System использует Telegram colorScheme в WebView и prefers-color-scheme в браузере. Light/Dark — пользовательский выбор. Только предпочтение темы хранится в localStorage, не auth token. Акцент автоматически получает чёрный/белый foreground по максимальному WCAG contrast. Touch targets ≥44px, focus-visible, semantic labels, reduced motion, calendar keyboard arrows и native Enter/Space. Safe areas используют существующий Telegram viewport adapter.
 
 ## API
-Mini App owner: GET/PUT /api/miniapp/master/branding; POST /reset; POST/DELETE /assets/{logo|cover}; POST /sync-telegram.
+Mini App owner: POST /api/miniapp/master/branding/save (атомарный multipart Save, см. MINIAPP_BRANDING_EDITOR.md); GET/PUT /api/miniapp/master/branding; POST /reset; POST/DELETE /assets/{logo|cover}; POST /sync-telegram.
 Client: branding в /api/miniapp/context; GET /client/reviews; GET /client/portfolio; GET /client/portfolio/{id}/image.
 Public media: GET /api/branding/{public_id}/assets/{logo|cover}.
 Все сокращённые пути выше относятся к указанному prefix. Изображения и optional sections не обходят существующие channel/subscription checks.

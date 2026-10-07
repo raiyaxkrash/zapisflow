@@ -6,7 +6,7 @@ from typing import Literal
 from uuid import UUID
 
 from aiogram.exceptions import TelegramAPIError
-from fastapi import APIRouter, File, Request, Response, UploadFile
+from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from sqlalchemy import select
 
 from app.database.models import (
@@ -19,6 +19,8 @@ from app.database.models import (
 from app.services.branding import (
     MAX_BRAND_UPLOAD,
     BrandingInput,
+    BrandingSaveInput,
+    validate_brand_filename,
     branding_context,
     normalize_brand_image,
     save_asset,
@@ -40,6 +42,42 @@ def owner(c):
 async def get_branding(c=shared.TENANT_CONTEXT):
     owner(c)
     return await branding_context(c.session, c.master, c.bot)
+
+
+@router.post("/master/branding/save")
+async def save_editor(request: Request, payload: str = Form(), logo: UploadFile | None = File(default=None), cover: UploadFile | None = File(default=None), c=shared.TENANT_CONTEXT):
+    owner(c)
+    await shared.rate_limit(request, "branding-save", 10)
+    from pydantic import ValidationError
+    from app.repositories.master_settings_repository import MasterSettingsRepository
+    import hashlib
+    try:
+        body = BrandingSaveInput.model_validate_json(payload)
+    except ValidationError:
+        shared.fail("INPUT_INVALID", "Проверьте поля оформления", 422)
+    images = {}
+    for kind, file in (("logo", logo), ("cover", cover)):
+        if file:
+            try:
+                validate_brand_filename(file.filename, file.content_type)
+                images[kind] = normalize_brand_image(await file.read(MAX_BRAND_UPLOAD + 1), file.content_type, kind)
+            except ValueError as exc:
+                shared.fail("UPLOAD_INVALID", str(exc), 413)
+            finally:
+                await file.close()
+    async def execute():
+        await save_branding(c.session, c.master.id, body.branding)
+        await MasterSettingsRepository(c.session).update_settings(c.master.id, **body.contacts.model_dump(exclude_unset=True))
+        for kind in ("logo", "cover"):
+            if getattr(body, "delete_" + kind):
+                asset = await c.session.get(MasterBrandAsset, (c.master.id, kind))
+                if asset:
+                    await c.session.delete(asset)
+                    await c.session.flush()
+            if kind in images:
+                await save_asset(c.session, c.master.id, kind, images[kind])
+        return await branding_context(c.session, c.master, c.bot)
+    return await shared.mutation(c, request, {"settings": body.model_dump(), "assets": {kind: hashlib.sha256(value).hexdigest() for kind, value in images.items()}}, execute)
 
 
 @router.put("/master/branding")

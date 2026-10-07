@@ -647,9 +647,6 @@ summary {
 .preset-colors button {
   margin: 0;
 }
-.brand-preview {
-  --zf-bg: var(--zf-surface);
-}
 
 .person {
   display: flex;
@@ -721,3 +718,13 @@ summary {
 .zf-button:focus-visible, .zf-icon-button:focus-visible { box-shadow: 0 0 0 1px var(--zf-focus-ring); }
 
 .app-top .theme-label { color: var(--zf-native-header-text, var(--zf-text-muted)); }
+
+#branding-form details{border:1px solid var(--zf-border);border-radius:var(--zf-radius-lg);padding:var(--zf-space-4);margin-block:var(--zf-space-3)}
+#branding-form summary{min-height:44px;cursor:pointer;font-weight:650}
+#brand-preview{--blue:var(--zf-accent);--ink:var(--zf-text);--muted:var(--zf-text-muted);--line:var(--zf-border);--paper:var(--zf-surface-elevated);--green:var(--zf-success);--orange:var(--zf-warning);background:var(--zf-bg);color:var(--zf-text);padding:var(--zf-space-4);border:1px solid var(--zf-border);border-radius:var(--zf-radius-xl);max-height:460px;overflow:auto}
+#brand-preview.is-expanded{max-height:none}
+#brand-preview .cover{width:100%;aspect-ratio:2/1;object-fit:cover}
+#brand-preview .client-hero{margin-bottom:var(--zf-space-4)}
+#brand-preview .brand-logo{width:48px;height:48px;object-fit:contain}
+
+#brand-preview button:disabled{opacity:1;cursor:default}

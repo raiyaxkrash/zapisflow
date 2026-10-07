@@ -25,6 +25,8 @@ import {
   bookingProgress,
   paymentLabel,
   brandingEditor,
+  readBrandDraft,
+  updateBrandPreview,
   empty,
   serviceRows,
   contacts,
@@ -66,6 +68,9 @@ let masterNotice = "",
   freeSelection = null,
   manualSelection = null;
 let brandingDirty = false;
+let brandDraftBase,
+  brandingPreviewServices = [];
+const brandURLs = new Set();
 let cleanMedia = () => {};
 let clientMonth,
   scheduleMonth,
@@ -77,6 +82,8 @@ const formValues = (form) => Object.fromEntries(new FormData(form));
 
 function shell(content) {
   cleanMedia();
+  for (const url of brandURLs) URL.revokeObjectURL(url);
+  brandURLs.clear();
   applyBrand(ctx?.branding, document.documentElement);
   content =
     (mode === "master" && masterNotice
@@ -122,6 +129,12 @@ async function route(page, id) {
     const content = await render(page, id);
     if (navigation.current(serial)) {
       shell(content);
+      if (page === "branding")
+        await updateBrandPreview(
+          root.querySelector("#branding-form"),
+          { ...ctx, branding: brandDraftBase },
+          brandingPreviewServices,
+        );
       root.querySelector("main")?.focus({ preventScroll: true });
     }
   } catch (error) {
@@ -147,6 +160,10 @@ function showError(error) {
 }
 async function render(page, id) {
   if (page === "home" || page === "services") {
+    if (page === "home") {
+      ctx = await api.get("/context");
+      theme?.useBrand?.(ctx.branding?.theme_mode);
+    }
     const data = await Promise.all([
       api.get("/client/services"),
       page === "home" ? api.get("/client/appointments") : Promise.resolve([]),
@@ -257,7 +274,13 @@ async function render(page, id) {
   if (page === "branding") {
     const brand = await api.get("/master/branding");
     brandingDirty = false;
-    return brandingEditor(brand);
+    brandDraftBase = brand;
+    brandingPreviewServices = await api.get("/client/services");
+    return brandingEditor(
+      brand,
+      { ...ctx, branding: brand },
+      brandingPreviewServices,
+    );
   }
   if (mode === "master")
     return masterWorkspace(page, id, {
@@ -478,13 +501,29 @@ root.addEventListener("click", (event) => {
       if (!window.confirm("Вернуть оформление ZapisFlow?")) return;
       await api.mutate("/master/branding/reset", {});
       ctx = await api.get("/context");
+      theme?.useBrand?.(ctx.branding?.theme_mode);
       return route("branding");
     }
+    if (action === "brand-preview-only") {
+      const preview = root.querySelector("#brand-preview");
+      preview.classList.toggle("is-expanded");
+      preview.scrollIntoView?.({ behavior: "smooth", block: "start" });
+      return;
+    }
     if (action === "delete-brand-asset") {
-      if (!window.confirm("Удалить изображение?")) return;
-      await api.mutate(`/master/branding/assets/${id}`, {}, "DELETE");
-      ctx = await api.get("/context");
-      return route("branding");
+      const form = root.querySelector("#branding-form");
+      form.dataset[id === "logo" ? "deleteLogo" : "deleteCover"] = "true";
+      form.elements[id].value = "";
+      const image = root.querySelector("#draft-" + id);
+      image.hidden = true;
+      image.removeAttribute("src");
+      brandingDirty = true;
+      await updateBrandPreview(
+        form,
+        { ...ctx, branding: brandDraftBase },
+        brandingPreviewServices,
+      );
+      return;
     }
     if (action === "sync-brand") {
       const result = await api.mutate("/master/branding/sync-telegram", {});
@@ -616,8 +655,15 @@ root.addEventListener("click", (event) => {
       return route(action, id);
   });
 });
-root.addEventListener("change", (event) => {
-  if(event.target.name==='is_day_off'&&event.target.form?.id==='schedule-form'){const hours=root.querySelector('#weekly-hours');hours.hidden=event.target.checked;hours.disabled=event.target.checked;}
+root.addEventListener("change", async (event) => {
+  if (
+    event.target.name === "is_day_off" &&
+    event.target.form?.id === "schedule-form"
+  ) {
+    const hours = root.querySelector("#weekly-hours");
+    hours.hidden = event.target.checked;
+    hours.disabled = event.target.checked;
+  }
 
   if (
     event.target.name === "mode" &&
@@ -638,8 +684,21 @@ root.addEventListener("change", (event) => {
       const image = root.querySelector("#draft-" + event.target.name);
       if (image.src.startsWith("blob:")) URL.revokeObjectURL(image.src);
       image.src = URL.createObjectURL(file);
+      brandURLs.add(image.src);
+      event.target.form.dataset[
+        event.target.name === "logo" ? "deleteLogo" : "deleteCover"
+      ] = "false";
       image.hidden = false;
       brandingDirty = true;
+      await updateBrandPreview(
+        event.target.form,
+        { ...ctx, branding: brandDraftBase },
+        brandingPreviewServices,
+      );
+    } else if (file) {
+      event.target.value = "";
+      root.querySelector("#brand-draft-status").textContent =
+        "Выберите PNG, JPEG или WebP до 4 МБ";
     }
   }
   if (event.target.id === "theme") theme.set(event.target.value);
@@ -658,28 +717,18 @@ root.addEventListener("submit", (event) => {
     if (form.id === "branding-form") {
       const logo = form.elements.logo.files[0],
         cover = form.elements.cover.files[0];
-      const body = Object.fromEntries(
-        Object.entries(data).filter(
-          ([key]) =>
-            ![
-              "logo",
-              "cover",
-              "show_portfolio",
-              "show_reviews",
-              "show_contacts",
-              "show_staff",
-            ].includes(key),
-        ),
-      );
-      for (const key of ["portfolio", "reviews", "contacts", "staff"])
-        body["show_" + key] = form.elements["show_" + key].checked;
-      await api.mutate("/master/branding", body, "PUT");
-      for (const [kind, file] of [
-        ["logo", logo],
-        ["cover", cover],
-      ])
-        if (file)
-          await api.upload(`/master/branding/assets/${kind}`, file, () => {});
+      const body = await readBrandDraft(form, brandDraftBase);
+      try {
+        await api.saveBranding(body, { logo, cover });
+      } catch (error) {
+        if ([413, 422].includes(error.status)) {
+          const status = form.querySelector("#brand-draft-status");
+          status.textContent = ClientViews.errorMessage(error);
+          status.setAttribute("role", "alert");
+          return;
+        }
+        throw error;
+      }
       brandingDirty = false;
       ctx = await api.get("/context");
       theme.useBrand?.(ctx.branding?.theme_mode);
@@ -917,23 +966,21 @@ async function start() {
 }
 start();
 
-root.addEventListener("input", (event) => {
+root.addEventListener("input", async (event) => {
   const form = event.target.closest("#branding-form");
   if (!form) return;
   brandingDirty = true;
   if (event.target.id === "accent-picker")
     form.elements.accent_color.value = event.target.value;
-  const draft = Object.fromEntries(new FormData(form));
-  const preview = root.querySelector("#brand-preview");
-  applyBrand(draft, preview);
-  preview.dataset.theme =
-    draft.theme_mode === "system"
-      ? document.documentElement.dataset.theme
-      : draft.theme_mode;
-  preview.querySelector("h3").textContent =
-    draft.brand_name || "Название бизнеса";
-  preview.querySelector("p").textContent = draft.tagline || "";
-  preview.querySelector("button").textContent =
-    draft.booking_cta_label || "Записаться";
+  if (
+    event.target.name === "accent_color" &&
+    /^#[0-9a-f]{6}$/i.test(event.target.value)
+  )
+    form.querySelector("#accent-picker").value = event.target.value;
+  await updateBrandPreview(
+    form,
+    { ...ctx, branding: brandDraftBase },
+    brandingPreviewServices,
+  );
 });
 root.addEventListener("keydown", (event) => calendarKeys(event, root));

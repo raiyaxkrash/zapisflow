@@ -124,3 +124,31 @@ async def save_asset(session, master_id, kind, content):
     asset.content = content
     asset.revision = hashlib.sha256(content).hexdigest()
     await session.flush()
+
+class BrandContactsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    studio_address: str | None = Field(default=None, max_length=500)
+    studio_phone: str | None = Field(default=None, max_length=64)
+    whatsapp_phone: str | None = Field(default=None, max_length=64)
+    telegram_username: str | None = Field(default=None, max_length=64)
+    vk_profile: str | None = Field(default=None, max_length=128)
+
+    @field_validator("studio_address", "studio_phone", "whatsapp_phone", "telegram_username", "vk_profile")
+    @classmethod
+    def safe_contact(cls, value, info):
+        from app.services.master_contacts import normalize_contact_value
+        return normalize_contact_value(info.field_name, value) if value else None
+
+
+class BrandingSaveInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    branding: BrandingInput
+    contacts: BrandContactsInput = Field(default_factory=BrandContactsInput)
+    delete_logo: bool = False
+    delete_cover: bool = False
+
+
+def validate_brand_filename(filename, mime):
+    extensions = {"image/png": {"png"}, "image/jpeg": {"jpg", "jpeg"}, "image/webp": {"webp"}}
+    if not filename or any(c in filename for c in ["/", "\\", "\x00"]) or filename.rsplit(".", 1)[-1].lower() not in extensions.get(mime, set()):
+        raise ValueError("Имя файла должно иметь расширение PNG, JPEG или WebP")

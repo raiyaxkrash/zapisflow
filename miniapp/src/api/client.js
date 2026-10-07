@@ -87,6 +87,33 @@ export class Api {
     this.pending.delete(fingerprint);
     return result;
   }
+  async saveBranding(body, files) {
+    const data = new FormData();
+    data.append("payload", JSON.stringify(body));
+    const hashes = [];
+    for (const kind of ["logo", "cover"])
+      if (files[kind]) {
+        data.append(kind, files[kind]);
+        const bytes = await files[kind].arrayBuffer();
+        const hash = await crypto.subtle.digest("SHA-256", bytes);
+        hashes.push(
+          kind +
+            Array.from(new Uint8Array(hash), (n) =>
+              n.toString(16).padStart(2, "0"),
+            ).join(""),
+        );
+      }
+    const fingerprint = "branding:" + JSON.stringify(body) + hashes.join(":");
+    const key = this.pending.get(fingerprint) || crypto.randomUUID();
+    this.pending.set(fingerprint, key);
+    const result = await this.request("/master/branding/save", {
+      method: "POST",
+      headers: { "X-CSRF-Token": this.csrf, "Idempotency-Key": key },
+      body: data,
+    });
+    this.pending.delete(fingerprint);
+    return result;
+  }
   upload(path, file, progress) {
     return new Promise((resolve, reject) => {
       const fingerprint = path + file.name + file.size + file.lastModified;
