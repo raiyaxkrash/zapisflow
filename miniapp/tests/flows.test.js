@@ -1,3 +1,4 @@
+import * as ClientViews from '../src/client/views.js';
 import { appShell, bookingSummary } from '../src/application/shell.js';
 import { createNavigation, backDestination } from '../src/application/navigation.js';
 import { createTelegramBridge } from '../src/telegram/bridge.js';
@@ -12,11 +13,11 @@ import * as ui from '../src/ui.js';
 import * as calendar from '../src/calendar.js';
 
 const source = (await readFile(new URL('../src/app.js', import.meta.url),'utf8')).replace(/^import[\s\S]*?;\r?\n/gm,'');
-const visit = {id:7,service:'Haircut',staff:'Master',price:'499',deposit:'0',payment:[],start_time:'2026-10-05T10:00:00+03:00',status:'WAITING_PAYMENT',status_label:'Резерв',cancel_allowed:true,policy_agreed:false};
+const visit = {id:7,service_id:1,staff_id:2,duration_min:60,service:'Haircut',staff:'Master',price:'499',deposit:'0',payment:[],start_time:'2026-10-05T10:00:00+03:00',status:'WAITING_PAYMENT',status_label:'Резерв',cancel_allowed:true,policy_agreed:false};
 const offering = {id:1,title:'Haircut',price:'499',duration_min:60,buffer_min:15,deposit_type:'FIXED',deposit_value:'0',is_active:true};
 const flush = () => new Promise(resolve=>setTimeout(resolve,10));
 
-async function harness({owner=false,networkFailures=0,deposit='0',authFailure=false,authDelay=0,horizon=14}={}) {
+async function harness({owner=false,networkFailures=0,deposit='0',authFailure=false,authDelay=0,horizon=14,slotTaken=false}={}) {
   const dom = new JSDOM('<html><div id="app"></div></html>',{url:'https://app.test/b/11111111-2222-3333-4444-555555555555',runScripts:'outside-only'});
   const overrides = new Map();
   const calls = []; let current = {...visit,deposit}, failures = networkFailures;
@@ -29,6 +30,8 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
       if(path==='/context')return ctx;
       if(path==='/master/branding')return ctx.branding||{brand_name:'Real studio',accent_color:'#1D72FE',theme_mode:'system',appearance_preset:'clean',booking_cta_label:'Записаться',show_portfolio:true,show_reviews:true,show_contacts:true,show_staff:true};
       if(path.includes('/services'))return path.endsWith('/1')?offering:[offering];
+      if(path.includes('/quote'))return {service:offering.title,price:offering.price,duration_min:60,deposit,cancel_policy_hours:24};
+      if(path.includes('/availability/nearest'))return {slot:visit.start_time,staff_id:2,searched_until:maxDate};
       if(path.includes('/staff'))return [{id:2,display_name:'Master',is_active:true,service_ids:[1]}];
       if(path.includes('/calendar')) {
         const query=new URLSearchParams(path.split('?')[1]);const year=Number(query.get('year')),month=Number(query.get('month'));
@@ -47,6 +50,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
     }
     async mutate(path,body,method){
       calls.push(['mutate',path,body,method]);
+      if(path==='/client/holds'&&slotTaken){slotTaken=false;const error=Error('Occupied');error.code='SLOT_TAKEN';throw error;}
       if(path==='/master/branding'){ctx.branding=body;ctx.project.name=body.brand_name;return body;}
       if(path==='/master/branding/reset'){ctx.branding=null;ctx.project.name='Real studio';return {};}
       if(path.startsWith('/master/schedule/dates/')) { const date=path.split('/').at(-1);overrides.set(date,{...body,has_override:body.mode!=='weekly'});return {date,...body}; }
@@ -57,7 +61,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
     }
     async upload(path,file,progress){calls.push(['upload',path,file.type]);progress(100);current={...current,status:'PAYMENT_PROOF_SENT',payment:[{id:9,status:'SUBMITTED',amount:deposit,proofs:[{id:11}]}]};return {appointment:current}}
   }
-  Object.assign(dom.window,{bindPortfolioMedia,Api,...calendar,...ui, appShell, bookingSummary, createNavigation, backDestination, createTelegramBridge: tg => createTelegramBridge(tg,dom.window), calendarKeys, Skeleton, ErrorState,e:ui.escape,b:ui.button,f:ui.field,
+  Object.assign(dom.window,{ClientViews,bindPortfolioMedia,Api,...calendar,...ui, appShell, bookingSummary, createNavigation, backDestination, createTelegramBridge: tg => createTelegramBridge(tg,dom.window), calendarKeys, Skeleton, ErrorState,e:ui.escape,b:ui.button,f:ui.field,
     bootstrap:()=>({initData:'signed',BackButton:{hide(){},show(){},onClick(){}}}),
     setupTheme:()=>({get:()=> 'system',set(){}}),botIdFromPath:()=> '11111111-2222-3333-4444-555555555555'});
   dom.window.confirm=()=>true;
@@ -74,14 +78,15 @@ test('Client UI drives service/staff/slot/hold/confirmation/my bookings/cancel t
   assert.ok(h.root.querySelector('#confirm-form'));h.dom.window.document.querySelector('[name=policy]').checked=true;
   await h.submit('confirm-form');assert.ok(h.root.textContent.includes('Мои записи'));
   assert.equal(h.calls.filter(c=>c[0]==='mutate'&&c[1]==='/client/holds').length,1);
-  assert.ok(h.calls.find(c=>c[1]==='/client/appointments')[2].policy_agreed);
+  assert.ok(h.calls.find(c=>c[0]==='mutate'&&c[1]==='/client/appointments')[2].policy_agreed);
   await h.click('nav','bookings');await h.click('cancel',7);assert.ok(h.calls.find(c=>c[1]==='/client/appointments/7/cancel'));
   h.dom.window.close();
 });
 
 test('Lost hold response retries the same action, including repeated network failures',async()=>{
   const h=await harness({networkFailures:2});await h.click('choose-service',1);await h.click('staff','any');await h.click('slot',visit.start_time);
-  await h.click('retry');await h.click('retry');assert.ok(h.root.querySelector('#confirm-form'));
+  assert.equal(h.calls.filter(c=>c[0]==='mutate').length,0);h.root.querySelector('[name=policy]').checked=true;await h.submit('confirm-form');
+  await h.click('retry');await h.click('retry');assert.ok(h.root.textContent.includes('Вы записаны'));
   assert.equal(h.calls.filter(c=>c[1]==='/client/holds').length,3);h.dom.window.close();
 });
 
@@ -189,4 +194,72 @@ test('Discarding a branding draft clears the warning for subsequent client navig
  const name=h.root.querySelector('[name=brand_name]');name.value='Unsaved';name.dispatchEvent(new h.dom.window.Event('input',{bubbles:true}));
  let warnings=0;h.dom.window.confirm=()=>{warnings++;return true};
  await h.click('mode','client');await h.click('nav','bookings');assert.equal(warnings,1);assert.equal(h.calls.filter(c=>c[0]==='mutate').length,0);h.dom.window.close();
+});
+
+test("Client preview creates nothing until confirmation and then shows a success screen", async () => {
+  const h = await harness();
+  await h.click("choose-service", 1);
+  await h.click("staff", 2);
+  await h.click("slot", visit.start_time);
+  assert.ok(h.root.querySelector("#confirm-form"));
+  assert.equal(h.calls.filter((c) => c[0] === "mutate").length, 0);
+  assert.ok(h.root.textContent.includes("60 минут"));
+  h.dom.window.document.querySelector("[name=policy]").checked = true;
+  await h.submit("confirm-form");
+  assert.ok(h.root.textContent.includes("Вы записаны"));
+  assert.equal(h.calls.filter((c) => c[1] === "/client/holds").length, 1);
+  h.dom.window.close();
+});
+test("Slot race returns to server calendar with a visible explanation", async () => {
+  const h = await harness({ slotTaken: true });
+  await h.click("choose-service", 1);
+  await h.click("staff", 2);
+  await h.click("slot", visit.start_time);
+  h.dom.window.document.querySelector("[name=policy]").checked = true;
+  await h.submit("confirm-form");
+  assert.ok(h.root.textContent.includes("Это время только что заняли"));
+  assert.ok(h.root.querySelector(".calendar"));
+  assert.equal(
+    h.calls.filter((c) => c[0] === "mutate" && c[1] === "/client/appointments")
+      .length,
+    0,
+  );
+  h.dom.window.close();
+});
+test("Nearest shortcut opens server-selected date and staff without creating a hold", async () => {
+  const h = await harness();
+  await h.click("nearest", 1);
+  assert.ok(h.calls.find((c) => c[1]?.includes("/availability/nearest")));
+  assert.ok(h.root.querySelector(".calendar"));
+  assert.equal(h.calls.filter((c) => c[0] === "mutate").length, 0);
+  h.dom.window.close();
+});
+test("Details and repeat navigate to a new slot without duplicating an appointment", async () => {
+  const h = await harness();
+  await h.click("nav", "bookings");
+  await h.click("client-detail", 7);
+  assert.ok(h.root.querySelector(".client-facts"));
+  await h.click("repeat", 7);
+  assert.ok(h.root.querySelector(".calendar"));
+  assert.equal(h.calls.filter((c) => c[0] === "mutate").length, 0);
+  h.dom.window.close();
+});
+
+test("Repeat after confirmation discards the previous hold and creates a new reservation", async () => {
+  const h = await harness();
+  await h.click("choose-service", 1);
+  await h.click("staff", 2);
+  await h.click("slot", visit.start_time);
+  h.root.querySelector("[name=policy]").checked = true;
+  await h.submit("confirm-form");
+  await h.click("nav", "bookings");
+  await h.click("repeat", 7);
+  await h.click("slot", visit.start_time);
+  h.root.querySelector("[name=policy]").checked = true;
+  await h.submit("confirm-form");
+  assert.equal(
+    h.calls.filter((c) => c[0] === "mutate" && c[1] === "/client/holds").length,
+    2,
+  );
+  h.dom.window.close();
 });

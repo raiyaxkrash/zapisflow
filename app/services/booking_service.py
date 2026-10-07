@@ -43,6 +43,12 @@ from app.services.subscription_access_policy import (
 class BookingService:
     """Business service managing client appointments, temporary holds and cancellations strictly per master_id."""
 
+    @staticmethod
+    def calculate_deposit(service):
+        """Shared quote/booking amount; never calculated by a transport frontend."""
+        value = (service.price * service.deposit_value / Decimal("100")) if service.deposit_type == DepositType.PERCENT else service.deposit_value
+        return value.quantize(Decimal("1.00"))
+
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.appointment_repo = AppointmentRepository(session)
@@ -150,12 +156,7 @@ class BookingService:
             raise SlotAlreadyBookedError("Выбранное время уже занято или удерживается другим клиентом.")
 
         # 5. Calculate deposit amount
-        if service.deposit_type == DepositType.PERCENT:
-            deposit_amount = (service.price * service.deposit_value / Decimal("100")).quantize(
-                Decimal("1.00")
-            )
-        else:
-            deposit_amount = service.deposit_value.quantize(Decimal("1.00"))
+        deposit_amount = self.calculate_deposit(service)
 
         # Do not create a client hold/payment with sample, shared, or incomplete
         # payment details. Admin-created appointments do not collect a deposit.

@@ -48,6 +48,7 @@ class PaymentOutput(BaseModel):
 
 
 class AppointmentOutput(BaseModel):
+    duration_min: int | None = None
     id: int
     service: str
     staff: str

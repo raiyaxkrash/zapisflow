@@ -1,10 +1,12 @@
-import { appShell, bookingSummary } from './application/shell.js';
-import { createNavigation, backDestination } from './application/navigation.js';
-import { createTelegramBridge } from './telegram/bridge.js';
-import { calendarKeys } from './ui/behaviors.js';
-import { Skeleton, ErrorState } from './ui/primitives.js';
+import * as ClientViews from "./client/views.js";
+import { appShell, bookingSummary } from "./application/shell.js";
+import { createNavigation, backDestination } from "./application/navigation.js";
+import { createTelegramBridge } from "./telegram/bridge.js";
+import { calendarKeys } from "./ui/behaviors.js";
+import { Skeleton, ErrorState } from "./ui/primitives.js";
 import { bindPortfolioMedia } from "./media.js";
 import "./style.css";
+import "./client/client.css";
 import { calendarView, monthKey, monthQuery, shiftMonth } from "./calendar.js";
 import { Api } from "./api/client.js";
 import { bootstrap, botIdFromPath } from "./telegram/bootstrap.js";
@@ -54,6 +56,7 @@ let tg,
   mode = "client",
   busy = false,
   pendingAction = null;
+let clientNotice = "";
 let brandingDirty = false;
 let cleanMedia = () => {};
 let clientMonth,
@@ -70,19 +73,37 @@ function shell(content) {
   content =
     bookingProgress(screen) +
     (chosen && ["staff", "time", "confirm"].includes(screen)
-      ? bookingSummary({service:chosen.title,price:rub(chosen.price),slot:selectedSlot ? selectedSlot.slice(8,10)+'.'+selectedSlot.slice(5,7)+' '+selectedSlot.slice(11,16) : ''})
+      ? bookingSummary({
+          service: chosen.title,
+          price: rub(chosen.price),
+          staff: team.find((row) => row.id === selectedStaff)?.display_name,
+          slot: selectedSlot
+            ? selectedSlot.slice(8, 10) +
+              "." +
+              selectedSlot.slice(5, 7) +
+              " " +
+              selectedSlot.slice(11, 16)
+            : "",
+        })
       : "") +
     content;
-  root.innerHTML = appShell({content,ctx,mode,screen,theme:theme?.get()});
+  root.innerHTML = appShell({
+    content,
+    ctx,
+    mode,
+    screen,
+    theme: theme?.get(),
+  });
+  root.querySelector(".app-shell").dataset.mode = mode;
+  if (mode === "client") root.querySelector(".app-top .theme-label")?.remove();
   cleanMedia = bindPortfolioMedia(root, api);
-  telegram?.setBackVisible(screen !== 'home' && screen !== 'dashboard');
-
+  telegram?.setBackVisible(screen !== "home" && screen !== "dashboard");
 }
 function notice(text) {
   return `<div class="notice">${e(text)}</div>`;
 }
 async function route(page, id) {
-  const serial = navigation.begin(page,id);
+  const serial = navigation.begin(page, id);
   screen = page;
   telegram?.setPrimaryAction(null);
   shell(Skeleton());
@@ -98,7 +119,11 @@ async function route(page, id) {
 }
 function showError(error) {
   shell(
-    ErrorState({message:error.message,retry:false}) +
+    ErrorState({
+      message:
+        mode === "client" ? ClientViews.errorMessage(error) : error.message,
+      retry: false,
+    }) +
       (error.status === 401
         ? "<p>Закройте Mini App и откройте его снова из бота.</p>"
         : b("Повторить", "retry")) +
@@ -112,19 +137,20 @@ function showError(error) {
 }
 async function render(page, id) {
   if (page === "home" || page === "services") {
-    services = await api.get("/client/services");
+    const data = await Promise.all([
+      api.get("/client/services"),
+      page === "home" ? api.get("/client/appointments") : Promise.resolve([]),
+    ]);
+    services = data[0];
+    const blocked = !ctx.can_book
+      ? notice("Запись сейчас недоступна. Свяжитесь с мастером.")
+      : "";
     return (
-      header(
-        `Рады вас видеть, ${ctx.user.first_name}`,
-        page === "home" ? "Время для себя" : "Выберите услугу",
-      ) +
+      blocked +
       (page === "home"
-        ? `${ctx.branding?.cover_url ? `<img class="cover" src="${e(ctx.branding.cover_url)}" alt="" loading="lazy">` : ""}<div class="studio-banner"><h3>${e(ctx.project.name)}</h3><p>${e(ctx.branding?.tagline || ctx.contacts.studio_address || "")}</p><p>${e(ctx.branding?.welcome_text || ctx.contacts.working_hours_text || "")}</p>${b(ctx.branding?.booking_cta_label || "Записаться", "nav", "services")}</div><h3>Услуги</h3>`
-        : "") +
-      (!ctx.can_book
-        ? notice("Онлайн-запись сейчас недоступна. Свяжитесь со студией.")
-        : "") +
-      serviceRows(services)
+        ? ClientViews.home(ctx, services, data[1])
+        : header("Выберите подходящую услугу", "Услуги") +
+          ClientViews.serviceCards(services))
     );
   }
   if (page === "staff") {
@@ -153,19 +179,27 @@ async function render(page, id) {
         action: "client-date",
         monthAction: "client-month",
       }) +
+      (clientNotice ? `<div role="status">${notice(clientNotice)}</div>` : "") +
       `<p class="sub">Часовой пояс студии: ${e(ctx.project.timezone)}</p><h3>${selected?.available ? "Свободное время" : "Нажмите на доступную дату"}</h3>` +
       (data.slots.length
-        ? `<div class="times">${data.slots.map((slot) => b(slot.slice(11, 16), "slot", slot, "slot")).join("")}</div>`
+        ? ClientViews.slots(data.slots, selectedSlot)
         : empty("Выберите дату с доступным временем."))
     );
   }
-  if (page === "confirm") {
-    return (
-      header("Время зарезервировано", "Всё верно?") +
-      bookingCard(hold) +
-      `<form id="confirm-form">${f("Телефон", "phone", ctx.user.phone || "", "tel", 'required autocomplete="tel"')}<label class="check"><input name="policy" type="checkbox" required><span>Согласен с условиями отмены. ${ctx.cancel_policy_hours} ч — срок из настроек студии. Внесённая предоплата при отмене не возвращается.</span></label><button class="primary">${Number(hold.deposit) ? "Подтвердить и получить реквизиты" : "Подтвердить запись"}</button></form>`
+  if (page === "confirm")
+    return ClientViews.details(hold, ctx, { confirmation: true });
+  if (page === "client-detail") {
+    const record = (await api.get("/client/appointments")).find(
+      (a) => a.id === Number(id),
     );
+    if (!record) throw new Error("Запись недоступна");
+    return ClientViews.details(record, ctx);
   }
+  if (page === "about")
+    return (
+      header(ctx.project.name, "О бизнесе") +
+      `<p>${e(ctx.project.about || "Информация скоро появится")}</p>`
+    );
   if (page === "payment") {
     const data = await api.get(`/client/appointments/${id}/payment`);
     hold = data.appointment;
@@ -193,86 +227,13 @@ async function render(page, id) {
       b("Мои записи", "nav", "bookings", "secondary")
     );
   }
-  if (page === "bookings") {
-    const rows = await api.get("/client/appointments");
-    const grouped = [
-      [
-        "Предстоящие",
-        rows.filter(
-          (a) =>
-            a.start_time.slice(0, 10) >= ctx.today &&
-            ![
-              "COMPLETED",
-              "CANCELLED_BY_CLIENT",
-              "CANCELLED_BY_ADMIN",
-              "EXPIRED",
-            ].includes(a.status),
-        ),
-      ],
-      [
-        "Прошедшие и отменённые",
-        rows.filter(
-          (a) =>
-            a.start_time.slice(0, 10) < ctx.today ||
-            [
-              "COMPLETED",
-              "CANCELLED_BY_CLIENT",
-              "CANCELLED_BY_ADMIN",
-              "EXPIRED",
-            ].includes(a.status),
-        ),
-      ],
-    ];
+  if (page === "bookings")
     return (
-      header("Ваши визиты", "Мои записи") +
-      (rows.length
-        ? grouped
-            .map(
-              ([label, items]) =>
-                `<h3>${label}</h3>` +
-                items
-                  .map(
-                    (a) =>
-                      bookingCard(a) +
-                      (!a.policy_agreed && a.status === "WAITING_PAYMENT"
-                        ? b(
-                            "Продолжить подтверждение",
-                            "resume",
-                            a.id,
-                            "secondary",
-                          )
-                        : a.payment.length &&
-                            ["WAITING_PAYMENT", "PAYMENT_PROOF_SENT"].includes(
-                              a.status,
-                            )
-                          ? b("Предоплата / чек", "payment", a.id, "secondary")
-                          : "") +
-                      (a.cancel_allowed
-                        ? b("Отменить запись", "cancel", a.id, "link")
-                        : "") +
-                      (a.service_id
-                        ? b("Повторить запись", "repeat", a.id, "secondary")
-                        : ""),
-                  )
-                  .join(""),
-            )
-            .join("")
-        : empty("Пока нет записей. Выберите услугу и удобное время."))
+      (clientNotice ? `<div role="status">${notice(clientNotice)}</div>` : "") +
+      ClientViews.bookings(await api.get("/client/appointments"), ctx.today)
     );
-  }
-  if (page === "contact") return contacts(ctx);
-  if (page === "more")
-    return (
-      header(ctx.project.name, "Ещё") +
-      [
-        [ctx.branding?.show_contacts !== false, "contact", "Контакты"],
-        [ctx.branding?.show_portfolio !== false, "portfolio", "Портфолио"],
-        [ctx.branding?.show_reviews !== false, "reviews", "Отзывы"],
-      ]
-        .filter(([show]) => show)
-        .map(([, p, l]) => b(l, "nav", p, "settings-row"))
-        .join("")
-    );
+  if (page === "contact") return ClientViews.contactPage(ctx);
+  if (page === "more") return ClientViews.more(ctx, theme?.get() || "system");
   if (page === "reviews")
     return reviewsView(await api.get("/client/reviews"), ctx.project.name);
   if (page === "portfolio")
@@ -282,13 +243,7 @@ async function render(page, id) {
     screen = "master-calendar";
     return render("dashboard");
   }
-  if (page === "success")
-    return (
-      `<div class="success-mark" aria-hidden="true">✓</div>` +
-      header("Всё готово", "Вы записаны") +
-      bookingCard(hold) +
-      b("Мои записи", "nav", "bookings")
-    );
+  if (page === "success") return ClientViews.success(hold);
   if (page === "branding") {
     const brand = await api.get("/master/branding");
     brandingDirty = false;
@@ -519,6 +474,15 @@ async function run(action) {
     await action();
     pendingAction = null;
   } catch (error) {
+    if (mode === "client" && error.code === "SLOT_TAKEN") {
+      selectedSlot = null;
+      hold = null;
+      clientNotice =
+        "Это время только что заняли. Выберите другое свободное время.";
+      telegram?.notify("error");
+      await route("time");
+      return;
+    }
     pendingAction =
       error.code === "NETWORK" || error.status === 503 ? action : null;
     showError(error);
@@ -544,7 +508,11 @@ root.addEventListener("click", (event) => {
     if (["nav", "mode"].includes(action)) brandingDirty = false;
     if (action === "nav") return route(id);
     if (action === "retry")
-      return retryAction ? retryAction() : ctx ? route(...navigation.retry()) : start();
+      return retryAction
+        ? retryAction()
+        : ctx
+          ? route(...navigation.retry())
+          : start();
     if (action === "resume") {
       hold = (await api.get("/client/appointments")).find(
         (a) => a.id === Number(id),
@@ -563,6 +531,8 @@ root.addEventListener("click", (event) => {
       chosen = services.find((s) => s.id === Number(id));
       selectedStaff = null;
       selectedSlot = null;
+      hold = null;
+      clientNotice = "";
       return route(ctx.branding?.show_staff === false ? "time" : "staff");
     }
     if (action === "staff") {
@@ -607,13 +577,55 @@ root.addEventListener("click", (event) => {
       selectedDate = day.toISOString().slice(0, 10);
       return route("dashboard");
     }
+    if (action === "nearest") {
+      if (!ctx.can_book)
+        throw new Error("Запись сейчас недоступна. Свяжитесь с мастером.");
+      chosen = services.find((row) => row.id === Number(id));
+      if (!chosen) throw new Error("Услуга недоступна");
+      const result = await Promise.all([
+        api.get(`/client/staff?service_id=${chosen.id}`),
+        api.get(`/client/availability/nearest?service_id=${chosen.id}`),
+      ]);
+      team = result[0];
+      const data = result[1];
+      selectedSlot = null;
+      hold = null;
+      selectedStaff = data.staff_id || null;
+      selectedDate = data.slot?.slice(0, 10) || ctx.today;
+      clientMonth = monthKey(selectedDate);
+      clientNotice = data.slot
+        ? "Ближайшее свободное время: " + data.slot.slice(11, 16)
+        : "Свободного времени до " +
+          data.searched_until +
+          " нет. Посмотрите другие даты.";
+      return route("time");
+    }
+    if (action === "client-detail") return route("client-detail", id);
+    if (action === "calendar-export") {
+      const record = (await api.get("/client/appointments")).find(
+        (row) => row.id === Number(id),
+      );
+      if (!record) throw new Error("Запись недоступна");
+      return (await import("./client/calendar-event.js")).downloadCalendar(
+        record,
+        api.botId,
+      );
+    }
     if (action === "slot") {
       selectedSlot = id;
-      hold = await api.mutate("/client/holds", {
-        service_id: chosen.id,
-        staff_id: selectedStaff,
-        start_time: selectedSlot,
-      });
+      clientNotice = "";
+      const quote = await api.get(
+        `/client/quote?service_id=${chosen.id}${selectedStaff ? "&staff_id=" + selectedStaff : ""}`,
+      );
+      hold = {
+        ...quote,
+        id: null,
+        start_time: id,
+        staff:
+          team.find((row) => row.id === selectedStaff)?.display_name ||
+          "Любой подходящий специалист",
+        payment: [],
+      };
       return route("confirm");
     }
     if (action === "brand-color") {
@@ -653,6 +665,8 @@ root.addEventListener("click", (event) => {
         ? old.staff_id
         : null;
       selectedSlot = null;
+      hold = null;
+      clientNotice = "";
       selectedDate = ctx.today;
       clientMonth = monthKey(ctx.today);
       return route("time");
@@ -666,6 +680,7 @@ root.addEventListener("click", (event) => {
       )
         return;
       await api.mutate(`/client/appointments/${id}/cancel`, {});
+      clientNotice = "Запись отменена.";
       return route("bookings");
     }
     if (action === "approve") {
@@ -761,6 +776,12 @@ root.addEventListener("submit", (event) => {
       return route("dashboard");
     }
     if (form.id === "confirm-form") {
+      if (!hold?.id)
+        hold = await api.mutate("/client/holds", {
+          service_id: chosen.id,
+          staff_id: selectedStaff,
+          start_time: selectedSlot,
+        });
       const result = await api.mutate("/client/appointments", {
         appointment_id: hold.id,
         phone: data.phone,
@@ -909,7 +930,8 @@ async function start() {
   try {
     theme?.dispose?.();
     telegram?.dispose();
-    if(themeListener)window.removeEventListener('zapisflow-theme-change',themeListener);
+    if (themeListener)
+      window.removeEventListener("zapisflow-theme-change", themeListener);
     tg = bootstrap();
     telegram = createTelegramBridge(tg);
     theme = setupTheme(tg);
@@ -922,7 +944,11 @@ async function start() {
     theme.useBrand?.(ctx.branding?.theme_mode);
     selectedDate = ctx.today;
     telegram.onBack(() => {
-      const previous = backDestination(screen, mode, ctx.branding?.show_staff !== false);
+      const previous = backDestination(
+        screen,
+        mode,
+        ctx.branding?.show_staff !== false,
+      );
       if (brandingDirty && !window.confirm("Изменения не сохранены. Выйти?"))
         return;
       brandingDirty = false;
@@ -954,4 +980,4 @@ root.addEventListener("input", (event) => {
   preview.querySelector("button").textContent =
     draft.booking_cta_label || "Записаться";
 });
-root.addEventListener("keydown", event => calendarKeys(event,root));
+root.addEventListener("keydown", (event) => calendarKeys(event, root));

@@ -427,6 +427,7 @@ def appointment_dto(a, *, manager=False, tz="UTC"):
         "status_label": a.status.display_name,
         "price": str(a.snapshot_service_price),
         "deposit": str(a.snapshot_deposit_amount),
+        "duration_min": a.snapshot_service_duration_min,
         "hold_until": a.hold_until.isoformat() if a.hold_until else None,
         "policy_agreed": a.cancel_policy_agreed,
         "cancel_allowed": a.status
@@ -597,6 +598,44 @@ async def slots(
         "timezone": c.master.timezone,
         "slots": [s.isoformat() for s in sorted(times)],
     }
+
+
+@router.get("/client/quote")
+async def client_quote(service_id: int = Query(gt=0), staff_id: int | None = Query(default=None, gt=0), c=TENANT_CONTEXT):
+    if c.bot.status != BotInstanceStatus.ACTIVE or not await SubscriptionAccessPolicy(c.session).can_accept_new_booking(c.master.id):
+        fail("BOOKING_UNAVAILABLE", "Запись сейчас недоступна. Свяжитесь с мастером", 403)
+    choices = await eligible_staff(c, service_id)
+    if staff_id is not None and not any(row.id == staff_id for row in choices):
+        fail()
+    service = await ServiceRepository(c.session).get_by_id(service_id, c.master.id)
+    return {"service": service.title, "price": str(service.price), "duration_min": service.duration_min,
+            "deposit": str(BookingService.calculate_deposit(service)), "cancel_policy_hours": (await MasterSettingsRepository(c.session).get_or_create(c.master.id)).cancel_policy_hours}
+
+
+@router.get("/client/availability/nearest")
+async def client_nearest(request: Request, service_id: int = Query(gt=0), staff_id: int | None = Query(default=None, gt=0), c=TENANT_CONTEXT):
+    await rate_limit(request, "nearest-slot", 15)
+    if c.bot.status != BotInstanceStatus.ACTIVE or not await SubscriptionAccessPolicy(c.session).can_accept_new_booking(c.master.id):
+        fail("BOOKING_UNAVAILABLE", "Запись сейчас недоступна. Свяжитесь с мастером", 403)
+    choices = await eligible_staff(c, service_id)
+    if staff_id is not None:
+        choices = [row for row in choices if row.id == staff_id]
+        if not choices:
+            fail()
+    config = await MasterSettingsRepository(c.session).get_or_create(c.master.id)
+    today = datetime.now(ZoneInfo(c.master.timezone)).date()
+    scan = min(config.booking_horizon_days, 30)
+    engine = SlotEngine(c.session)
+    for offset in range(scan + 1):
+        candidates = []
+        for member in choices:
+            values = await engine.get_available_slots(service_id, today + timedelta(days=offset), c.master.id, staff_id=member.id)
+            if values:
+                candidates.append((min(values), member.id))
+        if candidates:
+            value, member_id = min(candidates)
+            return {"slot": value.isoformat(), "staff_id": member_id, "searched_until": (today + timedelta(days=scan)).isoformat()}
+    return {"slot": None, "searched_until": (today + timedelta(days=scan)).isoformat()}
 
 
 @router.get("/client/availability/calendar")
