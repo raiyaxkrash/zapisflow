@@ -44,6 +44,13 @@ git rev-parse HEAD > "$backup_dir/commit.txt"
 6. Marketing: `npm ci`, `npm test`, `npm run build` в `marketing/`;
    опубликовать `dist/` через существующий static-release механизм оператора.
    Не создавать/включать Web Booking или website OIDC.
+   Если Caddy видит host-каталог через bind mount под другим путём, ссылка
+   `current` должна быть относительной к этому каталогу. Абсолютный путь VPS
+   внутри контейнера может не существовать и дать HTTP 404. Например при mount
+   `marketing:/srv/marketing` используйте `current → releases/<release>`, а не
+   `current → /opt/.../marketing/releases/<release>`. До переключения проверьте
+   доступ к index.html из Caddy-контейнера; после — внешние HTML/JS/CSS и TLS.
+   Rollback ссылки также должен учитывать этот mount.
 7. Перезапустить только изменённые backend/miniapp сервисы после успешной миграции.
    Не перезапускать PostgreSQL/Redis без необходимости, не выполнять down -v.
 8. Caddy менять/перезапускать только при изменении proxy/static rules; validate
