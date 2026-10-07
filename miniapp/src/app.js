@@ -119,13 +119,13 @@ function shell(content) {
 function notice(text) {
   return `<div class="notice">${e(text)}</div>`;
 }
-async function route(page, id) {
+async function route(page, id, { contextLoaded = false } = {}) {
   const serial = navigation.begin(page, id);
   screen = page;
   telegram?.setPrimaryAction(null);
   shell(Skeleton());
   try {
-    const content = await render(page, id);
+    const content = await render(page, id, { contextLoaded });
     if (navigation.current(serial)) {
       shell(content);
       if (page === "branding")
@@ -157,9 +157,9 @@ function showError(error) {
       ),
   );
 }
-async function render(page, id) {
+async function render(page, id, { contextLoaded = false } = {}) {
   if (page === "home" || page === "services") {
-    if (page === "home") {
+    if (page === "home" && !contextLoaded) {
       ctx = await api.get("/context");
       theme?.useBrand?.(ctx.branding?.theme_mode);
     }
@@ -958,7 +958,8 @@ async function start() {
       brandingDirty = false;
       route(previous || (mode === "client" ? "home" : "dashboard"));
     });
-    await route("home");
+    // Authentication already loaded this context; later home visits refresh it.
+    await route("home", undefined, { contextLoaded: true });
   } catch (error) {
     showError(error);
   }

@@ -299,3 +299,13 @@ test('Telegram profile synchronization is explicit and does not publish the loca
  assert.ok(h.root.textContent.includes('Повторите синхронизацию'));
  assert.equal(h.root.querySelector('[name=brand_name]').value,'Unsaved name');
 });
+
+
+test('Startup reads context once and later home navigation refreshes it', async () => {
+  const h = await harness();
+  assert.equal(h.calls.filter(([method, path]) => method === 'get' && path === '/context').length, 1);
+  await h.click('nav', 'more');
+  await h.click('nav', 'home');
+  assert.equal(h.calls.filter(([method, path]) => method === 'get' && path === '/context').length, 2);
+  h.dom.window.close();
+});

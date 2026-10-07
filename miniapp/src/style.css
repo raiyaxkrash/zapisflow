@@ -12,6 +12,12 @@
 * {
   box-sizing: border-box;
 }
+/* Keep keyboard focus above the fixed navigation and Telegram safe area. */
+html {
+  scroll-padding-bottom: calc(
+    90px + max(var(--app-safe-bottom, 0px), env(safe-area-inset-bottom, 0px))
+  );
+}
 body {
   margin: 0;
   background: var(--zf-bg);
@@ -709,7 +715,6 @@ summary {
   grid-template-columns: 1fr;
 }
 
-.app-shell { padding-left: max(var(--app-safe-left, 0px), env(safe-area-inset-left, 0px)); padding-right: max(var(--app-safe-right, 0px), env(safe-area-inset-right, 0px)); }
 .app-top { background: var(--zf-native-header-bg, var(--zf-bg)); color: var(--zf-native-header-text, var(--zf-text)); }
 .primary:active { background: var(--zf-accent-active); }
 [data-keyboard="open"] .app-nav { display: none; }
