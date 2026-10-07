@@ -1,20 +1,20 @@
 @import './tokens.css';
 :root {
   /* Colors - Light Mode (Default) */
-  --bg-primary: #FAFAFC;
-  --bg-surface: #FFFFFF;
+  --bg-primary: var(--zf-bg);
+  --bg-surface: var(--zf-surface);
   --bg-surface-elevated: #FFFFFF;
   --bg-subtle: #F1F5F9;
   --bg-hover: #E2E8F0;
   
-  --text-primary: #0F172A;
-  --text-secondary: #475569;
+  --text-primary: var(--zf-text);
+  --text-secondary: var(--zf-text-muted);
   --text-tertiary: #64748B;
   --text-inverse: #FFFFFF;
   
-  --primary: #1D72FE;
-  --primary-hover: #155DE0;
-  --primary-light: #EBF3FF;
+  --primary: var(--zf-accent);
+  --primary-hover: var(--zf-accent-hover);
+  --primary-light: var(--zf-accent-soft);
   --primary-glow: rgba(29, 114, 254, 0.16);
   
   --accent-teal: #0D9488;
@@ -27,7 +27,7 @@
   --accent-rose-light: #FFF1F2;
   
   --border-subtle: #E2E8F0;
-  --border-strong: #CBD5E1;
+  --border-strong: var(--zf-border);
   --border-focus: #1D72FE;
   
   --shadow-sm: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
@@ -36,10 +36,10 @@
   --shadow-xl: 0 20px 25px -5px rgba(15, 23, 42, 0.09), 0 8px 10px -6px rgba(15, 23, 42, 0.04);
   --shadow-mockup: 0 25px 50px -12px rgba(15, 23, 42, 0.15), 0 0 0 1px rgba(15, 23, 42, 0.06);
   
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 16px;
-  --radius-xl: 24px;
+  --radius-sm: var(--zf-radius-sm);
+  --radius-md: var(--zf-radius-md);
+  --radius-lg: var(--zf-radius-lg);
+  --radius-xl: var(--zf-radius-xl);
   --radius-full: 9999px;
   
   --font-heading: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -51,20 +51,20 @@
 }
 
 [data-theme="dark"] {
-  --bg-primary: #090D16;
-  --bg-surface: #101626;
+  --bg-primary: var(--zf-bg);
+  --bg-surface: var(--zf-surface);
   --bg-surface-elevated: #161F36;
   --bg-subtle: #1B2642;
   --bg-hover: #223053;
   
-  --text-primary: #F8FAFC;
-  --text-secondary: #94A3B8;
+  --text-primary: var(--zf-text);
+  --text-secondary: var(--zf-text-muted);
   --text-tertiary: #64748B;
   --text-inverse: #0F172A;
   
-  --primary: #3B82F6;
-  --primary-hover: #60A5FA;
-  --primary-light: rgba(59, 130, 246, 0.15);
+  --primary: var(--zf-accent);
+  --primary-hover: var(--zf-accent-hover);
+  --primary-light: var(--zf-accent-soft);
   --primary-glow: rgba(59, 130, 246, 0.25);
   
   --accent-teal: #14B8A6;
@@ -77,7 +77,7 @@
   --accent-rose-light: rgba(251, 113, 133, 0.15);
   
   --border-subtle: #1E293B;
-  --border-strong: #334155;
+  --border-strong: var(--zf-border);
   --border-focus: #60A5FA;
   
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
@@ -183,7 +183,7 @@ p {
 
 .btn-primary {
   background-color: var(--primary);
-  color: #FFFFFF;
+  color: var(--zf-accent-foreground);
   box-shadow: 0 4px 14px var(--primary-glow);
 }
 
@@ -2072,3 +2072,6 @@ p {
     scroll-behavior: auto !important;
   }
 }
+
+.btn-primary:active { background-color: var(--zf-accent-active); }
+.theme-toggle-btn { min-height: var(--zf-control-size); min-width: var(--zf-control-size); }

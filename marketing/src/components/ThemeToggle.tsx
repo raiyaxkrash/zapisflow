@@ -1,32 +1,41 @@
 import React, { useEffect, useState } from 'react';
 
 export const ThemeToggle: React.FC = () => {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  type Theme = 'system' | 'light' | 'dark';
+  const [theme, setTheme] = useState<Theme>('system');
 
   useEffect(() => {
-    const saved = localStorage.getItem('zapisflow-theme') as 'light' | 'dark' | null;
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const initial = saved || (prefersDark ? 'dark' : 'light');
-    setTheme(initial);
-    document.documentElement.setAttribute('data-theme', initial);
+    let saved: string | null = null;
+    try { saved = localStorage.getItem('zapisflow-theme'); } catch { /* Preferences are optional. */ }
+    if (saved === 'light' || saved === 'dark' || saved === 'system') setTheme(saved);
   }, []);
 
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const render = () => document.documentElement.setAttribute('data-theme', theme === 'system' ? (media.matches ? 'dark' : 'light') : theme);
+    render();
+    media.addEventListener('change', render);
+    return () => media.removeEventListener('change', render);
+  }, [theme]);
+
   const toggleTheme = () => {
-    const next = theme === 'light' ? 'dark' : 'light';
+    const next = { system: 'light', light: 'dark', dark: 'system' }[theme] as Theme;
     setTheme(next);
-    document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('zapisflow-theme', next);
+    try { localStorage.setItem('zapisflow-theme', next); } catch { /* Keep in-memory preference. */ }
   };
+  const labels = { system: 'Система', light: 'Светлая', dark: 'Тёмная' };
 
   return (
     <button
       type="button"
       onClick={toggleTheme}
       className="theme-toggle-btn"
-      aria-label={`Переключить на ${theme === 'light' ? 'тёмную' : 'светлую'} тему`}
+      aria-label={`Тема: ${labels[theme]}. Переключить тему`}
       title="Сменить тему оформления"
     >
-      {theme === 'light' ? (
+      {theme === 'system' ? (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8 M12 16v4" /></svg>
+      ) : theme === 'light' ? (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
         </svg>

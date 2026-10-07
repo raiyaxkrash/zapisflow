@@ -67,3 +67,8 @@
 /marketing/node_modules/
 /marketing/dist/
 
+
+# Canonical design tokens; frontend builds use tested local mirrors.
+!/shared/
+!/shared/design/
+!/shared/design/tokens.css

@@ -1,3 +1,8 @@
+import { appShell, bookingSummary } from './application/shell.js';
+import { createNavigation, backDestination } from './application/navigation.js';
+import { createTelegramBridge } from './telegram/bridge.js';
+import { calendarKeys } from './ui/behaviors.js';
+import { Skeleton, ErrorState } from './ui/primitives.js';
 import { bindPortfolioMedia } from "./media.js";
 import "./style.css";
 import { calendarView, monthKey, monthQuery, shiftMonth } from "./calendar.js";
@@ -33,6 +38,8 @@ import {
 
 const api = new Api();
 const root = document.getElementById("app");
+const navigation = createNavigation();
+let telegram, themeListener;
 let tg,
   theme,
   ctx,
@@ -46,8 +53,6 @@ let tg,
   screen = "home",
   mode = "client",
   busy = false,
-  lastRoute = ["home"],
-  revision = 0,
   pendingAction = null;
 let brandingDirty = false;
 let cleanMedia = () => {};
@@ -65,70 +70,35 @@ function shell(content) {
   content =
     bookingProgress(screen) +
     (chosen && ["staff", "time", "confirm"].includes(screen)
-      ? `<div class="booking-summary">${e(chosen.title)} · ${rub(chosen.price)}${selectedSlot ? " · " + e(selectedSlot.slice(8, 10) + "." + selectedSlot.slice(5, 7) + " " + selectedSlot.slice(11, 16)) : ""}</div>`
+      ? bookingSummary({service:chosen.title,price:rub(chosen.price),slot:selectedSlot ? selectedSlot.slice(8,10)+'.'+selectedSlot.slice(5,7)+' '+selectedSlot.slice(11,16) : ''})
       : "") +
     content;
-  const caps = ctx?.capabilities;
-  root.innerHTML = `<div class="app-shell"><header class="app-top"><div class="wordmark">${ctx?.branding?.logo_url ? `<img class="brand-logo" src="${e(ctx.branding.logo_url)}" alt="">` : '<span class="logo">z</span>'}<span>${e(ctx?.project.name || "ZapisFlow")}</span></div>
-    <label class="theme-label">Тема<select id="theme" aria-label="Тема"><option value="system">Система</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label></header>
-    ${caps && canManage(ctx) ? `<div class="mode-switch">${b("Клиент", "mode", "client", mode === "client" ? "primary" : "secondary")}${b("Управление", "mode", "master", mode === "master" ? "primary" : "secondary")}</div>` : ""}
-    <main class="view app-view" tabindex="-1">${content}${ctx ? '<footer class="powered">Работает на ZapisFlow</footer>' : ""}</main>${
-      ctx
-        ? `<nav class="app-nav">${(mode === "client"
-            ? [
-                ["home", "Главная"],
-                ["services", "Записаться"],
-                ["bookings", "Мои записи"],
-                ["more", "Ещё"],
-              ]
-            : [
-                ["dashboard", "Сегодня"],
-                ["master-calendar", "Календарь"],
-                ...(caps.can_edit_project
-                  ? [
-                      ["clients", "Клиенты"],
-                      ["settings", "Ещё"],
-                    ]
-                  : []),
-              ]
-          )
-            .map(
-              ([p, l]) =>
-                `<button type="button" data-action="nav" data-id="${p}" class="${screen === p ? "nav-active" : "nav-button"}" ${screen === p ? 'aria-current="page"' : ""}>${icon({ home: "home", services: "calendar", bookings: "calendar", dashboard: "home", "master-calendar": "calendar", clients: "users" }[p])}<span>${l}</span></button>`,
-            )
-            .join("")}</nav>`
-        : ""
-    }</div>`;
+  root.innerHTML = appShell({content,ctx,mode,screen,theme:theme?.get()});
   cleanMedia = bindPortfolioMedia(root, api);
-  if (theme) root.querySelector("#theme").value = theme.get();
-  tg?.BackButton[
-    screen === "home" || screen === "dashboard" ? "hide" : "show"
-  ]();
+  telegram?.setBackVisible(screen !== 'home' && screen !== 'dashboard');
+
 }
 function notice(text) {
   return `<div class="notice">${e(text)}</div>`;
 }
 async function route(page, id) {
-  const serial = ++revision;
+  const serial = navigation.begin(page,id);
   screen = page;
-  lastRoute = [page, id];
-  shell(
-    '<div role="status" aria-label="Загружаем"><div class="skeleton"></div><div class="skeleton"></div></div>',
-  );
+  telegram?.setPrimaryAction(null);
+  shell(Skeleton());
   try {
     const content = await render(page, id);
-    if (serial === revision) {
+    if (navigation.current(serial)) {
       shell(content);
       root.querySelector("main")?.focus({ preventScroll: true });
     }
   } catch (error) {
-    if (serial === revision) showError(error);
+    if (navigation.current(serial)) showError(error);
   }
 }
 function showError(error) {
   shell(
-    header("Не удалось выполнить действие", "Попробуем ещё раз?") +
-      `<div role="alert">${notice(error.message)}</div>` +
+    ErrorState({message:error.message,retry:false}) +
       (error.status === 401
         ? "<p>Закройте Mini App и откройте его снова из бота.</p>"
         : b("Повторить", "retry")) +
@@ -574,7 +544,7 @@ root.addEventListener("click", (event) => {
     if (["nav", "mode"].includes(action)) brandingDirty = false;
     if (action === "nav") return route(id);
     if (action === "retry")
-      return retryAction ? retryAction() : ctx ? route(...lastRoute) : start();
+      return retryAction ? retryAction() : ctx ? route(...navigation.retry()) : start();
     if (action === "resume") {
       hold = (await api.get("/client/appointments")).find(
         (a) => a.id === Number(id),
@@ -797,7 +767,7 @@ root.addEventListener("submit", (event) => {
         policy_agreed: data.policy === "on",
       });
       hold = result;
-      tg?.HapticFeedback?.notificationOccurred?.("success");
+      telegram?.notify("success");
       return route(Number(result.deposit) ? "payment" : "success", result.id);
     }
     if (form.id === "proof-form") {
@@ -937,29 +907,22 @@ root.addEventListener("submit", (event) => {
 async function start() {
   shell('<p role="status">Проверяем вход через Telegram…</p>');
   try {
+    theme?.dispose?.();
+    telegram?.dispose();
+    if(themeListener)window.removeEventListener('zapisflow-theme-change',themeListener);
     tg = bootstrap();
+    telegram = createTelegramBridge(tg);
     theme = setupTheme(tg);
+    themeListener = () => telegram.syncChrome();
+    window.addEventListener("zapisflow-theme-change", themeListener);
+    telegram.syncChrome();
     const botId = botIdFromPath(location.pathname);
     await api.auth(botId, tg.initData);
     ctx = await api.get("/context");
     theme.useBrand?.(ctx.branding?.theme_mode);
     selectedDate = ctx.today;
-    tg.BackButton.onClick(() => {
-      const previous = {
-        staff: "services",
-        time: ctx.branding?.show_staff === false ? "services" : "staff",
-        confirm: "time",
-        contact: "more",
-        portfolio: "more",
-        reviews: "more",
-        "manage-services": "settings",
-        team: "settings",
-        schedule: "settings",
-        "schedule-dates": "schedule",
-        "schedule-weekly": "schedule",
-        branding: "settings",
-        client: "clients",
-      }[screen];
+    telegram.onBack(() => {
+      const previous = backDestination(screen, mode, ctx.branding?.show_staff !== false);
       if (brandingDirty && !window.confirm("Изменения не сохранены. Выйти?"))
         return;
       brandingDirty = false;
@@ -991,15 +954,4 @@ root.addEventListener("input", (event) => {
   preview.querySelector("button").textContent =
     draft.booking_cta_label || "Записаться";
 });
-root.addEventListener("keydown", (event) => {
-  if (!event.target.classList.contains("calendar-day")) return;
-  const shift = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[
-    event.key
-  ];
-  if (!shift) return;
-  event.preventDefault();
-  const days = [...root.querySelectorAll(".calendar-day")];
-  let index = days.indexOf(event.target) + shift;
-  while (days[index]?.disabled) index += Math.sign(shift);
-  days[index]?.focus();
-});
+root.addEventListener("keydown", event => calendarKeys(event,root));

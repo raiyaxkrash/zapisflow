@@ -8,9 +8,9 @@
   --zf-text-muted: #475569;
   --zf-border: #cbd5e1;
   --zf-accent: #1d72fe;
-  --zf-accent-hover: #155de0;
+  --zf-accent-hover: #2b7afe;
   --zf-accent-soft: #ebf3ff;
-  --zf-accent-foreground: #ffffff;
+  --zf-accent-foreground: #000000;
   --zf-focus: #0f172a;
   --zf-danger: #b42318;
   --zf-success: #087a55;
@@ -27,7 +27,34 @@
   --zf-space-4: 16px;
   --zf-space-6: 24px;
   --zf-space-8: 32px;
-  --zf-motion: 150ms ease;
+  --zf-motion: var(--zf-motion-fast);
+  --zf-surface-raised: var(--zf-surface-elevated);
+  --zf-text-secondary: var(--zf-text-muted);
+  --zf-muted: var(--zf-text-muted);
+  --zf-divider: var(--zf-border);
+  --zf-accent-active: #3883fe;
+  --zf-accent-pressed: var(--zf-accent-active);
+  --zf-focus-ring: var(--zf-focus);
+  --zf-info: #155de0;
+  --zf-space-5: 20px;
+  --zf-space-10: 40px;
+  --zf-radius-pill: 9999px;
+  --zf-font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --zf-type-display: 32px;
+  --zf-type-page: 28px;
+  --zf-type-section: 20px;
+  --zf-type-body: 16px;
+  --zf-type-secondary: 14px;
+  --zf-type-caption: 12px;
+  --zf-type-button: 16px;
+  --zf-type-price: 18px;
+  --zf-line-body: 1.5;
+  --zf-line-heading: 1.2;
+  --zf-motion-fast: 150ms ease;
+  --zf-motion-normal: 250ms ease;
+  --zf-motion-slow: 350ms ease;
+  --zf-control-size: 44px;
+
 }
 [data-theme="dark"] {
   --zf-bg: #090d16;
@@ -42,4 +69,5 @@
   --zf-success: #78ddb3;
   --zf-warning: #f4ce81;
   --zf-shadow-md: none;
+  --zf-info: #93baff;
 }

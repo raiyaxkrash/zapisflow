@@ -1,4 +1,5 @@
 @import "./tokens.css";
+@import "./ui/primitives.css";
 :root {
   --blue: var(--zf-accent);
   --ink: var(--zf-text);
@@ -15,11 +16,7 @@ body {
   margin: 0;
   background: var(--zf-bg);
   color: var(--ink);
-  font:
-    16px/1.5 system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
+  font: var(--zf-type-body)/var(--zf-line-body) var(--zf-font-family);
 }
 button,
 input,
@@ -41,7 +38,7 @@ button,
 input,
 select,
 textarea {
-  min-height: 44px;
+  min-height: var(--zf-control-size);
 }
 button {
   border: 0;
@@ -68,13 +65,13 @@ p {
   overflow-wrap: anywhere;
 }
 h2 {
-  font-size: 28px;
-  line-height: 1.2;
+  font-size: var(--zf-type-page);
+  line-height: var(--zf-line-heading);
   letter-spacing: -0.7px;
   margin: 8px 0 24px;
 }
 h3 {
-  font-size: 20px;
+  font-size: var(--zf-type-section);
   line-height: 1.3;
   margin: 0 0 12px;
 }
@@ -87,7 +84,7 @@ p {
   margin: auto;
   background: var(--zf-bg);
   padding-bottom: calc(
-    90px + var(--app-safe-bottom, env(safe-area-inset-bottom))
+    90px + max(var(--app-safe-bottom, 0px), env(safe-area-inset-bottom, 0px))
   );
 }
 .app-top {
@@ -95,7 +92,7 @@ p {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  padding: calc(16px + var(--app-safe-top, env(safe-area-inset-top))) 20px 16px;
+  padding: calc(16px + max(var(--app-safe-top, 0px), env(safe-area-inset-top, 0px))) 20px 16px;
   border-bottom: 1px solid var(--line);
 }
 .wordmark {
@@ -128,7 +125,7 @@ p {
   border-radius: 10px;
 }
 .theme-label {
-  font-size: 12px;
+  font-size: var(--zf-type-caption);
   color: var(--muted);
 }
 .theme-label select {
@@ -144,7 +141,7 @@ p {
 .sub,
 small {
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--zf-type-secondary);
 }
 .mode-switch {
   display: flex;
@@ -204,9 +201,10 @@ small {
   transform: translateX(-50%);
   width: min(100%, 760px);
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   padding: 8px 8px
-    calc(8px + var(--app-safe-bottom, env(safe-area-inset-bottom)));
+    calc(8px + max(var(--app-safe-bottom, 0px), env(safe-area-inset-bottom, 0px)));
   border-top: 1px solid var(--line);
   background: var(--zf-surface);
 }
@@ -214,7 +212,7 @@ small {
   padding: 8px 2px;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--zf-type-caption);
   min-height: 56px;
   border-radius: 10px;
   display: grid;
@@ -288,7 +286,7 @@ small {
   padding: 24px;
 }
 .studio-banner h3 {
-  font-size: 26px;
+  font-size: var(--zf-type-page);
 }
 .summary-row {
   display: flex;
@@ -302,7 +300,7 @@ small {
 }
 .pill {
   display: inline-block;
-  font-size: 12px;
+  font-size: var(--zf-type-caption);
   font-weight: 700;
   padding: 4px 8px;
   border-radius: 6px;
@@ -327,7 +325,7 @@ small {
 .field {
   display: block;
   margin: 16px 0;
-  font-size: 14px;
+  font-size: var(--zf-type-secondary);
   font-weight: 600;
 }
 .field input,
@@ -356,7 +354,7 @@ textarea {
   align-items: flex-start;
   gap: 12px;
   margin: 20px 0;
-  font-size: 14px;
+  font-size: var(--zf-type-secondary);
 }
 .check input {
   width: 24px;
@@ -395,16 +393,16 @@ textarea {
   gap: 8px;
 }
 .calendar-heading h2 {
-  font-size: 18px;
+  font-size: var(--zf-type-price);
   margin: 0;
   text-transform: capitalize;
 }
 .calendar-heading button {
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--zf-control-size);
   background: transparent;
   color: var(--ink);
-  font-size: 24px;
+  font-size: var(--zf-type-page);
 }
 .calendar-weekdays,
 .calendar-grid {
@@ -414,19 +412,19 @@ textarea {
 }
 .calendar-weekdays {
   text-align: center;
-  font-size: 12px;
+  font-size: var(--zf-type-caption);
   color: var(--muted);
   padding: 12px 0;
 }
 .calendar-day {
   position: relative;
   min-width: 0;
-  min-height: 44px;
+  min-height: var(--zf-control-size);
   padding: 6px 2px;
   background: transparent;
   color: var(--ink);
   border-radius: 10px;
-  font-size: 15px;
+  font-size: var(--zf-type-secondary);
   border: 1px solid transparent;
 }
 .calendar-day:disabled {
@@ -460,7 +458,7 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--zf-type-caption);
   color: var(--muted);
 }
 .daily-navigation {
@@ -490,7 +488,7 @@ textarea {
 }
 .powered {
   text-align: center;
-  font-size: 12px;
+  font-size: var(--zf-type-caption);
   color: var(--muted);
   margin: 28px 0 0;
 }
@@ -503,7 +501,7 @@ textarea {
 }
 .booking-progress li {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--zf-type-caption);
   color: var(--muted);
   border-top: 3px solid var(--line);
   padding-top: 8px;
@@ -521,7 +519,7 @@ textarea {
   border: 1px solid var(--line);
   padding: 12px;
   border-radius: 10px;
-  font-size: 14px;
+  font-size: var(--zf-type-secondary);
   margin-bottom: 16px;
 }
 .gallery {
@@ -536,7 +534,7 @@ textarea {
   border-radius: 12px;
 }
 .metric {
-  font-size: 32px;
+  font-size: var(--zf-type-display);
   font-weight: 750;
 }
 .skeleton {
@@ -553,7 +551,7 @@ textarea {
   border-radius: 50%;
   background: var(--zf-accent-soft);
   color: var(--green);
-  font-size: 32px;
+  font-size: var(--zf-type-display);
 }
 .brand-preview {
   background: var(--zf-surface);
@@ -576,7 +574,7 @@ details {
 }
 summary {
   cursor: pointer;
-  min-height: 44px;
+  min-height: var(--zf-control-size);
   padding: 10px 0;
   font-weight: 650;
 }
@@ -637,7 +635,7 @@ summary {
   margin: 0;
 }
 .gallery figcaption {
-  font-size: 14px;
+  font-size: var(--zf-type-secondary);
   color: var(--muted);
 }
 
@@ -676,7 +674,7 @@ summary {
 .person small {
   display: block;
   color: var(--zf-text-muted);
-  font-size: 14px;
+  font-size: var(--zf-type-secondary);
 }
 
 /* Long user content remains inside flexible cards at narrow widths. */
@@ -696,12 +694,12 @@ summary {
   flex-shrink: 0;
 }
 .app-shell {
-  padding-left: var(--app-safe-left, env(safe-area-inset-left));
-  padding-right: var(--app-safe-right, env(safe-area-inset-right));
+  padding-left: max(var(--app-safe-left, 0px), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--app-safe-right, 0px), env(safe-area-inset-right, 0px));
 }
 .app-nav {
-  padding-left: calc(8px + var(--app-safe-left, env(safe-area-inset-left)));
-  padding-right: calc(8px + var(--app-safe-right, env(safe-area-inset-right)));
+  padding-left: calc(8px + max(var(--app-safe-left, 0px), env(safe-area-inset-left, 0px)));
+  padding-right: calc(8px + max(var(--app-safe-right, 0px), env(safe-area-inset-right, 0px)));
 }
 /* The full selection remains in confirmation; the sticky recap stays compact. */
 .booking-summary {
@@ -713,3 +711,13 @@ summary {
 .options:has(.person) {
   grid-template-columns: 1fr;
 }
+
+.app-shell { padding-left: max(var(--app-safe-left, 0px), env(safe-area-inset-left, 0px)); padding-right: max(var(--app-safe-right, 0px), env(safe-area-inset-right, 0px)); }
+.app-top { background: var(--zf-native-header-bg, var(--zf-bg)); color: var(--zf-native-header-text, var(--zf-text)); }
+.primary:active { background: var(--zf-accent-active); }
+[data-keyboard="open"] .app-nav { display: none; }
+[data-keyboard="open"] .booking-summary { position: static; }
+
+.zf-button:focus-visible, .zf-icon-button:focus-visible { box-shadow: 0 0 0 1px var(--zf-focus-ring); }
+
+.app-top .theme-label { color: var(--zf-native-header-text, var(--zf-text-muted)); }

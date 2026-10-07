@@ -1,0 +1,27 @@
+/* Foundation primitives share the existing ZapisFlow semantic palette. */
+.zf-button, .zf-icon-button { min-height: var(--zf-control-size); min-width: var(--zf-control-size); }
+.zf-icon-button { display: inline-grid; place-items: center; background: var(--zf-surface); color: var(--zf-text); border: 1px solid var(--zf-border); border-radius: var(--zf-radius-md); }
+.zf-card { padding: var(--zf-space-5); background: var(--zf-surface); border: 1px solid var(--zf-border); border-radius: var(--zf-radius-lg); box-shadow: var(--zf-shadow-sm); }
+.zf-card-raised { background: var(--zf-surface-raised); box-shadow: var(--zf-shadow-md); }
+.zf-section { margin-block: var(--zf-space-6); }
+.zf-page-header { margin-bottom: var(--zf-space-6); }
+.zf-badge { display: inline-block; padding: var(--zf-space-1) var(--zf-space-2); border-radius: var(--zf-radius-pill); background: var(--zf-surface-raised); color: var(--zf-text); font-size: var(--zf-type-caption); }
+.zf-badge[data-tone="success"] { color: var(--zf-success); }
+.zf-badge[data-tone="warning"] { color: var(--zf-warning); }
+.zf-badge[data-tone="danger"], .zf-field-error { color: var(--zf-danger); }
+.zf-badge[data-tone="info"] { color: var(--zf-info); }
+.zf-switch { display: flex; align-items: center; gap: var(--zf-space-3); min-height: var(--zf-control-size); }
+.zf-switch input { min-width: var(--zf-control-size); accent-color: var(--zf-accent); }
+.zf-segmented { display: flex; flex-wrap: wrap; gap: var(--zf-space-2); padding: var(--zf-space-2); border: 1px solid var(--zf-border); border-radius: var(--zf-radius-md); }
+.zf-segmented label { display: flex; align-items: center; min-height: var(--zf-control-size); gap: var(--zf-space-2); }
+.zf-segmented input { accent-color: var(--zf-accent); }
+.zf-dialog { width: min(90vw, 480px); max-height: 85dvh; overflow-y: auto; margin: auto; padding: var(--zf-space-6); color: var(--zf-text); background: var(--zf-surface); border: 1px solid var(--zf-border); border-radius: var(--zf-radius-xl); }
+.zf-dialog::backdrop { background: color-mix(in srgb, var(--zf-text) 40%, transparent); }
+.zf-bottom-sheet { width: min(100vw, 680px); margin: auto auto 0; padding-bottom: calc(var(--zf-space-6) + max(var(--app-safe-bottom, 0px), env(safe-area-inset-bottom, 0px))); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.zf-button.danger { background: var(--zf-danger); color: var(--zf-bg); }
+.zf-button.ghost { background: transparent; color: var(--zf-text); }
+.zf-button:disabled { cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; scroll-behavior: auto !important; } }
+
+.zf-button:active:not(:disabled), .zf-icon-button:active { transform: translateY(1px); }
+@media (prefers-reduced-motion: reduce) { .zf-button:active, .zf-icon-button:active { transform: none; } }

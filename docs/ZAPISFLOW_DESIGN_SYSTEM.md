@@ -1,10 +1,12 @@
 # ZapisFlow — визуальная система
 
+Актуальная foundation архитектура и canonical tokens: [MINIAPP_DESIGN_SYSTEM.md](MINIAPP_DESIGN_SYSTEM.md).
+
 ## Принципы
-Три клиентских канала используют один бренд бизнеса поверх ZapisFlow. Marketing home сохраняет ZapisFlow. Брендинг меняет контент и accent, но не business rules, legal copy или обязательную подпись «Работает на ZapisFlow».
+Telegram Bot и Mini App используют один бренд бизнеса поверх ZapisFlow. Marketing home сохраняет ZapisFlow. Брендинг меняет контент и accent, но не business rules, legal copy или обязательную подпись «Работает на ZapisFlow».
 
 ## Typography
-System sans для приложения (быстрый WebView, Cyrillic). Marketing существующие Inter/Plus Jakarta Sans. Заголовки28/24/20, body16, supporting14, minimum12. Line-height1.5, ограничение длины строки72ch, tabular nums для времени/цен.
+System sans для приложения (быстрый WebView, Cyrillic). Marketing существующие Inter/Plus Jakarta Sans. Display32, page28, section20, body16, supporting14, caption12. Line-height1.5, ограничение длины строки72ch, tabular nums для времени/цен.
 
 ## Tokens
 Canvas #FAFAFC; surface #FFFFFF; text #0F172A; muted #475569; border #CBD5E1; accent #1D72FE. Dark canvas #090D16; surface #101626; elevated #161F36; text #F8FAFC; muted #B6C2D3. Danger #B42318; success #087A55; warning #8A5700 (адаптивные light/dark surfaces).
