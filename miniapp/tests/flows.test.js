@@ -2,7 +2,7 @@ import * as ClientViews from '../src/client/views.js';
 import { appShell, bookingSummary } from '../src/application/shell.js';
 import { createNavigation, backDestination } from '../src/application/navigation.js';
 import { createTelegramBridge } from '../src/telegram/bridge.js';
-import { calendarKeys } from '../src/ui/behaviors.js';
+import { calendarKeys, scrollToPreview } from '../src/ui/behaviors.js';
 import { Skeleton, ErrorState } from '../src/ui/primitives.js';
 import {bindPortfolioMedia} from "../src/media.js";
 import test from 'node:test';
@@ -68,7 +68,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
     async image(path){calls.push(['image',path]);return new dom.window.Blob(['receipt'],{type:'application/octet-stream'});}
     async upload(path,file,progress){calls.push(['upload',path,file.type]);progress(100);current={...current,status:'PAYMENT_PROOF_SENT',payment:[{id:9,status:'SUBMITTED',amount:deposit,proofs:[{id:11}]}]};return {appointment:current}}
   }
-  Object.assign(dom.window,{ClientViews,bindPortfolioMedia,Api,...calendar,...ui, appShell, bookingSummary, createNavigation, backDestination, createTelegramBridge: tg => createTelegramBridge(tg,dom.window), calendarKeys, Skeleton, ErrorState,e:ui.escape,b:ui.button,f:ui.field,
+  Object.assign(dom.window,{ClientViews,bindPortfolioMedia,Api,...calendar,...ui, appShell, bookingSummary, createNavigation, backDestination, createTelegramBridge: tg => createTelegramBridge(tg,dom.window), calendarKeys, scrollToPreview: element => scrollToPreview(element,dom.window), Skeleton, ErrorState,e:ui.escape,b:ui.button,f:ui.field,
     bootstrap:()=>({initData:'signed',BackButton:{hide(){},show(){},onClick(){}}}),
     setupTheme:()=>({get:()=> 'system',set(){}}),botIdFromPath:()=> '11111111-2222-3333-4444-555555555555'});
   dom.window.confirm=()=>true;

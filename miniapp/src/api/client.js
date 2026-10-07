@@ -7,8 +7,9 @@ export class ApiError extends Error {
 }
 export class Api {
   // Native WebView fetch must run with the browser global as its receiver.
-  constructor(fetcher = (...args) => globalThis.fetch(...args)) {
+  constructor(fetcher = (...args) => globalThis.fetch(...args), timeoutMs = 15000) {
     this.fetcher = fetcher;
+    this.timeoutMs = timeoutMs;
     this.csrf = "";
     this.botId = "";
     this.pending = new Map();
@@ -16,7 +17,7 @@ export class Api {
   async request(path, options = {}, format = "json") {
     let result;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       result = await this.fetcher(`/api/miniapp${path}`, {
         credentials: "same-origin",
@@ -24,36 +25,34 @@ export class Api {
         signal: controller.signal,
         headers: { "X-MiniApp-Bot": this.botId, ...options.headers },
       });
-    } catch {
-      throw new ApiError(
-        "NETWORK",
-        "Нет соединения. Проверьте интернет и повторите запрос",
-      );
+      if (result.ok && format === "image") {
+        const blob = await result.blob();
+        if (blob.type !== "image/jpeg" || blob.size > 8 * 1024 * 1024)
+          throw new ApiError("IMAGE_INVALID", "Изображение недоступно");
+        return blob;
+      }
+      let data;
+      try {
+        data = await result.json();
+      } catch {
+        throw new ApiError(
+          "NETWORK",
+          "Не удалось прочитать ответ. Повторите запрос",
+        );
+      }
+      if (!result.ok)
+        throw new ApiError(
+          data.code || "UNAVAILABLE",
+          data.message || "Не удалось выполнить действие",
+          result.status,
+        );
+      return data;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError("NETWORK", "Нет соединения. Проверьте интернет и повторите запрос");
     } finally {
       clearTimeout(timeout);
     }
-    if (result.ok && format === "image") {
-      const blob = await result.blob();
-      if (blob.type !== "image/jpeg" || blob.size > 8 * 1024 * 1024)
-        throw new ApiError("IMAGE_INVALID", "Изображение недоступно");
-      return blob;
-    }
-    let data;
-    try {
-      data = await result.json();
-    } catch {
-      throw new ApiError(
-        "NETWORK",
-        "Не удалось прочитать ответ. Повторите запрос",
-      );
-    }
-    if (!result.ok)
-      throw new ApiError(
-        data.code || "UNAVAILABLE",
-        data.message || "Не удалось выполнить действие",
-        result.status,
-      );
-    return data;
   }
   async auth(botId, initData) {
     this.botId = botId;

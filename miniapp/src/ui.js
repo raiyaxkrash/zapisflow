@@ -151,7 +151,11 @@ export function staffRows(rows) {
     .join("");
 }
 
-export async function masterWorkspace(...args){return (await import("./master/render.js")).renderMaster(...args);}
+export async function masterWorkspace(...args) {
+  // Load workspace styling only when entering management in a browser.
+  if (typeof window !== "undefined") await import("./master/workspace.css");
+  return (await import("./master/render.js")).renderMaster(...args);
+}
 
 export const notice=text=>`<div class="notice">${escape(text)}</div>`;
 

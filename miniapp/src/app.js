@@ -2,12 +2,11 @@ import * as ClientViews from "./client/views.js";
 import { appShell, bookingSummary } from "./application/shell.js";
 import { createNavigation, backDestination } from "./application/navigation.js";
 import { createTelegramBridge } from "./telegram/bridge.js";
-import { calendarKeys } from "./ui/behaviors.js";
+import { calendarKeys, scrollToPreview } from "./ui/behaviors.js";
 import { Skeleton, ErrorState } from "./ui/primitives.js";
 import { bindPortfolioMedia } from "./media.js";
 import "./style.css";
 import "./client/client.css";
-import "./master/workspace.css";
 import { calendarView, monthKey, monthQuery, shiftMonth } from "./calendar.js";
 import { Api } from "./api/client.js";
 import { bootstrap, botIdFromPath } from "./telegram/bootstrap.js";
@@ -507,7 +506,7 @@ root.addEventListener("click", (event) => {
     if (action === "brand-preview-only") {
       const preview = root.querySelector("#brand-preview");
       preview.classList.toggle("is-expanded");
-      preview.scrollIntoView?.({ behavior: "smooth", block: "start" });
+      scrollToPreview(preview);
       return;
     }
     if (action === "delete-brand-asset") {
