@@ -38,6 +38,7 @@ from app.database.models import (
     User,
 )
 from app.database.models.miniapp import MiniAppOperation, MiniAppSession
+from app.database.models.telegram_outbox import TelegramOutbox
 from app.repositories.schedule_repository import ScheduleRepository
 from app.repositories.service_repository import ServiceRepository
 from app.services.miniapp_auth import MiniAppError, validate_init_data
@@ -527,6 +528,20 @@ async def test_prepaid_proof_and_owner_approval(system):
     assert system.registry.bot.sends == 1
     async with system.factory() as session:
         assert await session.scalar(select(func.count(PaymentProof.id))) == 1
+        deliveries = (await session.scalars(select(TelegramOutbox).where(
+            TelegramOutbox.operation_type == "send_document"
+        ))).all()
+        assert len(deliveries) == 1  # Retrying upload must not resend the review.
+        delivery = deliveries[0]
+        assert delivery.target_chat_id == 11001
+        assert delivery.master_id == system.masters[0].id
+        assert delivery.bot_instance_id == system.bots[0].id
+        assert delivery.payload["document_file_id"] == "receipt-file"
+        buttons = delivery.payload["reply_markup"]["inline_keyboard"][0]
+        payment_id = hold["payment"][0]["id"]
+        assert [b["callback_data"] for b in buttons] == [
+            f"adm_pay:approve:{payment_id}", f"adm_pay:reject:{payment_id}"
+        ]
     proof_id = r.json()["proof_id"]
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=system.app), base_url=ORIGIN

@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl, quote
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from fastapi import (
     APIRouter,
     Depends,
@@ -88,7 +88,7 @@ from app.services.miniapp_auth import (
 from app.services.payment_service import PaymentService
 from app.services.slot_engine import SlotEngine
 from app.services.subscription_access_policy import SubscriptionAccessPolicy
-from app.services.telegram_outbox import enqueue_telegram_message
+from app.services.telegram_outbox import enqueue_telegram_document, enqueue_telegram_message
 from app.web.miniapp_contracts import (
     AppointmentOutput,
     MasterAppointmentAction,
@@ -872,7 +872,30 @@ async def submit_uploaded_proof(c, id, request, image, storage_chat_id):
         )
         proof.telegram_file_id = sent.document.file_id
         proof.telegram_file_unique_id = sent.document.file_unique_id
-        await notify(c, a2, "Чек на проверке", event_id=str(proof.id))
+        # Admin review must include the stored receipt and existing payment actions.
+        # Enqueue in the same transaction as the proof so retries cannot duplicate it.
+        await enqueue_telegram_message(
+            c.session, master_id=c.master.id, bot_instance_id=c.bot.id,
+            chat_id=c.user.telegram_id, text="Чек получен и отправлен мастеру на проверку.",
+            idempotency_key=f"payment-proof:{proof.id}:client",
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data=f"adm_pay:approve:{_p.id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm_pay:reject:{_p.id}"),
+        ]])
+        caption = (
+            f"<b>Чек по записи #{a2.id}</b>\n"
+            f"{html.escape(a2.snapshot_service_title)}\n"
+            f"{a2.start_time.astimezone(ZoneInfo(c.master.timezone)):%d.%m.%Y %H:%M}\n"
+            f"Предоплата: {_p.amount} ₽"
+        )
+        for chat_id in await MasterAuthorizationService(c.session).get_admin_recipients(c.master.id):
+            await enqueue_telegram_document(
+                c.session, master_id=c.master.id, bot_instance_id=c.bot.id,
+                chat_id=chat_id, document_file_id=proof.telegram_file_id,
+                caption=caption, reply_markup=keyboard,
+                idempotency_key=f"payment-proof:{proof.id}:admin:{chat_id}",
+            )
         return {
             "proof_id": proof.id,
             "appointment": appointment_dto(
