@@ -1679,32 +1679,9 @@ async def cb_activate_bot(
 # ---------------------------------------------------------------------------
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:web:"))
-async def cb_bot_web_booking(callback: CallbackQuery, session: AsyncSession) -> None:
-    user = await _get_or_create_user(session, callback.from_user)
-    await _answer_bot_callback(callback)
-    try:
-        parts = callback.data.split(":")
-        bot_id, action = int(parts[3]), parts[4]
-        if action not in {"view", "on", "off"}:
-            raise ValueError
-        instance = await BotInstanceRepository(session).get_by_id(bot_id)
-        if not instance:
-            raise AccessDeniedError("Доступ запрещён")
-        await MasterAuthorizationService(session).require_owner(instance.master_id, user.id)
-        if action != "view":
-            instance = await BotProvisioningService(session).set_web_booking_enabled(bot_id, user.id, action == "on")
-        enabled = instance.web_booking_enabled
-        text = "🌐 Запись через сайт\n" + ("🟢 Включена" if enabled else "⚪ Выключена")
-        if enabled:
-            text += "\n" + escape(settings.web_booking_base_url.rstrip("/") + "/book/" + str(instance.public_id))
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Выключить" if enabled else "Включить", callback_data=f"mgr:bot:web:{bot_id}:" + ("off" if enabled else "on"))],
-            [InlineKeyboardButton(text="Назад", callback_data=f"mgr:master:{instance.master_id}")]])
-        if callback.message:
-            await callback.message.answer(text, reply_markup=keyboard)
-    except (AccessDeniedError, ProvisioningWebhookError, ValueError, IndexError):
-        if callback.message:
-            await callback.message.answer("Веб-запись недоступна. Проверьте настройки платформы и права владельца.")
+async def cb_retired_website_channel(callback: CallbackQuery) -> None:
+    """Acknowledge old message buttons without restoring the retired channel."""
+    await _answer_bot_callback(callback, "Веб-запись больше недоступна. Используйте Telegram-бот или Mini App.", show_alert=True)
 
 
 @manager_router.callback_query(F.data.startswith("mgr:bot:miniapp:"))

@@ -1,5 +1,4 @@
 import React from 'react';
-import { WebBooking } from './WebBooking';
 import { Header } from './components/Header.tsx';
 import { Hero } from './components/Hero.tsx';
 import { SocialProof } from './components/SocialProof.tsx';
@@ -14,7 +13,21 @@ import { FinalCTA } from './components/FinalCTA.tsx';
 import { Footer } from './components/Footer.tsx';
 
 export const App: React.FC = () => {
-  if (window.location.pathname.startsWith("/book/") || window.location.pathname === "/account/bookings") return <WebBooking />;
+  // Retired public booking links must not silently become a booking screen.
+  const path = window.location.pathname;
+  if (path === '/book' || path.startsWith('/book/') || path === '/account/bookings') {
+    return (
+      <div className="site-wrapper">
+        <Header />
+        <main id="main-content" className="container section">
+          <h1>Запись через сайт больше недоступна</h1>
+          <p>Записаться к мастеру можно в его Telegram-боте или Mini App.</p>
+          <a className="btn btn-primary" href="/">На главную ZapisFlow</a>
+        </main>
+        <Footer />
+      </div>
+    );
+  }
   return (
     <div className="site-wrapper">
       <Header />

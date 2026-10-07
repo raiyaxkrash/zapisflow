@@ -241,15 +241,12 @@ production deployment и реальный Telegram UAT требуют отдел
 Подробнее о конфигурации live/test, чеках и выкатке: [YooKassa billing](docs/yookassa-billing.md).
 
 
-## Веб-запись (опциональный канал)
+## Клиентские каналы
 
-Маркетинговый сайт остаётся на `/`; `/book/<bot_public_id>` использует общие
-BookingService/SlotEngine и PostgreSQL записи. Каталог и слоты доступны без
-входа, создание записи и `/account/bookings` требуют Telegram OIDC Login.
-Веб-канал включается отдельно владельцем, default false, независимо от Mini App.
-Настройка auth bot, HTTPS proxy, environment и ручной UAT:
-[WEB_BOOKING_TELEGRAM_LOGIN.md](docs/WEB_BOOKING_TELEGRAM_LOGIN.md).
+Клиенты записываются в Telegram-боте через текстовый flow или в Telegram Mini App. Маркетинговый сайт показывает возможности ZapisFlow и ведёт в Manager Bot для создания проекта; он не принимает клиентские записи.
+
+Бывшие страницы браузерной записи показывают сообщение о недоступности и ссылку на главную. Website Telegram Login/OIDC, его API и sessions удалены. Колонка `bot_instances.web_booking_enabled` оставлена deprecated для совместимости с применёнными миграциями; она не включает никакую возможность продукта.
 
 ## Оформление бизнеса и Mini App
 
-Владелец может настроить название, изображения, акцент, тему, тексты и клиентские разделы. Telegram, Mini App и веб-страница записи используют настройки одного проекта. Инструкции и ограничения: [Оформление и Mini App](docs/BRANDING_AND_MINIAPP.md), [дизайн-система](docs/ZAPISFLOW_DESIGN_SYSTEM.md).
+Владелец может настроить название, изображения, акцент, тему, тексты и клиентские разделы. Telegram и Mini App используют настройки одного проекта. Инструкции и ограничения: [Оформление и Mini App](docs/BRANDING_AND_MINIAPP.md), [дизайн-система](docs/ZAPISFLOW_DESIGN_SYSTEM.md).

@@ -1,9 +1,9 @@
 # Оформление бизнеса и обновлённые клиентские интерфейсы
 
 ## Архитектура
-Оформление принадлежит Master, хранится в MasterSettings.branding. Один проект использует одинаковое название, тексты, акцент и изображения в Telegram, Mini App и /book/<public_id>. Главная marketing остаётся ZapisFlow. BookingService, SlotEngine, Appointment, Payment, SubscriptionAccessPolicy и User не заменяются.
+Оформление принадлежит Master, хранится в MasterSettings.branding. Один проект использует одинаковое название, тексты, акцент и изображения в Telegram и Mini App. Главная marketing остаётся ZapisFlow. BookingService, SlotEngine, Appointment, Payment, SubscriptionAccessPolicy и User не заменяются.
 
-Mini App остаётся Vite + ES modules: текущая кодовая база не оправдывает стоимость React runtime. Редактор оформления загружается отдельным chunk только при открытии владельцем. CSS tokens зеркалируются между независимыми Docker build contexts; автоматический тест проверяет равенство. Marketing/Web остаются React18/TypeScript.
+Mini App остаётся Vite + ES modules: текущая кодовая база не оправдывает стоимость React runtime. Редактор оформления загружается отдельным chunk только при открытии владельцем. CSS tokens зеркалируются между независимыми Docker build contexts; автоматический тест проверяет равенство. Маркетинговый сайт остаётся React18/TypeScript; браузерная запись удалена.
 
 ## Настройки владельца
 Управление → Ещё → Оформление: название, логотип, обложка, tagline, описание, приветствие, подпись CTA, акцент #RRGGBB, System/Light/Dark, Clean/Soft/Compact, портфолио/отзывы/контакты/команда. Контакты и соцсети редактируются через существующий экран контактов, без дублирования полей.
@@ -24,21 +24,20 @@ System использует Telegram colorScheme в WebView и prefers-color-sch
 ## API
 Mini App owner: GET/PUT /api/miniapp/master/branding; POST /reset; POST/DELETE /assets/{logo|cover}; POST /sync-telegram.
 Client: branding в /api/miniapp/context; GET /client/reviews; GET /client/portfolio; GET /client/portfolio/{id}/image.
-Website: branding в /api/web-booking/{public_id}/context; GET /reviews; GET /portfolio; GET /portfolio/{id}/image.
 Public media: GET /api/branding/{public_id}/assets/{logo|cover}.
 Все сокращённые пути выше относятся к указанному prefix. Изображения и optional sections не обходят существующие channel/subscription checks.
 
 ## Локальная разработка
-Backend — действующий workflow README с отдельной тестовой PostgreSQL и Redis. Mini App: cd miniapp, npm install, npm run dev. Website: cd marketing, npm install, npm run dev. Открытие Mini App вне Telegram штатно fail-closed; тесты подменяют transport/Telegram context только в браузерном harness, production bypass отсутствует.
+Backend — действующий workflow README с отдельной тестовой PostgreSQL и Redis. Mini App: cd miniapp, npm install, npm run dev. Маркетинговый сайт: cd marketing, npm install, npm run dev. Открытие Mini App вне Telegram штатно fail-closed; тесты подменяют transport/Telegram context только в браузерном harness, production bypass отсутствует.
 
 Проверки: pytest -q; python -m compileall app tests; npm test и npm run build в miniapp и marketing; git diff --check. Новые тесты покрывают owner permissions, tenant assets, CSRF, defaults/reset, malicious texts/colors, MIME/size, Telegram timeout/403/invalid parameter, контраст, tokens parity и draft/save. Дополнительно нужен ручной Telegram iOS/Android/Desktop UAT.
 
 ## Подготовка deployment — не выполнялась
-Новая миграция 2026_10_05_0029 после 0028: MasterSettings.branding и master_brand_assets. Перед будущим deployment backup DB, alembic upgrade head, rebuild backend/Mini App/marketing. Новых secrets/env/storage volumes нет. Шаблон gateway в этой ветке включает /api/branding. При будущей установке сверить действующие proxy rules; они должны пропускать /api/branding так же, как /api/miniapp и /api/web-booking. Не менять production Caddy автоматически. Нужен настоящий Telegram owner login для проверки uploads/profile sync и настоящий OIDC для веб-записи.
+Новая миграция 2026_10_05_0029 после 0028: MasterSettings.branding и master_brand_assets. Перед будущим deployment backup DB, alembic upgrade head, rebuild backend/Mini App/marketing. Новых secrets/env/storage volumes нет. Шаблон gateway в этой ветке включает /api/branding. При будущей установке сверить действующие proxy rules; они должны пропускать /api/branding так же, как /api/miniapp. Не менять production Caddy автоматически. Нужен настоящий Telegram owner login для проверки uploads/profile sync.
 
 ## Public branding data
 
-Logo and cover are intentionally public because they are rendered on anonymous Web Booking pages. Public read access is not considered tenant data leakage. Mutation remains OWNER-only. Private user/business assets use separate authenticated delivery paths.
+Logo and cover are intentionally public business presentation assets. Public read access is not considered tenant data leakage. Mutation remains OWNER-only. Private user/business assets use separate authenticated delivery paths.
 
 Публичны: название бизнеса, tagline, публичное описание, logo/cover, акцент/тема, публичные контакты и метаданные видимости разделов. Чтение логотипа другого бизнеса по его публичному booking context — ожидаемое поведение, а не cross-tenant IDOR.
 

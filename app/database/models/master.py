@@ -143,6 +143,7 @@ class BotInstance(Base):
     is_current: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true"), nullable=False
     )
+    # Deprecated website channel; retained to preserve applied migration history.
     web_booking_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text("false"), nullable=False
     )

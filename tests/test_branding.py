@@ -205,9 +205,8 @@ async def test_telegram_sync_timeout_does_not_lose_branding(system):
 
 
 @pytest.mark.asyncio
-async def test_branding_one_project_across_bot_miniapp_and_website(system, monkeypatch):
+async def test_branding_one_project_across_bot_and_miniapp(system):
     from app.bot.handlers.client.start import client_brand, client_menu
-    from app.config.settings import settings
 
     client = await owner(system)
     await base.post(
@@ -223,8 +222,6 @@ async def test_branding_one_project_across_bot_miniapp_and_website(system, monke
     )
     async with system.factory() as session:
         bot = await session.get(base.BotInstance, system.bots[0].id)
-        bot.web_booking_enabled = True
-        await session.commit()
         brand = await client_brand(session, bot)
         keyboard = client_menu(False, brand)
         buttons = [b for row in keyboard.inline_keyboard for b in row]
@@ -232,10 +229,6 @@ async def test_branding_one_project_across_bot_miniapp_and_website(system, monke
         assert buttons[0].web_app is None
         assert "Выбрать время" in buttons[0].text
         assert not any("Портфолио" in b.text for b in buttons)
-    monkeypatch.setattr(settings, "web_booking_base_url", base.ORIGIN)
-    web = await client.get(f"/api/web-booking/{system.bots[0].public_id}/context")
-    assert web.status_code == 200, web.text
-    assert web.json()["branding"]["brand_name"] == "Barber House"
     assert (await client.get("/api/miniapp/context")).json()["branding"][
         "brand_name"
     ] == "Barber House"

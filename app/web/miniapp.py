@@ -1317,7 +1317,7 @@ def install_miniapp(app):
 
     @app.middleware("http")
     async def miniapp_safety(request, call_next):
-        if not request.url.path.startswith(("/api/miniapp", "/api/web-booking", "/api/auth", "/api/branding")):
+        if not request.url.path.startswith(("/api/miniapp", "/api/branding")):
             return await call_next(request)
         started = time.monotonic()
         # Bound raw multipart/JSON body before parsers can buffer arbitrary data.
