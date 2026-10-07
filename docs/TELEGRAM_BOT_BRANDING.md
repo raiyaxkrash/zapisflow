@@ -33,3 +33,11 @@ API редактора защищено owner-only, session, Origin, CSRF, tenan
 ## Проверки и ограничения
 
 Regression tests покрывают настройки двух tenants, default/custom welcome, escaping, manual/managed, SETUP_REQUIRED, deep link, старые callbacks, text FSM, menu ON/OFF, профиль и ошибки синхронизации. Реальный Telegram API используется только как mock в локальных тестах. Проверка отображения на настоящих Telegram iOS/Android/Desktop после разрешённого deployment остаётся ручным UAT.
+
+## Финальная проверка
+
+Актуальная регрессия и ручные ограничения: [MINIAPP_FINAL_QA.md](MINIAPP_FINAL_QA.md).
+Текстовая запись и системная Menu Button проверяются независимо; logo Mini App
+не означает автоматическое изменение profile photo Telegram. Для будущей выкатки
+использовать [deployment checklist](MINIAPP_DEPLOYMENT_CHECKLIST.md), без массовой
+синхронизации всех production bots. Telegram API/native отображение остаются UAT.

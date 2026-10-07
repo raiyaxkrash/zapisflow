@@ -90,3 +90,18 @@ Visual matrix локально `.artifacts/miniapp-redesign/phase-3/`: client/ma
 Перед commit: full pytest на fresh isolated PostgreSQL, frontend tests/builds, compileall, diff-check, browser visual/runtime check. Production deployment и Фаза 4 не выполняются.
 
 Итог: backend 775 passed, 0 failed, 0 skipped, 6 прежних warnings; Mini App 53 passed; marketing 23 passed; обе сборки/compileall/diff-check PASS. 68 final screenshots, 0 pageerrors/overflow и 0 axe violations на проверенных 34 screen/theme combinations 375px. Native browser dialog отдельно проверен: focus containment, Escape, возврат focus — PASS. Browser fixtures не заменяют реальные Telegram safe areas/keyboard/native UAT.
+
+## Финальная проверка редизайна
+
+Фазы 4–8 используют этот foundation; текущая архитектура описана в [miniapp.md](miniapp.md), результаты и ограничения — в [финальном QA](MINIAPP_FINAL_QA.md). Исторические числа сборки выше относятся к Фазе 3.
+
+При keyboard focus нельзя скрывать активный control под fixed bottom navigation.
+`html.scroll-padding-bottom` учитывает запас 90 px и максимальный Telegram/system
+safe-area inset. Не заменять его только padding страницы: такой padding не меняет
+область автоматической прокрутки при Tab. Проверка в реальном браузере:
+`miniapp/qa/keyboard-focus.js` (320/375/430/768, Light/Dark, safe bottom 34 px).
+Она использует отдельные network/Telegram fixtures и не добавляет auth bypass в приложение.
+
+Home/End календаря пропускают disabled даты; preview scrolling учитывает reduced
+motion. Master CSS загружается при переходе в управление. Native Telegram safe
+areas, software keyboard и VoiceOver/TalkBack остаются обязательным manual UAT.

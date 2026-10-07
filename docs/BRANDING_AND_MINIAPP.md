@@ -39,8 +39,16 @@ Backend — действующий workflow README с отдельной тес�
 
 Logo and cover are intentionally public business presentation assets. Public read access is not considered tenant data leakage. Mutation remains OWNER-only. Private user/business assets use separate authenticated delivery paths.
 
-Публичны: название бизнеса, tagline, публичное описание, logo/cover, акцент/тема, публичные контакты и метаданные видимости разделов. Чтение логотипа другого бизнеса по его публичному booking context — ожидаемое поведение, а не cross-tenant IDOR.
+Публичны: название бизнеса, tagline, публичное описание, logo/cover, акцент/тема, публичные контакты и метаданные видимости разделов. Чтение логотипа другого бизнеса по его публичному идентификатору бизнеса — ожидаемое поведение, а не cross-tenant IDOR.
 
 `GET /api/branding/{public_id}/assets/{kind}` принимает только UUID `public_id` и strict allowlist `logo|cover`. Он не предоставляет доступ к чекам, приватному портфолио, CRM, клиентским/внутренним файлам или произвольным путям. Контент — нормализованный server-side WebP, с `X-Content-Type-Options: nosniff`, без пользовательского имени файла. `Cache-Control: no-store` исключает устаревшие изображения после замены по тому же URL.
 
 Загрузка, удаление, сброс оформления и синхронизация Telegram требуют owner, соответствующий tenant session, Origin и CSRF. Подмена bot public ID в заголовке чужой сессии отклоняется. Приватное Mini App портфолио сохраняет authenticated API загрузку и Blob URL; его контракт отличается от публичных logo/cover.
+
+## Финальный QA и deployment
+
+См. [MINIAPP_FINAL_QA.md](MINIAPP_FINAL_QA.md) и
+[MINIAPP_DEPLOYMENT_CHECKLIST.md](MINIAPP_DEPLOYMENT_CHECKLIST.md).
+Website booking не является текущим каналом продукта. Публичный branding asset
+контекст относится к Telegram/Mini App бизнесу, а не к браузерному booking flow.
+Локальные visual/auth fixtures не заменяют реальный owner upload и Telegram profile UAT.

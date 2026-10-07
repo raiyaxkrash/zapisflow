@@ -38,10 +38,12 @@ ZapisFlow — сервис записи клиентов через Telegram. К
 
 ## Как работает
 
-У ZapisFlow есть три интерфейса:
+Рабочие интерфейсы ZapisFlow:
 
 - **Manager Bot** — регистрация пользователя, создание проектов, настройка проекта, подключение клиентского бота и управление подпиской.
 - **Client Bot** — отдельный бот проекта для записи и взаимодействия с его клиентами. Входящий webhook определяет tenant по связанному `BotInstance`, а не по данным кнопки или клиента.
+- **Telegram Mini App** — клиентская запись и мобильное рабочее пространство мастера поверх той же модели User/Appointment.
+- **Marketing Website** — информация о ZapisFlow и переход в Manager Bot; браузерная запись не предоставляется.
 - **Platform Admin** — административные разделы платформы внутри Manager Bot, закрытые отдельной авторизацией.
 
 Клиентская предоплата и SaaS-платёж — разные процессы. Клиентская предоплата относится к записи и оплачивается мастеру по его реквизитам; подтверждение чека выполняет мастер. SaaS-платёж относится к подписке владельца проекта на ZapisFlow и обрабатывается отдельно через YooKassa, если провайдер включён.
@@ -66,6 +68,8 @@ FastAPI webhook gateway
 
 FastAPI проверяет входящие webhook-запросы и маршрутизирует обновления. Для клиентских ботов `BotRegistry` разрешает `BotInstance`, допущенный политикой состояния (`ACTIVE` или предусмотренный кодом `SETUP_REQUIRED`), использует зашифрованный токен и создаёт/переиспользует runtime-бота. Отключённые экземпляры не обслуживаются. Dispatcher подключает роутеры клиентского интерфейса и панели проекта. PostgreSQL хранит бизнес-данные; Redis используется для FSM, дедупликации обновлений и уведомления экземпляров приложения об инвалидировании кэша.
 
+Mini App обращается к `/api/miniapp` через Caddy на том же origin. FastAPI проверяет Telegram initData и короткую tenant-scoped сессию, затем вызывает те же services/repositories. Маркетинговый сайт хранит только публичное описание продукта и не имеет отдельной модели записи.
+
 Отправка исходящих сообщений выполняется через **Telegram Outbox**: строка outbox и бизнес-изменение фиксируются в одной транзакции PostgreSQL, после чего фоновый worker отправляет сообщение. Это позволяет восстановить незавершённую доставку после сбоя. Telegram Bot API не поддерживает атомарную транзакцию с PostgreSQL, поэтому при сбое после принятия сообщения Telegram, но до фиксации `SENT`, уведомление может быть отправлено повторно. Бизнес-изменения защищаются отдельно идемпотентностью и ограничениями базы данных.
 
 ## Технологии
@@ -73,8 +77,8 @@ FastAPI проверяет входящие webhook-запросы и маршр
 | Компонент | Версия в конфигурации проекта |
 | --- | --- |
 | Python | 3.12 в Docker-образе; пакет заявляет совместимость с Python 3.11+ |
-| FastAPI / Uvicorn | `>=0.115.0` / `>=0.30.0` |
-| aiogram | `3.14.0` |
+| FastAPI / Uvicorn | `>=0.121.0` / `>=0.30.0` |
+| aiogram | `3.31.0` |
 | PostgreSQL / Redis | `16-alpine` / `7-alpine` |
 | SQLAlchemy / asyncpg | `2.0.35` / `0.29.0` |
 | Alembic | `1.13.3` |
@@ -100,6 +104,8 @@ app/
 └── web/             # FastAPI webhooks, health и billing pages
 alembic/             # миграции схемы
 deploy/caddy/        # конфигурация Caddy
+miniapp/             # Vite Mini App: клиент и мастер, same-origin API
+marketing/           # React/TypeScript landing, без браузерной записи
 tests/               # модульные и интеграционные тесты
 docker-compose.yml   # PostgreSQL, Redis, migrate, backend и Caddy
 Dockerfile
@@ -115,11 +121,12 @@ Dockerfile
 
 - Tenant для Client Bot берётся из server-side связи `BotInstance.master_id`; неизвестный или отключённый бот не должен обрабатываться как другой проект.
 - Запросы и административные действия ограничиваются `master_id` и ролевой авторизацией. Составные внешние ключи защищают ключевые связи между проектом, сотрудниками, услугами, записями и платежами.
-- Webhook Manager Bot проверяется секретным заголовком. Для клиентских ботов применяются проверки состояния и публичного идентификатора экземпляра.
+- Webhook Manager Bot проверяется секретным заголовком. Для клиентских ботов применяются секрет конкретного BotInstance, проверки состояния и публичного идентификатора экземпляра.
 - Токены пользовательских ботов хранятся в зашифрованном виде; `BOT_TOKEN_ENCRYPTION_KEY` и provider credentials должны поступать только из окружения/секретов.
 - Redis-дедупликация дополняется долговечным `ProcessedWebhookUpdate` в PostgreSQL; повторные бизнес-команды и платежи защищаются идемпотентностью и уникальными ограничениями.
 - Telegram Outbox хранит задачу доставки отдельно от plaintext bot token и разрешает BotInstance при отправке.
 - Сумма SaaS-платежа берётся из плана и локального платежа, затем сверяется с аутентифицированным ответом YooKassa. Webhook YooKassa служит сигналом для проверки через API провайдера, а не самостоятельным доказательством оплаты.
+- Mini App проверяет Telegram initData сервером, хранит хеши коротких сессий, сверяет tenant, Origin и CSRF; изменение оформления доступно только OWNER. Logo/cover нормализуются сервером и являются публичными изображениями бизнеса; чеки и private portfolio требуют авторизации.
 - В Manager Bot есть ограничение частоты на повторную проверку SaaS-платежа; это не следует считать глобальным rate limit всех действий пользователей.
 
 ## Подписки и оплата
@@ -168,6 +175,7 @@ Compose запускает PostgreSQL 16 и Redis 7 во внутренней с
 | Redis и BotRegistry | `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`, `BOT_REGISTRY_CACHE_MAX_SIZE`, `BOT_REGISTRY_CACHE_TTL_SECONDS`, `BOT_REGISTRY_INVALIDATION_CHANNEL` |
 | Входящие webhook | `DOMAIN`, `WEBHOOK_BASE_URL`, `WEBHOOK_HOST`, `WEBHOOK_PORT`, `WEBHOOK_MAX_BODY_BYTES`, `WEBHOOK_UPDATE_DEDUP_TTL` |
 | Шифрование | `BOT_TOKEN_ENCRYPTION_KEY` |
+| Telegram Mini App | `MINI_APP_BASE_URL`, `MINI_APP_DOMAIN`, `MINI_APP_SESSION_SECONDS`, `MINI_APP_AUTH_MAX_AGE_SECONDS` |
 | YooKassa и возврат | `PAYMENT_PROVIDER`, `PAYMENT_CURRENCY`, `YOOKASSA_MODE`, `YOOKASSA_ALLOW_TEST_IN_PRODUCTION`, `YOOKASSA_TEST_ALLOWED_TELEGRAM_IDS`, `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY`, `YOOKASSA_TEST_SHOP_ID`, `YOOKASSA_TEST_SECRET_KEY`, `YOOKASSA_RECONCILIATION_INTERVAL_SECONDS`, `BILLING_RETURN_URL`; домен Caddy: `BILLING_DOMAIN` |
 | Чек YooKassa | `YOOKASSA_FISCAL_MODE`, `YOOKASSA_RECEIPT_VAT_CODE`, `YOOKASSA_RECEIPT_PAYMENT_SUBJECT`, `YOOKASSA_RECEIPT_PAYMENT_MODE` |
 | Trial и расписание | `TRIAL_DURATION_DAYS`, `HOLD_DURATION_MINUTES`, `MIN_ADVANCE_HOURS`, `MAX_ADVANCE_DAYS`, `DEFAULT_BUFFER_MINUTES`, `GRID_STEP_MINUTES` |
@@ -194,9 +202,20 @@ docker compose run --rm migrate
 
 ## Тесты
 
+Backend integration suite требует отдельную disposable PostgreSQL и Redis через `TEST_DATABASE_URL` / `TEST_REDIS_URL`. Не указывайте production DB: миграционные тесты выполняют upgrade/downgrade.
+
 ```bash
 pytest -q
 python -m compileall app tests
+
+cd miniapp
+npm ci
+npm test
+npm run build
+cd ../marketing
+npm ci
+npm test
+npm run build
 ```
 
 Тесты покрывают tenant isolation и роли, webhook/дедупликацию, динамические боты и токены, запись и конкуренцию слотов, расписание, клиентские платежи, SaaS billing и YooKassa, CRM, рассылки, Outbox, Platform Admin, конфигурацию, Compose и миграции. Интеграционные проверки PostgreSQL-специфичного поведения требуют PostgreSQL; SQLite не заменяет проверки блокировок и ограничений PostgreSQL.
@@ -223,15 +242,13 @@ curl -fsS https://<ваш-api-домен>/health/ready
 
 `/health/live` проверяет, что приложение отвечает. `/health/ready` проверяет доступность PostgreSQL и Redis. URL зависит от `DOMAIN` и `WEBHOOK_BASE_URL` конкретного развёртывания.
 
-## Roadmap
+## Документация и проверка
 
-Актуальный план развития проекта: [ROADMAP.md](ROADMAP.md)
+Актуальная архитектура: [Telegram Mini App](docs/miniapp.md). Финальный QA и ограничения ручного UAT: [Redesign QA](docs/MINIAPP_FINAL_QA.md). Инструкция будущего deployment: [Deployment checklist](docs/MINIAPP_DEPLOYMENT_CHECKLIST.md).
 
 ## Telegram Mini App
 
-В репозитории есть единый клиентский и мастерский Mini App, использующий
-существующие сервисы и tenant-scoped API. Подключение выполняется явно;
-production deployment и реальный Telegram UAT требуют отдельной проверки.
+Единый клиентский и мастерский Mini App использует существующие сервисы и tenant-scoped API. Клиентская навигация: Главная, Записаться, Мои записи, Ещё. Мастерская: Сегодня, Календарь, Клиенты, Ещё. Есть календарь, ближайшее время, повторная запись с новой датой, ICS, CRM, услуги, команда, график, ручная предоплата, портфолио, рассылки и owner-only оформление с черновиком/предпросмотром. Подключение выполняется явно; production deployment и реальный Telegram UAT требуют отдельной проверки.
 Архитектура, конфигурация, API и сценарии проверки: [docs/miniapp.md](docs/miniapp.md).
 
 ## Support

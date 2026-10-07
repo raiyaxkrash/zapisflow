@@ -1,299 +1,167 @@
 # Telegram Mini App ZapisFlow
 
-Один мобильный frontend обслуживает все проекты по адресу
-`https://<miniapp-domain>/b/<BotInstance.public_id>`. Он использует существующие
-таблицы и сервисы ZapisFlow. Модуль подключается явно; production в рамках
-разработки не изменялся. Docker build и реальный Telegram UAT остаются отдельными
-обязательными проверками перед включением.
+Единый мобильный frontend обслуживает клиентский и мастерский режимы:
+`MINI_APP_BASE_URL/b/<BotInstance.public_id>`. Каналы текущего продукта —
+Telegram-бот, Telegram Mini App и маркетинговый сайт. Сайт не принимает записи;
+Web Booking и website Login/OIDC удалены ([совместимость старых ссылок](WEB_BOOKING_RETIREMENT.md)).
 
 ## Архитектура
 
 ```text
-Telegram WebApp SDK → единый Vite frontend
-                     → /api/miniapp на том же origin
-                     → FastAPI → доверенный BotInstance → Master
-                               → существующие domain services → PostgreSQL
-                               → Redis rate limits
-                               → Telegram Outbox / существующее хранение чеков
+Telegram chat → Caddy → FastAPI webhook → BotRegistry → aiogram/FSM
+Telegram Mini App → Caddy → same-origin /api/miniapp → session/tenant adapters
+                                                   ↓
+                      BookingService / SlotEngine / PaymentService / repositories
+                                                   ↓
+                               PostgreSQL + Redis + Telegram Outbox
+Marketing website → описание ZapisFlow → Manager Bot
 ```
 
-От прототипа сохранены визуальное оформление, карточки и светлая/чёрная темы.
-Демонстрационные студии, слоты и клиенты в рабочем frontend отсутствуют.
-Тестовые данные и подмены Telegram API находятся исключительно в tests.
+Mini App — Vite/JavaScript с разделением application shell, client/master views,
+API, theme, Telegram helpers и UI primitives. Тяжёлые мастерские экраны и их CSS,
+branding editor и ICS загружаются отдельно. Backend остаётся источником цены,
+длительности, доступности, прав, подписки и состояния записи.
 
-## Авторизация и tenant
+## Два независимых входа
 
-1. Frontend вызывает `Telegram.WebApp.ready()` и `expand()`, получает исходный
-   `initData`, viewport, safe area и изменения темы. `initDataUnsafe` не используется.
-2. `POST /api/miniapp/auth` принимает публичный UUID бота и исходный `init_data`.
-3. Backend проверяет current/status бота и проекта, расшифровывает токен только
-   на сервере и проверяет [официальный Telegram HMAC](https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app).
-   Допустимый возраст по умолчанию 300 секунд, отклонение в будущее — 30 секунд.
-   Дубли ключей и некорректные пользователи отклоняются.
-4. User и MasterClient определяются после проверки подписи. Права вычисляет
-   `MasterAuthorizationService`, а не frontend.
-5. Выдаётся случайная HTTP-only Secure cookie `__Host-zapisflow-miniapp` с
-   `SameSite=None`, path `/`, без Domain. В PostgreSQL хранятся только хеши
-   session/CSRF/initData credentials. Сессия действует 30 минут без автопродления.
-6. Повторное использование подписанного initData без той же действующей cookie
-   отклоняется. Изменение URL-кодирования или порядка полей не обходит защиту.
-   При повторной авторизации действующей сессии CSRF меняется.
-7. Каждый API-запрос включает `X-MiniApp-Bot` открытой страницы. Backend сверяет
-   его с ботом сессии; cookie другой вкладки/проекта не переключает tenant молча.
-8. Все mutations требуют точного Origin, CSRF и UUID `Idempotency-Key`.
-   При каждом запросе заново проверяются статус бота, версия токена и роль.
-   Redis outage приводит к безопасному отказу, а не обходу защиты.
+- **Кнопка сообщения «Записаться»** использует `menu:book` и существующий
+  текстовый FSM. У неё нет `web_app`; Mini App не является зависимостью записи.
+- **Системная Menu Button «ZapisFlow»** использует `MenuButtonWebApp` и
+  `MINI_APP_BASE_URL/b/<public_id>` при включённом Mini App и валидном base URL.
+  При OFF/пустом URL используется `MenuButtonCommands`.
+- `mini_app_enabled=false` закрывает Mini App API (`403 MINI_APP_DISABLED`),
+  включая старые сессии, и не отключает текстовую запись.
 
-Клиент видит свои записи. OWNER/ADMIN управляют текущим проектом. STAFF видит
-только свои записи и связанные с ними чеки; CRM, настройки и решения по платежам
-доступны OWNER/ADMIN. SaaS billing и Platform Admin в Mini App не добавлялись.
+## Клиентский интерфейс
 
-## Подключённые сценарии
+Навигация: **Главная → Записаться → Мои записи → Ещё**.
 
-**Клиент:** реальные контакты/описание проекта, активные услуги, подходящие
-специалисты или «Любой», серверные слоты, временный резерв, телефон и согласие
-с условиями, подтверждение, свои записи, продолжение незавершённого резерва,
-отмена, реквизиты и загрузка чека.
+Главная показывает бизнес, доступные услуги, записи и настроенные разделы.
+Запись: услуга → сотрудник/«Любой» → серверный календарь → слот → телефон и
+условия → резерв/подтверждение → success или ручная предоплата. Слот повторно
+проверяется сервером; при конфликте клиент возвращается к выбору времени.
+Ближайшее время вычисляет SlotEngine. Повторная запись переносит только выбор
+услуги/сотрудника и требует новую дату. ICS не требует внешнего аккаунта.
 
-**Управление:** расписание выбранного дня, карточка записи, чек и решение
-по предоплате, ручная запись существующего клиента с необязательным телефоном,
-поиск клиентов, история/заметки, создание и изменение услуг, предоплата,
-контакты/реквизиты/горизонт записи, сотрудники и привязка услуг,
-недельное расписание, перерывы, отдельные рабочие дни и выходные сотрудника.
+Мои записи разделены на предстоящие/прошедшие, имеют детали, разрешённую policy
+отмену и продолжение незавершённого резерва. Портфолио, отзывы, контакты и
+информация о бизнесе показывают реальные данные и учитывают видимость разделов.
 
-Новый staff/invite и новый клиент для ручной записи создаются через существующую
-Telegram-админку. Общие date overrides проекта отображаются в расписании, но
-меняются через Telegram-админку; Mini App редактирует overrides сотрудника.
-Branding использует реальные название и описание; отдельной модели logo нет.
-Портфолио, отзывы и рассылки сохраняются в Telegram-интерфейсе, отдельные экраны
-для них в этом модуле не добавлялись.
+## Рабочее пространство мастера
 
-Телефон хранится в существующем `User.phone`, а CRM notes — в tenant-scoped
-`MasterClient.notes`. Новая параллельная модель профиля не создавалась.
-Списки ограничены: клиентские записи/CRM — 100, дневное расписание — 200.
+Навигация: **Сегодня → Календарь → Клиенты → Ещё**.
 
-## Booking, транзакции и доставка
+Дневные записи и карточка, ручная запись существующего клиента, CRM
+поиск/история/заметки, услуги, сотрудники/привязка услуг, недельный график,
+перерывы и отдельные даты сотрудника. Изменение графика предупреждает об
+имеющихся записях и не удаляет их. Также доступны проверки предоплаты,
+портфолио, отзывы, рассылки, аналитика, системные настройки и owner-only оформление.
 
-`SlotEngine` вычисляет доступность с учётом timezone проекта, staff, horizon,
-buffer, перерывов и overrides. Цена, длительность и депозит берутся из Service
-в PostgreSQL. Поля tenant/user/price/status из frontend не принимаются.
+Новый клиент и приглашение сотрудника создаются через существующий Telegram
+интерфейс; Mini App не добавляет отдельную invite subsystem. STAFF видит
+разрешённые данные своего расписания; CRM/settings/payment decisions доступны
+OWNER/ADMIN. Оформление и профиль бота меняет OWNER. SaaS billing и Platform
+Admin остаются в Manager Bot.
 
-`BookingService.create_hold_booking(reserve_only=True)` резервирует слот до
-подтверждения, включая услуги без депозита. Старое поведение Telegram handlers
-сохранено по умолчанию. `confirm_reserved_booking` проверяет право на запись,
-пользователя, статус и срок резерва; нулевой депозит подтверждается без Payment.
-Положительный депозит использует существующий Payment/PaymentProof flow.
-Без обязательных реквизитов создание резерва отклоняется с rollback.
-Согласие записывается в Appointment и audit с текущим cancel_policy_hours.
+## Оформление
 
-Владелец HTTP-транзакции — function-scope dependency FastAPI. Business mutation,
-audit, Outbox и `MiniAppOperation` response ledger фиксируются одним commit
-**до отправки HTTP-ответа**. Ошибка до commit откатывает все DB mutations.
-Повтор того же ключа/запроса возвращает прежний результат; другой запрос с тем же
-ключом отклоняется. Защита от конкуренции: locks существующей BookingService,
-PostgreSQL exclusion constraint и UNIQUE scoped operation key.
+`MasterSettings.branding` и `MasterBrandAsset` относятся к проекту. Mini App и
+клиентский бот используют один бренд. Редактор поддерживает название, tagline,
+описание, приветствие, CTA, accent, theme/preset, видимость разделов, logo/cover,
+контакты и reset. Черновик и live preview не публикуются до Save.
 
-Повтор после потери HTTP-ответа не создаёт второй business effect. Frontend
-сохраняет ключ незавершённого запроса в памяти и предлагает повторить действие.
-Уведомления идут через существующий transactional Telegram Outbox.
-Telegram delivery остаётся **at-least-once**: crash между приёмом сообщения
-Telegram и фиксацией SENT может дать повторное уведомление.
+Logo/cover: PNG/JPEG/WebP, исходник до 4 MiB и 16 MP, серверная нормализация WebP,
+максимум 320×320 и 1200×600. SVG/HTML/CSS/JS и пользовательские шрифты запрещены.
+Logo/cover являются намеренно публичными изображениями бизнеса; private
+portfolio/чеки/CRM остаются авторизованными. `Работает на ZapisFlow` не скрывается.
 
-## Два платёжных домена
+[Редактор](MINIAPP_BRANDING_EDITOR.md) · [Модель и безопасность](BRANDING_AND_MINIAPP.md)
+· [Telegram-профиль](TELEGRAM_BOT_BRANDING.md).
 
-**Клиентская предоплата:** Appointment → Payment → реквизиты → изображение чека
-→ SUBMITTED → OWNER/ADMIN approve/reject через существующий PaymentService.
-JPEG/PNG до 8 МБ декодируется, проверяется и перекодируется в JPEG; имя файла
-фиксированное, метаданные/посторонние байты удаляются. Размер и число пикселей
-ограничены. PDF/исполняемые файлы не принимаются.
+## Авторизация и безопасность
 
-Файл передаётся в тот же клиентский Telegram-чат через BotRegistry; БД хранит
-существующие Telegram file IDs. Доступ к загрузке/скачиванию проверяется по
-tenant и пользователю/назначенному staff. Raw token и Telegram file URL в API
-не выдаются. Crash после sendDocument до commit может оставить лишнее медиа
-в Telegram; DB не получает двойную запись/платёж. Обычный повтор одного
-idempotency key не загружает файл второй раз.
+Frontend передаёт исходный `Telegram.WebApp.initData`, не доверяет
+`initDataUnsafe`. Backend проверяет подпись токеном конкретного бота, возраст,
+формат identity, replay и состояние проекта/бота. Один Telegram ID соответствует
+существующему User; новая модель пользователей Mini App не создаётся.
 
-**SaaS billing:** существующая подписка ZapisFlow/YooKassa не изменялась.
-У клиентского Payment сейчас нет online acquiring adapter, поэтому backend
-возвращает `online_payment_available=false`, не выдаёт фиктивную checkout URL
-и не показывает неработающую кнопку. Mini App не связан с названием provider.
+Cookie `__Host-zapisflow-miniapp`: Secure, HttpOnly, SameSite=None, path=/, без
+Domain. PostgreSQL хранит хеши коротких session/CSRF/initData credentials.
+Сессия по умолчанию 1800 секунд, initData — 300 секунд. Повторная авторизация
+действующей сессии меняет CSRF; token rotation, expiry и disable закрывают доступ.
+Каждый запрос сверяет `X-MiniApp-Bot` с серверной сессией.
+
+Mutations требуют точный Origin, CSRF и UUID Idempotency-Key. Авторизация
+вычисляется сервером, entity IDs проверяются внутри tenant. Business mutation,
+audit, Outbox и MiniAppOperation фиксируются единой DB-транзакцией до ответа.
+Повтор ключа возвращает прежний результат; изменённый payload отклоняется.
+BookingService locks и PostgreSQL exclusion constraint защищают слот.
+
+Telegram Outbox — at-least-once: сбой между доставкой и фиксацией SENT может
+дублировать сообщение, но не должен повторять бизнес-операцию. Raw tokens,
+initData, cookies и CSRF не включаются в пользовательские ответы/логи.
+
+## Платежи
+
+**Клиент → мастер:** существующие Appointment/Payment/PaymentProof, реквизиты,
+загрузка JPEG/PNG чека до 8 MiB, серверное декодирование/перекодирование и проверка
+OWNER/ADMIN. Online acquiring клиента не добавлен; фиктивных payment links нет.
+**Владелец → ZapisFlow:** существующая SaaS подписка/YooKassa через Manager Bot.
+Эти домены не объединяются.
 
 ## API
 
-Все пути имеют префикс `/api/miniapp`. Входы используют строгие Pydantic
-allow-lists; основные service/staff/slot/appointment ответы имеют OpenAPI schemas.
+Примеры текущих транспортных адаптеров (не отдельная booking system):
 
-| Методы и пути | Назначение |
-|---|---|
-| POST `/auth`, GET `/context` | Авторизация, проект и capabilities |
-| GET `/client/services`, `/client/staff`, `/client/slots` | Выбор и доступность |
-| POST `/client/holds`, `/client/appointments` | Резерв и подтверждение |
-| GET `/client/appointments` | Собственные записи |
-| POST `/client/appointments/{id}/cancel` | Отмена |
-| GET `/client/appointments/{id}/payment` | Реквизиты и статус |
-| POST `/client/appointments/{id}/proof` | Multipart JPEG/PNG |
-| GET `/proofs/{id}` | Защищённое скачивание |
-| GET `/master/appointments`, `/master/appointments/{id}` | Расписание/карточка |
-| POST `/master/appointments`, `/master/payments/{id}/decision` | Ручная запись/решение |
-| GET `/master/clients`, GET/PATCH `/master/clients/{id}` | CRM |
-| GET/PATCH `/master/settings` | Настройки |
-| GET/POST `/master/services`, PUT `/master/services/{id}` | Услуги |
-| GET `/master/staff`, PUT `/master/staff/{id}` | Команда/услуги |
-| GET/PUT `/master/schedule` | Расписание и overrides |
+| Пути | Назначение |
+| --- | --- |
+| `/api/miniapp/auth`, `/context` | Вход и доверенный контекст |
+| `/client/services`, `/client/staff`, `/client/availability/calendar`, `/client/slots`, `/client/availability/nearest` | Каталог/доступность |
+| `/client/holds`, `/client/appointments` | Резерв, подтверждение и записи |
+| `/client/appointments/{id}/cancel`, `/payment`, `/proof` | Отмена и предоплата |
+| `/master/appointments`, `/master/clients`, `/master/services`, `/master/staff` | Рабочие данные |
+| `/master/schedule`, `/master/schedule/calendar`, `/master/settings` | График и настройки |
+| `/master/payments`, `/master/portfolio`, `/client/reviews`, `/master/broadcasts`, `/master/analytics` | Рабочие разделы |
+| `/master/branding`, `/save`, `/reset`, `/assets/{kind}`, `/sync-telegram` | Owner-only оформление (полный prefix: `/api/miniapp/master/branding`) |
+| `/api/branding/{public_id}/assets/{kind}` | Публичные logo/cover |
 
-## Миграция
+Остальные строки таблицы имеют prefix `/api/miniapp`. Точные методы и схемы —
+в `app/web/miniapp.py` / `app/web/branding.py`; suffix `/payment` относится к
+конкретной записи, а не к SaaS billing.
 
-Новая `2026_10_03_0025` после 0024 добавляет только `miniapp_sessions` и
-`miniapp_operations`, FK, expiry index и UNIQUE ограничения. Старые миграции
-и финансовые/booking данные не переписываются. Full test использует настоящие
-PostgreSQL locks, отдельные sessions и fresh migrated disposable Mini App DB.
+## Темы и Telegram UX
 
-## Настройка и сборка
+System/Light/Dark без reload; System учитывает Telegram colorScheme, вне
+Telegram — prefers-color-scheme. Brand accent получает безопасный foreground,
+hover/active/soft/focus tokens. Telegram bridge обслуживает BackButton, chrome,
+viewport/safe areas и haptics. Приложение учитывает reduced motion, keyboard,
+labels и semantic forms. [Дизайн-система](MINIAPP_DESIGN_SYSTEM.md).
 
-Ниже подготовленные команды для тестового/будущего окружения — это не отчёт
-о выполненном production deployment.
-
-```dotenv
-MINI_APP_BASE_URL=https://app.example.com
-MINI_APP_DOMAIN=app.example.com
-MINI_APP_SESSION_SECONDS=1800
-MINI_APP_AUTH_MAX_AGE_SECONDS=300
-```
-
-`MINI_APP_BASE_URL` по умолчанию пуст: прежний Telegram booking flow сохраняется.
-При включении `/start` создаёт кнопку «Записаться» с WebApp URL конкретного
-BotInstance. Managed provisioning также настраивает menu button. Устаревший
-`MINI_APP_URL` не используется новым tenant-scoped интерфейсом.
-Bot token/encryption key/DB/Redis secrets остаются в серверном environment.
+## Локальная проверка
 
 ```sh
 cd miniapp
 npm ci
 npm test
 npm run build
+npm run dev
 ```
 
-`npm run dev` доступен для разработки, но реальный вход требует Telegram,
-подписанного initData, HTTPS origin и проксирования API на том же host.
-Production frontend не содержит dev-login или mock fallback.
+Реальный вход требует Telegram, подписанного initData, HTTPS и same-origin API.
+Production auth bypass отсутствует. Browser QA подменяет сеть/Telegram только
+в локальном harness; это не реальный Telegram UAT.
 
-```sh
-docker compose -f docker-compose.yml -f deploy/miniapp/compose.yml config -q
-docker compose -f docker-compose.yml -f deploy/miniapp/compose.yml build
-docker compose -f docker-compose.yml -f deploy/miniapp/compose.yml run --rm migrate
-docker compose -f docker-compose.yml -f deploy/miniapp/compose.yml up -d
-```
+Backend suite: `pytest -q` с отдельными disposable PostgreSQL/Redis через
+`TEST_DATABASE_URL`/`TEST_REDIS_URL`. Миграционные тесты меняют схему: никогда
+не используйте production или базу с нужными данными.
 
-Overlay добавляет один внутренний static container. Caddy обслуживает новый app
-host и same-origin API, не меняя основной сайт. CSP разрешает только свои assets
-и официальный Telegram SDK; auth API не пишется в access log. Cookie/CSRF/auth
-headers исключены из proxy error logs. Нужны DNS/TLS и настройка Mini App в
-BotFather для соответствующих ботов. До Docker/UAT включать production не нужно.
+## Схема и deployment
 
-## Проверки и ручной UAT
+`0025`: MiniAppSession/MiniAppOperation; `0026`: switch; `0029`: branding и assets.
+Применённая история не переписывается; одна head `2026_10_05_0029`.
+Новых secrets/volumes для branding не требуется, изображения хранятся в БД.
+`MINI_APP_BASE_URL` по умолчанию пуст; остальные настройки — в `.env.example`.
 
-```sh
-pytest -q
-python -m compileall app tests
-git diff --check
-```
-
-Для полного suite нужны `TEST_DATABASE_URL` отдельной PostgreSQL БД и
-`TEST_REDIS_URL` отдельного Redis DB. Mini App tests требуют права CREATE DATABASE
-на тестовом PostgreSQL и создают/удаляют случайную disposable БД. Никогда не
-передавайте production connections в тесты.
-
-Ручная проверка после отдельного разрешённого тестового deployment:
-
-1. На двух разных ботов: `/start` → «Записаться» → Mini App. Проверить собственные
-   названия/услуги и невозможность подменить UUID/cookie на другой проект.
-2. Клиент: услуга → staff/любой → дата → слот → телефон/согласие → подтверждение
-   → «Мои записи» → отмена. Одновременно занять один слот двумя клиентами:
-   одна запись, второму понятный конфликт. Денег не переводить.
-3. Предоплата: тестовая услуга с депозитом → реквизиты → JPEG/PNG чек → управление
-   → скачать → approve/reject → проверить оба статуса и отсутствие дублей.
-4. Мастер: расписание → карточка → CRM notes → ручная запись существующего
-   клиента → service edit → staff services → отдельный день/выходной/перерыв
-   → horizon 14 → проверить клиентские слоты.
-5. Безопасность: обычный клиент не получает Master Mode, STAFF не меняет CRM/
-   настройки/payment decision, чужие entity IDs дают отказ, invalid/stale
-   initData и CSRF отклоняются, token rotation/disable закрывает старую сессию.
-6. На Telegram Android/iOS/Desktop: светлая/чёрная/System, themeChanged,
-   клавиатура, safe areas, BackButton, загрузка чека, offline/retry и истёкшая
-   сессия. Для Telegram Web требуется возможность использования Secure cookie
-   внутри WebView; при блокировке cookie авторизация завершится отказом.
-
-Проверки реального Telegram UI, fresh Docker images и production deployment
-в этой реализации **не выполнены**. Они обязательны до заявления о готовности.
-
-### Результаты проверки 04.10.2026
-
-| Проверка | Результат |
-|---|---|
-| Backend Mini App targeted | 33 passed, 0 failed |
-| Из них настоящая PostgreSQL integration/concurrency | 24 passed |
-| Security subset этих тестов | 22 passed, 11 deselected |
-| Frontend unit/DOM flows | 18 passed, 0 failed |
-| Полный pytest | 626 passed, 0 failed, 0 skipped, 6 warnings |
-| compileall / diff whitespace / Ruff новых Python files | PASS |
-| Fresh npm ci + production build | PASS, JS 26.76 КБ, CSS 16.02 КБ |
-| Чистое Python virtualenv: requirements, pip check, backend imports | PASS |
-| Alembic fresh disposable DB / current / single head | PASS, 0025 |
-| Compose overlay config с тестовыми переменными | PASS, standalone Compose CLI |
-| Оба Caddyfile | Valid configuration, Caddy 2.11.7 |
-| Fresh backend/Mini App Docker images | NOT VERIFIED: Docker engine отсутствует |
-| Настоящие Telegram Android/iOS/Desktop/Web | NOT VERIFIED: deployment не выполнялся |
-
-Security subset — часть 33 targeted, а не дополнительные 22 теста. Frontend DOM
-тесты подменяют HTTP ответы; backend integration использует настоящую PostgreSQL,
-но безопасные Telegram test doubles. Полный suite также использует отдельный
-локальный Redis 7.4.11. Шесть warnings относятся к существующим AsyncMock
-fixtures и transaction teardown тестам подключения ботов.
-
-Во время полного прогона также восстановлен пропущенный `raise` при ошибке
-provisioning и исправлены устаревшие test fixtures (`User.first_name`, тестовый
-crypto key, `BotIdentity.first_name`, managed `bot_id` и AsyncMock gateway).
-Скрытые ошибки подключения больше не возвращают `None` как успешный результат.
-
-## Изменённые файлы
-
-```text
-.dockerignore
-.env.example
-.gitignore
-README.md
-alembic/versions/2026_10_03_0025_miniapp_security.py
-app/bot/handlers/client/start.py
-app/bot/keyboards/client/menu.py
-app/config/settings.py
-app/database/models/__init__.py
-app/database/models/miniapp.py
-app/services/booking_service.py
-app/services/bot_provisioning_service.py
-app/services/miniapp_auth.py
-app/web/app.py
-app/web/miniapp.py
-app/web/miniapp_contracts.py
-deploy/miniapp/Caddyfile
-deploy/miniapp/compose.yml
-deploy/miniapp/gateway.Caddyfile
-docs/miniapp.md
-miniapp/Dockerfile
-miniapp/index.html
-miniapp/package-lock.json
-miniapp/package.json
-miniapp/src/api/client.js
-miniapp/src/app.js
-miniapp/src/style.css
-miniapp/src/telegram/bootstrap.js
-miniapp/src/theme/theme.js
-miniapp/src/ui.js
-miniapp/tests/core.test.js
-miniapp/tests/flows.test.js
-pyproject.toml
-requirements.txt
-tests/test_alembic_migrations.py
-tests/test_managed_bot_flow.py
-tests/test_miniapp.py
-```
+[Будущий deployment checklist](MINIAPP_DEPLOYMENT_CHECKLIST.md) ·
+[Финальный QA](MINIAPP_FINAL_QA.md). Deploy и native Telegram UAT в этой ветке
+не выполняются; локальные проверки не являются заявлением о production readiness.
