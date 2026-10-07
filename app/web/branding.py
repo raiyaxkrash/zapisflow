@@ -6,6 +6,10 @@ from typing import Literal
 from uuid import UUID
 
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommand, MenuButtonCommands, MenuButtonWebApp, WebAppInfo
+from app.config.settings import settings
+from app.config.url_validation import miniapp_origin
+from app.services.exceptions import BotRegistryError
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from sqlalchemy import select
 
@@ -160,11 +164,23 @@ async def sync_telegram(request: Request, c=shared.TENANT_CONTEXT):
         bot = await request.app.state.registry.get_by_instance_id(
             c.bot.id, session=c.session, expected_token_version=c.bot.token_version
         )
+        if bot is None:
+            raise OSError("Client bot unavailable")
         async with asyncio.timeout(10):
             await bot.set_my_name(name=brand["brand_name"][:64])
             await bot.set_my_description(description=brand["description"][:512])
             await bot.set_my_short_description(short_description=brand["tagline"][:120])
-    except (TelegramAPIError, TimeoutError, OSError):
+            await bot.set_my_commands(commands=[
+                BotCommand(command="start", description="Главное меню"),
+                BotCommand(command="cancel", description="Отменить текущее действие"),
+            ])
+            menu = MenuButtonCommands()
+            if c.bot.mini_app_enabled and settings.mini_app_base_url:
+                menu = MenuButtonWebApp(text="ZapisFlow", web_app=WebAppInfo(
+                    url=f"{miniapp_origin(settings.mini_app_base_url)}/b/{c.bot.public_id}"
+                ))
+            await bot.set_chat_menu_button(menu_button=menu)
+    except (TelegramAPIError, TimeoutError, OSError, BotRegistryError):
         # Desired brand is already stored. Explicit retry safely reconciles partial external updates.
         return {
             "ok": False,

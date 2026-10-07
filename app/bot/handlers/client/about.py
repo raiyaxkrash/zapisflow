@@ -15,6 +15,10 @@ from app.services.crm_service import MasterCrmService
 from app.services.master_contacts import contact_phone_e164, render_contacts
 from app.services.telegram_outbox import bound_bot_instance_id, enqueue_telegram_contact
 
+from app.bot.handlers.client.presentation import project_brand, section_available, brand_from_settings
+from app.database.models import Master
+from app.services.branding import branding_context
+
 router = Router(name="client_about")
 
 
@@ -25,45 +29,22 @@ async def cb_about_master(
     """
     Display 'About Me' master profile, experience and studio address.
     """
-    settings_repo = MasterSettingsRepository(session)
-    master_name = await settings_repo.get_value(master_id, "master_name", "Анастасия")
-    description = await settings_repo.get_value(
-        master_id,
-        "master_description",
-        "Сертифицированный мастер ногтевого сервиса и эстетики с опытом более 5 лет. "
-        "Использую только стерильные одноразовые расходники, премиальные материалы и современные техники.",
-    )
-    address = await settings_repo.get_value(master_id, "studio_address")
-    experience = await settings_repo.get_value(master_id, "master_experience", "5+ лет практики")
-
-    text = (
-        f"🌸 <b>О мастере — {html.escape(str(master_name))}</b>\n\n"
-        f"✨ <b>Опыт:</b> {html.escape(str(experience))}\n\n"
-        f"📝 <b>О себе:</b>\n{html.escape(str(description))}\n"
-    )
-    if address:
-        text += f"\n📍 <b>Адрес студии:</b>\n{html.escape(str(address))}\n"
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📅 Записаться",
-                    callback_data=MenuCallback(action="book").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="🖼 Портфолио",
-                    callback_data=MenuCallback(action="portfolio").pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🏠 В главное меню",
-                    callback_data=MenuCallback(action="main").pack(),
-                )
-            ],
-        ]
-    )
+    master = await session.get(Master, master_id)
+    brand = await branding_context(session, master) if master else None
+    text = "<b>О бизнесе</b>\n\n"
+    if brand:
+        text += html.escape(brand["brand_name"]) + "\n\n"
+        text += html.escape(brand["description"] or "Описание пока не добавлено")
+    else:
+        text += "Описание пока не добавлено"
+    rows = [[InlineKeyboardButton(
+        text="📅 " + (brand["booking_cta_label"] if brand else "Записаться"),
+        callback_data=MenuCallback(action="book").pack(),
+    )]]
+    if not brand or brand["show_portfolio"]:
+        rows[0].append(InlineKeyboardButton(text="🖼 Портфолио", callback_data=MenuCallback(action="portfolio").pack()))
+    rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data=MenuCallback(action="main").pack())])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
 
     if callback.message:
         if callback.message.photo:
@@ -79,8 +60,10 @@ async def cb_contact_master(
     callback: CallbackQuery, session: AsyncSession, master_id: int
 ) -> None:
     """Display the tenant's configured contacts without placeholder values."""
-    settings_repo = MasterSettingsRepository(session)
-    text, keyboard = render_contacts(await settings_repo.get_by_master_id(master_id))
+    config = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    if not await section_available(callback, session, master_id, "contacts", brand=brand_from_settings(config)):
+        return
+    text, keyboard = render_contacts(config)
 
     if callback.message:
         if callback.message.photo:
@@ -97,6 +80,8 @@ async def cb_contact_call(
 ) -> None:
     """Send a native Telegram contact card for the configured phone."""
     settings = await MasterSettingsRepository(session).get_by_master_id(master_id)
+    if not await section_available(callback, session, master_id, "contacts", brand=brand_from_settings(settings)):
+        return
     phone = contact_phone_e164(settings.studio_phone if settings else None)
     if not phone or not callback.message:
         await callback.answer("Телефон мастера недоступен", show_alert=True)
@@ -127,6 +112,9 @@ async def cb_client_reviews(
     callback: CallbackQuery, session: AsyncSession, master_id: int
 ) -> None:
     """Display master reviews and rating summary for clients."""
+    brand = await project_brand(session, master_id)
+    if not await section_available(callback, session, master_id, "reviews", brand=brand):
+        return
     crm_svc = MasterCrmService(session)
     summary = await crm_svc.get_reviews_summary(master_id, limit=5)
 
@@ -157,7 +145,7 @@ async def cb_client_reviews(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📅 Записаться",
+                    text="📅 " + brand["booking_cta_label"],
                     callback_data=MenuCallback(action="book").pack(),
                 ),
                 InlineKeyboardButton(

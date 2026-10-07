@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.client import (
     BookingActionCallback,
     get_cancel_upload_keyboard,
-    get_main_menu_keyboard,
 )
 from app.bot.states.client import ClientBookingSG
 from app.config.settings import settings
@@ -31,6 +30,8 @@ from app.services.telegram_outbox import (
     enqueue_telegram_photo,
 )
 from app.utils.formatters import format_datetime_ru, format_rub
+
+from app.bot.handlers.client.presentation import project_menu
 
 router = Router(name="client_payment")
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ async def msg_receive_proof(
     if not appointment_id:
         await message.answer(
             "Не удалось определить запись. Пожалуйста, откройте раздел «Мои записи».",
-            reply_markup=get_main_menu_keyboard(),
+            reply_markup=await project_menu(session, master_id),
         )
         await state.clear()
         return
@@ -230,6 +231,6 @@ async def cb_cancel_hold_booking(
     if callback.message:
         await callback.message.edit_text(
             text=text,
-            reply_markup=get_main_menu_keyboard(),
+            reply_markup=await project_menu(session, master_id),
         )
     await callback.answer()

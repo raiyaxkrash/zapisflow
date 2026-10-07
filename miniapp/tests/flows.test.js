@@ -56,6 +56,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
       calls.push(['mutate',path,body,method]);
       if(path==='/client/holds'&&slotTaken){slotTaken=false;const error=Error('Occupied');error.code='SLOT_TAKEN';throw error;}
       if(path==='/master/branding'){ctx.branding=body;ctx.project.name=body.brand_name;return body;}
+      if(path==='/master/branding/sync-telegram')return {ok:false,message:'Оформление сохранено. Повторите синхронизацию.'};
       if(path==='/master/branding/reset'){ctx.branding=null;ctx.project.name='Real studio';return {};}
       if(path.startsWith('/master/schedule/dates/')) { const date=path.split('/').at(-1);overrides.set(date,{...body,has_override:body.mode!=='weekly'});return {date,...body}; }
       if(path==='/client/holds' && failures-->0){const error=Error('Offline');error.code='NETWORK';throw error}
@@ -286,4 +287,15 @@ test('Master receipt download uses authenticated API transport rather than a bar
 
 test('Master free slot preselects a new manual booking and clearing an intent prevents stale selection',async()=>{
  const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','master-calendar');await h.click('nav','free-windows');await h.submit('free-form');assert.ok(h.calls.find(c=>c[1]?.includes('/master/free-windows?')));await h.click('free-slot',visit.start_time);assert.equal(h.root.querySelector('[name=time]').value,'10:00');assert.equal(h.root.querySelector('[name=service_id]').value,'1');await h.submit('manual-form');assert.ok(h.root.textContent.includes('Запись создана'));await h.click('nav','manual');assert.equal(h.root.querySelector('[name=date]').value,'2026-10-05');h.dom.window.close();
+});
+
+
+test('Telegram profile synchronization is explicit and does not publish the local branding draft',async()=>{
+ const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','settings');await h.click('nav','branding');
+ h.root.querySelector('[name=brand_name]').value='Unsaved name';
+ await h.click('sync-brand');
+ assert.ok(h.calls.some(c=>c[0]==='mutate'&&c[1]==='/master/branding/sync-telegram'));
+ assert.ok(!h.calls.some(c=>c[0]==='saveBranding'));
+ assert.ok(h.root.textContent.includes('Повторите синхронизацию'));
+ assert.equal(h.root.querySelector('[name=brand_name]').value,'Unsaved name');
 });

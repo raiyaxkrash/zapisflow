@@ -152,6 +152,6 @@ export function editor(
       )
       .join(
         "",
-      )}</details><p id="brand-draft-status" role="status">Изменения ещё не сохранены</p><button class="primary">Сохранить оформление</button></form>${b("Вернуть стандартное оформление", "reset-brand", "", "link")}`
+      )}</details><p id="brand-draft-status" role="status">Изменения ещё не сохранены</p><button class="primary">Сохранить оформление</button></form>${b("Обновить профиль Telegram", "sync-brand", "", "secondary")}<p class="hint">Сначала сохраните оформление. Обновляется имя и описание клиентского бота. Фото и username автоматически не меняются.</p>${b("Вернуть стандартное оформление", "reset-brand", "", "link")}`
   );
 }

@@ -32,27 +32,23 @@ def get_main_menu_keyboard(
             callback_data=MenuCallback(action="my_bookings").pack(),
         )
     ]
+    row_2.append(InlineKeyboardButton(text="💰 Услуги и цены", callback_data=MenuCallback(action="services").pack()))
+    builder.row(*row_2)
+    service_row = []
     if has_portfolio:
-        row_2.append(
+        service_row.append(
             InlineKeyboardButton(
                 text="🖼 Портфолио",
                 callback_data=MenuCallback(action="portfolio").pack(),
             )
         )
-    builder.row(*row_2)
-
-    service_row = [
-        InlineKeyboardButton(
-            text="💰 Услуги и цены",
-            callback_data=MenuCallback(action="services").pack(),
-        ),
-    ]
     if has_contacts:
         service_row.append(InlineKeyboardButton(
             text="📍 Контакты",
             callback_data=MenuCallback(action="contact").pack(),
         ))
-    builder.row(*service_row)
+    if service_row:
+        builder.row(*service_row)
 
     row_4 = []
     if has_reviews:
@@ -64,7 +60,7 @@ def get_main_menu_keyboard(
         )
     row_4.append(
         InlineKeyboardButton(
-            text="👤 Обо мне",
+            text="👤 О бизнесе",
             callback_data=MenuCallback(action="about").pack(),
         )
     )

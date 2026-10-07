@@ -16,7 +16,6 @@ from app.bot.keyboards.client import (
     MenuCallback,
     build_inline_calendar,
     get_appointment_detail_keyboard,
-    get_main_menu_keyboard,
     get_my_appointments_keyboard,
     get_payment_screen_keyboard,
     get_review_rating_keyboard,
@@ -35,6 +34,8 @@ from app.services.booking_service import BookingService
 from app.services.crm_service import MasterCrmService
 from app.services.slot_engine import SlotEngine
 from app.utils.formatters import format_duration, format_rub, render_appointment_card
+
+from app.bot.handlers.client.presentation import project_menu
 
 router = Router(name="client_my_appointments")
 
@@ -158,7 +159,7 @@ async def cb_client_cancel(
         text = f"Не удалось отменить запись: {e}"
 
     if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=get_main_menu_keyboard())
+        await callback.message.edit_text(text=text, reply_markup=await project_menu(session, master_id))
     await callback.answer()
 
 
@@ -325,7 +326,7 @@ async def cb_review_skip_comment(
         text = f"Не удалось сохранить отзыв: {exc}"
 
     if callback.message:
-        await callback.message.edit_text(text=text, reply_markup=get_main_menu_keyboard())
+        await callback.message.edit_text(text=text, reply_markup=await project_menu(session, master_id))
     await callback.answer()
 
 
@@ -340,7 +341,7 @@ async def msg_review_save_comment(
     await state.clear()
 
     if not app_id or not rating:
-        await message.answer("Сессия истекла.", reply_markup=get_main_menu_keyboard())
+        await message.answer("Сессия истекла.", reply_markup=await project_menu(session, master_id))
         return
 
     comment_text = (message.text or "").strip()
@@ -360,4 +361,4 @@ async def msg_review_save_comment(
     except Exception as exc:
         text = f"Не удалось сохранить отзыв: {exc}"
 
-    await message.answer(text, reply_markup=get_main_menu_keyboard())
+    await message.answer(text, reply_markup=await project_menu(session, master_id))

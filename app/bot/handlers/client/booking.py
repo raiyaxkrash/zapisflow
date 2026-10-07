@@ -24,7 +24,6 @@ from app.bot.keyboards.client import (
     TimeSlotCallback,
     build_inline_calendar,
     build_time_slots_keyboard,
-    get_main_menu_keyboard,
     get_payment_screen_keyboard,
     get_phone_request_keyboard,
     get_policy_agreement_keyboard,
@@ -61,6 +60,8 @@ from app.utils.formatters import (
     format_duration,
     format_rub,
 )
+
+from app.bot.handlers.client.presentation import project_menu
 
 router = Router(name="client_booking")
 logger = logging.getLogger("app.bot.handlers.client.booking")
@@ -539,7 +540,7 @@ async def msg_receive_phone(
     if not service_id or not slot_ts:
         await message.answer(
             "Время ожидания истекло. Пожалуйста, начните запись заново через меню.",
-            reply_markup=get_main_menu_keyboard(),
+            reply_markup=await project_menu(session, master_id),
         )
         await state.clear()
         return
@@ -589,7 +590,8 @@ async def msg_receive_phone(
 
 @router.callback_query(BookingActionCallback.filter(F.action == "cancel_policy"))
 async def cb_cancel_policy(
-    callback: CallbackQuery, state: FSMContext, is_admin: bool
+    callback: CallbackQuery, state: FSMContext, is_admin: bool,
+    session: AsyncSession, master_id: int
 ) -> None:
     """
     Cancel booking on policy screen.
@@ -598,7 +600,7 @@ async def cb_cancel_policy(
     if callback.message:
         await callback.message.edit_text(
             "Запись отменена ↩️ Вы вернулись в главное меню.",
-            reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+            reply_markup=await project_menu(session, master_id, is_admin),
         )
     await callback.answer()
 
@@ -735,7 +737,7 @@ async def cb_agree_policy(
                 chat_id=callback.message.chat.id,
                 message_id=callback.message.message_id,
                 text=text,
-                reply_markup=get_main_menu_keyboard(is_admin=False),
+                reply_markup=await project_menu(session, master_id),
                 idempotency_key=confirmation_key or f"appointment:{appointment.id}:confirmation-screen",
             )
         else:
@@ -745,7 +747,7 @@ async def cb_agree_policy(
                 bot_instance_id=bot_instance_id,
                 chat_id=callback.from_user.id,
                 text=text,
-                reply_markup=get_main_menu_keyboard(is_admin=False),
+                reply_markup=await project_menu(session, master_id),
                 idempotency_key=f"appointment:{appointment.id}:confirmation-screen",
             )
         session.info.setdefault("post_commit", []).append(

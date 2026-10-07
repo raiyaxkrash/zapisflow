@@ -8,7 +8,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.keyboards.client.callbacks import MenuCallback, ServiceCallback
 from app.database.models.service import Service
-from app.utils.formatters import format_rub
+from app.utils.formatters import format_rub, format_duration
 
 
 def get_services_list_keyboard(
@@ -21,7 +21,7 @@ def get_services_list_keyboard(
 
     for svc in services:
         action = "select" if is_booking_flow else "view"
-        btn_text = f"{svc.title} — {format_rub(svc.price)}"
+        btn_text = f"{svc.title} — {format_rub(svc.price)} · {format_duration(svc.duration_min)}"
         builder.row(
             InlineKeyboardButton(
                 text=btn_text,

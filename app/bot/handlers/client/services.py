@@ -2,6 +2,8 @@
 Services catalog and details handlers.
 """
 
+import html
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
@@ -69,10 +71,10 @@ async def cb_service_view(
     else:
         dep_str = format_rub(service.deposit_value)
 
-    desc = f"\n\n<i>{service.description}</i>" if service.description else ""
+    desc = f"\n\n<i>{html.escape(service.description)}</i>" if service.description else ""
 
     text = (
-        f"🌸 <b>{service.title}</b>{desc}\n\n"
+        f"🌸 <b>{html.escape(service.title)}</b>{desc}\n\n"
         f"⏳ <b>Длительность:</b> {dur_str}\n"
         f"💰 <b>Стоимость:</b> {price_str}\n"
         f"💳 <b>Предоплата:</b> {dep_str}\n\n"
