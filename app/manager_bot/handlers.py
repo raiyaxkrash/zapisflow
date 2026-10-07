@@ -248,9 +248,8 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession) 
         token_plain = parts[1][4:]
         staff_repo = StaffRepository(session)
         staff = await staff_repo.claim_invite_token_atomic(
-            token_plain=token_plain,
+            raw_token=token_plain,
             user_id=user.id,
-            user_telegram_id=user.telegram_id,
         )
         if staff:
             master = await master_repo.get_by_id(staff.master_id)
