@@ -38,11 +38,15 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
         const days=Array.from({length:new Date(Date.UTC(year,month,0)).getUTCDate()},(_,i)=>{const date=`${year}-${String(month).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`;return {date,available:date>=ctx.today&&date<=maxDate,reason:date<ctx.today?'past':'horizon',mode:'weekly',has_override:false,scope:'staff',breaks:[],appointment_count:0,...overrides.get(date)}});
         return {year,month,today:ctx.today,min_date:ctx.today,max_date:maxDate,days};
       }
+      if(path.includes('/master/free-windows'))return {slots:[visit.start_time]};
       if(path.includes('/slots'))return {slots:[visit.start_time]};
       if(path.endsWith('/payment'))return {appointment:current,requisites:{bank_name:'Bank',bank_card_number:'Test',bank_recipient_name:'Master'}};
       if(path.includes('/appointments/'))return {...current,client:'Client'};
       if(path.includes('/appointments'))return [current];
       if(path.includes('/clients/'))return {id:3,name:'Client',notes:'',total_bookings:1,total_spent:'499',history:[current]};
+      if(path==='/master/payments')return [current];
+      if(path==='/master/broadcasts'||path==='/master/portfolio')return [];
+      if(path==='/master/analytics')return {total:1,completed:0,unique_clients:1,revenue:'0',top_services:[]};
       if(path.includes('/clients'))return [{id:3,name:'Client'}];
       if(path.includes('/schedule'))return {weekly:[],dates:[]};
       if(path.includes('/settings'))return {};
@@ -59,6 +63,7 @@ async function harness({owner=false,networkFailures=0,deposit='0',authFailure=fa
       if(path.endsWith('/cancel'))current={...current,status:'CANCELLED_BY_CLIENT',cancel_allowed:false};
       return current;
     }
+    async image(path){calls.push(['image',path]);return new dom.window.Blob(['receipt'],{type:'application/octet-stream'});}
     async upload(path,file,progress){calls.push(['upload',path,file.type]);progress(100);current={...current,status:'PAYMENT_PROOF_SENT',payment:[{id:9,status:'SUBMITTED',amount:deposit,proofs:[{id:11}]}]};return {appointment:current}}
   }
   Object.assign(dom.window,{ClientViews,bindPortfolioMedia,Api,...calendar,...ui, appShell, bookingSummary, createNavigation, backDestination, createTelegramBridge: tg => createTelegramBridge(tg,dom.window), calendarKeys, Skeleton, ErrorState,e:ui.escape,b:ui.button,f:ui.field,
@@ -262,4 +267,22 @@ test("Repeat after confirmation discards the previous hold and creates a new res
     2,
   );
   h.dom.window.close();
+});
+
+test('Master workspace links today, CRM, services, team and payment filters to real API actions',async()=>{
+ const h=await harness({owner:true,deposit:'50'});await h.click('mode','master');assert.ok(h.root.querySelector('[data-id="payments"]'));await h.click('nav','payments');assert.ok(h.root.textContent.includes('Нет оплат для проверки'));await h.click('payment-filter','all');await h.click('appointment',7);assert.ok(h.root.querySelector('.master-facts'));
+ await h.click('nav','settings');await h.click('nav','manage-services');await h.click('service-active',1);assert.ok(h.calls.find(c=>c[0]==='mutate'&&c[1]==='/master/services/1'&&c[2].is_active===false));await h.click('nav','settings');await h.click('nav','team');await h.click('staff-edit',2);assert.ok(h.root.querySelector('#staff-form'));await h.click('nav','settings');await h.click('nav','analytics');assert.ok(h.root.textContent.includes('Стоимость завершённых услуг'));h.dom.window.close();
+});
+test('Master weekly editing preselects a day and CRM notes give saved feedback',async()=>{
+ const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','settings');await h.click('nav','schedule');await h.click('nav','schedule-weekly');await h.click('weekly-day',3);assert.equal(h.root.querySelector('[name=weekday]').value,'3');h.root.querySelector('[name=is_day_off]').checked=false;await h.submit('schedule-form');assert.ok(h.calls.find(c=>c[0]==='mutate'&&c[1]==='/master/schedule'&&c[2].weekday===3));await h.click('nav','clients');await h.click('client',3);await h.submit('notes-form');assert.ok(h.root.textContent.includes('Заметка сохранена'));await h.click('manual-client',3);assert.equal(h.root.querySelector('[name=master_client_id]').value,'3');h.dom.window.close();
+});
+
+test('Master receipt download uses authenticated API transport rather than a bare link',async()=>{
+ const h=await harness({owner:true,deposit:'50'});await h.click('choose-service',1);await h.click('staff',2);await h.click('slot',visit.start_time);h.root.querySelector('[name=policy]').checked=true;await h.submit('confirm-form');const file=new h.dom.window.File(['image'],'proof.png',{type:'image/png'});Object.defineProperty(h.root.querySelector('#proof-file'),'files',{value:[file]});await h.submit('proof-form');await h.click('mode','master');await h.click('nav','payments');await h.click('appointment',7);
+ let downloaded=false;h.dom.window.URL.createObjectURL=()=> 'blob:local';h.dom.window.URL.revokeObjectURL=()=>{};h.dom.window.HTMLAnchorElement.prototype.click=function(){downloaded=this.download==='receipt'};
+ await h.click('proof-download',11);assert.ok(downloaded);assert.ok(h.calls.find(c=>c[0]==='image'&&c[1]==='/proofs/11'));assert.equal(h.root.querySelector('a[href^="/api/miniapp/proofs/"]'),null);h.dom.window.close();
+});
+
+test('Master free slot preselects a new manual booking and clearing an intent prevents stale selection',async()=>{
+ const h=await harness({owner:true});await h.click('mode','master');await h.click('nav','master-calendar');await h.click('nav','free-windows');await h.submit('free-form');assert.ok(h.calls.find(c=>c[1]?.includes('/master/free-windows?')));await h.click('free-slot',visit.start_time);assert.equal(h.root.querySelector('[name=time]').value,'10:00');assert.equal(h.root.querySelector('[name=service_id]').value,'1');await h.submit('manual-form');assert.ok(h.root.textContent.includes('Запись создана'));await h.click('nav','manual');assert.equal(h.root.querySelector('[name=date]').value,'2026-10-05');h.dom.window.close();
 });

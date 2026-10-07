@@ -150,3 +150,7 @@ export function staffRows(rows) {
     )
     .join("");
 }
+
+export async function masterWorkspace(...args){return (await import("./master/render.js")).renderMaster(...args);}
+
+export const notice=text=>`<div class="notice">${escape(text)}</div>`;

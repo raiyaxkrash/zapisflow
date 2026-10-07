@@ -99,6 +99,7 @@ class PortfolioRepository:
         if not category:
             return None
         item = PortfolioItem(
+            master_id=master_id,
             category_id=category_id,
             service_id=service_id,
             title=title,

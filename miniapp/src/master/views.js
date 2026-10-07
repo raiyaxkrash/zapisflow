@@ -5,21 +5,27 @@ import {
   header,
   rub,
   empty,
+  notice,
 } from "../ui.js";
 export function serviceEditor(s, id) {
   return (
     header("Услуга", id === "new" ? "Новая услуга" : s.title) +
-    `<form id="service-form" data-id="${e(id)}">${f("Название", "title", s.title, "text", 'required maxlength="255"')}${f("Описание", "description", s.description || "")}${f("Цена, ₽", "price", s.price, "number", 'min="0" step="0.01" required')}${f("Длительность, мин", "duration_min", s.duration_min, "number", 'min="1" required')}${f("Буфер, мин", "buffer_min", s.buffer_min, "number", 'min="0" required')}<label class="field">Тип предоплаты<select name="deposit_type"><option value="FIXED" ${s.deposit_type === "FIXED" ? "selected" : ""}>Сумма</option><option value="PERCENT" ${s.deposit_type === "PERCENT" ? "selected" : ""}>Процент</option></select></label>${f("Предоплата", "deposit_value", s.deposit_value, "number", 'min="0" step="0.01" required')}<label class="check"><input name="is_active" type="checkbox" ${s.is_active ? "checked" : ""}>Услуга активна</label><button class="primary">Сохранить</button></form>`
+    `<form id="service-form" data-id="${e(id)}">${f("Название", "title", s.title, "text", 'required maxlength="255"')}<label class="field">Описание<textarea name="description" rows="3" maxlength="2000">${e(s.description || "")}</textarea></label>${f("Цена, ₽", "price", s.price, "number", 'min="0" step="0.01" required')}${f("Длительность, мин", "duration_min", s.duration_min, "number", 'min="1" required')}${f("Буфер, мин", "buffer_min", s.buffer_min, "number", 'min="0" required')}<label class="field">Тип предоплаты<select name="deposit_type"><option value="FIXED" ${s.deposit_type === "FIXED" ? "selected" : ""}>Сумма</option><option value="PERCENT" ${s.deposit_type === "PERCENT" ? "selected" : ""}>Процент</option></select></label>${f("Предоплата", "deposit_value", s.deposit_value, "number", 'min="0" step="0.01" required')}<label class="check"><input name="is_active" type="checkbox" ${s.is_active ? "checked" : ""}>Услуга активна</label><button class="primary">Сохранить</button></form>`+b("Назначить сотрудников в разделе Команда","nav","team","secondary")
   );
 }
 
 export function settingsMenu(ctx) {
   return (
-    header(ctx.project.name, "Управление") +
+    header(ctx.project.name, "Ещё") +
     [
       ["manage-services", "Услуги"],
       ["team", "Команда"],
       ["schedule", "Расписание"],
+      ["payments", "Оплаты"],
+      ["master-portfolio", "Портфолио"],
+      ["reviews", "Отзывы"],
+      ["broadcasts", "Рассылки"],
+      ["analytics", "Аналитика"],
       ["contacts-edit", "Контакты"],
       ["requisites", "Предоплата и реквизиты"],
       ["booking-settings", "Настройки записи"],
@@ -40,7 +46,14 @@ export function staffEditor(s, services, id) {
   );
 }
 
-export function manualEditor(ctx, clients, services, team) {
+export function manualEditor(
+  ctx,
+  clients,
+  services,
+  team,
+  selection = {},
+  clientId = null,
+) {
   return (
     header("Расписание", "Добавить запись") +
     (clients.length
@@ -59,11 +72,11 @@ export function manualEditor(ctx, clients, services, team) {
         ]
           .map(
             ([key, label, rows]) =>
-              `<label class="field">${label}<select name="${key}">${rows.map(([v, l]) => `<option value="${v}">${e(l)}</option>`).join("")}</select></label>`,
+              `<label class="field">${label}<select name="${key}">${rows.map(([v, l]) => `<option value="${v}" ${(key === "master_client_id" ? clientId : selection?.[key]) === v ? "selected" : ""}>${e(l)}</option>`).join("")}</select></label>`,
           )
           .join(
             "",
-          )}${f("Дата", "date", ctx.today, "date", "required")}${f("Время (по часовому поясу студии)", "time", "10:00", "time", "required")}${f("Телефон клиента (необязательно)", "phone", "", "tel")}${f("Заметки", "notes", "")}<button class="primary">Проверить время и создать</button></form>`
+          )}${f("Дата", "date", selection?.start_time?.slice(0, 10) || ctx.today, "date", "required")}${f("Время (по часовому поясу студии)", "time", selection?.start_time?.slice(11, 16) || "10:00", "time", "required")}${f("Телефон клиента (необязательно)", "phone", "", "tel")}${f("Заметки", "notes", "")}<button class="primary">Проверить время и создать</button></form>`
       : empty("Сначала добавьте клиента через Telegram-админку"))
   );
 }

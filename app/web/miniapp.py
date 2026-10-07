@@ -16,7 +16,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -59,9 +59,13 @@ from app.database.session import async_session_factory
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.schedule_repository import ScheduleRepository
+from app.repositories.portfolio_repository import PortfolioRepository
+from app.database.models.portfolio import PortfolioItem
 from app.repositories.service_repository import ServiceRepository
 from app.repositories.staff_repository import StaffRepository
 from app.repositories.user_repository import UserRepository
+from app.services.analytics_service import AnalyticsService
+from app.database.models.broadcast import Broadcast
 from app.services.audit_service import AuditService
 from app.services.booking_service import BookingService
 from app.services.crm_service import MasterCrmService
@@ -87,6 +91,7 @@ from app.services.subscription_access_policy import SubscriptionAccessPolicy
 from app.services.telegram_outbox import enqueue_telegram_message
 from app.web.miniapp_contracts import (
     AppointmentOutput,
+    MasterAppointmentAction,
     AuthInput,
     ConfirmInput,
     DecisionInput,
@@ -520,6 +525,8 @@ async def get_context(c=TENANT_CONTEXT):
         "user": {"first_name": c.user.first_name, "phone": c.user.phone},
         "contacts": contacts,
         "capabilities": capability(c),
+        "management_chat_url": "https://t.me/" + quote(c.bot.telegram_username, safe="") if c.bot.telegram_username and c.role in {AdminRole.OWNER, AdminRole.ADMIN} else None,
+        "server_now": datetime.now(UTC).isoformat(),
         "today": datetime.now(ZoneInfo(c.master.timezone)).date().isoformat(),
         "booking_horizon_days": config.booking_horizon_days,
         "cancel_policy_hours": config.cancel_policy_hours,
@@ -941,15 +948,141 @@ async def dashboard(target_date: date, c=TENANT_CONTEXT):
     ]
 
 
+@router.get("/master/calendar")
+async def working_calendar(year: int = Query(ge=2000, le=2100), month: int = Query(ge=1, le=12), c=TENANT_CONTEXT):
+    c.manager()
+    tz = ZoneInfo(c.master.timezone)
+    first = date(year, month, 1)
+    length = calendar.monthrange(year, month)[1]
+    start = datetime.combine(first, datetime.min.time(), tzinfo=tz)
+    local_day = func.date(func.timezone(c.master.timezone, Appointment.start_time))
+    query = select(local_day, func.count()).where(Appointment.master_id == c.master.id, Appointment.start_time >= start, Appointment.start_time < start + timedelta(days=length))
+    if c.role == AdminRole.STAFF:
+        if c.staff_id is None:
+            fail("FORBIDDEN", "Нет профиля специалиста", 403)
+        query = query.where(Appointment.staff_id == c.staff_id)
+    counts = dict((await c.session.execute(query.group_by(local_day))).all())
+    return {"year": year, "month": month, "today": datetime.now(tz).date().isoformat(), "days": [{"date": (first + timedelta(days=i)).isoformat(), "available": True, "mode": "appointments", "appointment_count": counts.get(first + timedelta(days=i), 0)} for i in range(length)]}
+
+
+@router.get("/master/free-windows", response_model=SlotsOutput)
+async def free_windows(target_date: date, service_id: int = Query(gt=0), staff_id: int = Query(gt=0), c=TENANT_CONTEXT):
+    c.manager()
+    choices = await eligible_staff(c, service_id)
+    if not any(s.id == staff_id for s in choices) or (c.role == AdminRole.STAFF and c.staff_id != staff_id):
+        fail()
+    values = await SlotEngine(c.session).get_available_slots(service_id, target_date, c.master.id, staff_id=staff_id)
+    return {"timezone": c.master.timezone, "slots": [s.isoformat() for s in values]}
+
+
+@router.get("/master/portfolio")
+async def master_portfolio(c=TENANT_CONTEXT):
+    c.admin()
+    rows = (await c.session.scalars(select(PortfolioItem).where(PortfolioItem.master_id == c.master.id).order_by(PortfolioItem.display_order, PortfolioItem.id).limit(100))).all()
+    return [{"id": r.id, "title": r.title, "caption": r.caption, "is_active": r.is_active, "image_url": f"/api/miniapp/master/portfolio/{r.id}/image"} for r in rows]
+
+
+@router.post("/master/portfolio")
+async def add_portfolio(request: Request, file: UploadFile = PROOF_FILE, c=TENANT_CONTEXT):
+    c.admin()
+    await rate_limit(request, "portfolio-upload", 10)
+    raw = await file.read(MAX_UPLOAD + 1)
+    await file.close()
+    image = safe_image(raw, file.content_type)
+    async def execute():
+        repo = PortfolioRepository(c.session)
+        categories = await repo.list_categories(c.master.id)
+        category = categories[0] if categories else await repo.create_category(c.master.id, "Работы")
+        bot = await request.app.state.registry.get_by_instance_id(c.bot.id, session=c.session, expected_token_version=c.bot.token_version)
+        sent = await bot.send_photo(c.user.telegram_id, BufferedInputFile(image, filename="portfolio.jpg"), caption="Работа для портфолио")
+        photo = sent.photo[-1]
+        row = await repo.add_item(c.master.id, category.id, photo.file_id, photo.file_unique_id, title="Работа")
+        return {"id": row.id}
+    return await mutation(c, request, {"file_hash": hashlib.sha256(image).hexdigest()}, execute)
+
+
+@router.delete("/master/portfolio/{id}")
+async def remove_portfolio(id: int, request: Request, c=TENANT_CONTEXT):
+    c.admin()
+    async def execute():
+        row = await PortfolioRepository(c.session).get_item_by_id(id, c.master.id)
+        if row is None or row.master_id != c.master.id:
+            fail()
+        if not await PortfolioRepository(c.session).delete_item(id, c.master.id):
+            fail()
+        return {"deleted": True}
+    return await mutation(c, request, {"id": id}, execute)
+
+
+@router.get("/master/portfolio/{id}/image")
+async def master_portfolio_image(id: int, request: Request, c=TENANT_CONTEXT):
+    c.admin()
+    row = await PortfolioRepository(c.session).get_item_by_id(id, c.master.id)
+    if row is None or row.master_id != c.master.id:
+        fail()
+    bot = await request.app.state.registry.get_by_instance_id(c.bot.id, session=c.session, expected_token_version=c.bot.token_version)
+    remote = await bot.get_file(row.telegram_file_id)
+    if remote.file_size and remote.file_size > MAX_UPLOAD:
+        fail("UPLOAD_INVALID", "Изображение слишком большое", 413)
+    class BoundedImage(io.BytesIO):
+        def write(self, chunk):
+            if self.tell() + len(chunk) > MAX_UPLOAD:
+                fail("UPLOAD_INVALID", "Изображение слишком большое", 413)
+            return super().write(chunk)
+    content = await bot.download_file(remote.file_path, destination=BoundedImage(), timeout=10)
+    return Response(safe_image(content.getvalue(), "image/jpeg"), media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/master/analytics")
+async def master_metrics(c=TENANT_CONTEXT):
+    c.admin()
+    tz = ZoneInfo(c.master.timezone)
+    today = datetime.now(tz).date()
+    first = today.replace(day=1)
+    end = first + timedelta(days=calendar.monthrange(first.year, first.month)[1])
+    return jsonable_encoder(await AnalyticsService(c.session).get_metrics_for_range(c.master.id, datetime.combine(first, datetime.min.time(), tzinfo=tz), datetime.combine(end, datetime.min.time(), tzinfo=tz) - timedelta(microseconds=1)))
+
+
+@router.get("/master/broadcasts")
+async def broadcast_history(c=TENANT_CONTEXT):
+    c.admin()
+    rows = (await c.session.scalars(select(Broadcast).where(Broadcast.master_id == c.master.id).order_by(Broadcast.created_at.desc()).limit(50))).all()
+    return [{"id": r.id, "text": r.text, "status": r.status.value, "total_count": r.total_count, "success_count": r.success_count, "created_at": r.created_at.isoformat()} for r in rows]
+
+
+@router.get("/master/payments", response_model=list[AppointmentOutput])
+async def payment_queue(c=TENANT_CONTEXT):
+    c.admin()
+    ids = (await c.session.scalars(select(Appointment.id).where(Appointment.master_id == c.master.id, Appointment.payments.any()).order_by((Appointment.status == AppointmentStatus.PAYMENT_PROOF_SENT).desc(), Appointment.start_time.desc()).limit(100))).all()
+    return [appointment_dto(await appointment(c, id, manager=True), manager=True, tz=c.master.timezone) for id in ids]
+
+
+@router.post("/master/appointments/{id}/action", response_model=AppointmentOutput, response_model_exclude_none=True)
+async def appointment_action(id: int, body: MasterAppointmentAction, request: Request, c=TENANT_CONTEXT):
+    c.admin()
+    await appointment(c, id, manager=True)
+    async def execute():
+        service = BookingService(c.session)
+        if body.action == "cancel":
+            a = await service.cancel_booking_by_admin(c.master.id, id)
+        else:
+            a = await service.complete_booking(c.master.id, id)
+        await notify(c, a, "Запись отменена" if body.action == "cancel" else "Визит завершён")
+        return appointment_dto(await appointment(c, a.id, manager=True), manager=True, tz=c.master.timezone)
+    return await mutation(c, request, body.model_dump(), execute)
+
+
 @router.get(
     "/master/appointments/{id}",
     response_model=AppointmentOutput,
     response_model_exclude_none=True,
 )
 async def appointment_card(id: int, c=TENANT_CONTEXT):
-    return appointment_dto(
-        await appointment(c, id, manager=True), manager=True, tz=c.master.timezone
-    )
+    a = await appointment(c, id, manager=True)
+    result = appointment_dto(a, manager=True, tz=c.master.timezone)
+    result["master_client_id"] = await c.session.scalar(select(MasterClient.id).where(MasterClient.master_id == c.master.id, MasterClient.user_id == a.user_id))
+    return result
+
 
 
 @router.post(
@@ -1043,11 +1176,17 @@ async def clients(
     rows = (
         await c.session.scalars(query.order_by(MasterClient.id.desc()).limit(100))
     ).all()
+    now = datetime.now(UTC)
+    summary_rows = (await c.session.execute(select(Appointment.user_id, func.count(Appointment.id), func.max(Appointment.start_time).filter(Appointment.status == AppointmentStatus.COMPLETED), func.min(Appointment.start_time).filter(Appointment.start_time >= now, Appointment.status.in_([AppointmentStatus.CONFIRMED, AppointmentStatus.WAITING_PAYMENT, AppointmentStatus.PAYMENT_PROOF_SENT]))).where(Appointment.master_id == c.master.id, Appointment.user_id.in_([r.user_id for r in rows])).group_by(Appointment.user_id))).all() if rows else []
+    summaries = {r[0]: r[1:] for r in summary_rows}
     return [
         {
             "id": r.id,
             "name": f"{r.user.first_name} {r.user.last_name or ''}".strip(),
             "phone": r.user.phone,
+            "total_bookings": summaries.get(r.user_id, (0, None, None))[0],
+            "last_visit": summaries.get(r.user_id, (0, None, None))[1].astimezone(ZoneInfo(c.master.timezone)).isoformat() if summaries.get(r.user_id, (0, None, None))[1] else None,
+            "next_visit": summaries.get(r.user_id, (0, None, None))[2].astimezone(ZoneInfo(c.master.timezone)).isoformat() if summaries.get(r.user_id, (0, None, None))[2] else None,
         }
         for r in rows
     ]

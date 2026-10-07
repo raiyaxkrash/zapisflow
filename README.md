@@ -252,3 +252,5 @@ production deployment и реальный Telegram UAT требуют отдел
 Владелец может настроить название, изображения, акцент, тему, тексты и клиентские разделы. Telegram и Mini App используют настройки одного проекта. Инструкции и ограничения: [Оформление и Mini App](docs/BRANDING_AND_MINIAPP.md), [дизайн-система](docs/ZAPISFLOW_DESIGN_SYSTEM.md), [Mini App foundation](docs/MINIAPP_DESIGN_SYSTEM.md).
 
 Клиентская навигация, booking preview, повторная запись и ICS: [Client Mini App](docs/MINIAPP_CLIENT.md).
+
+Мастерское рабочее пространство, CRM, расписание и платежи: [Master Mini App](docs/MINIAPP_MASTER.md).

@@ -63,6 +63,7 @@ class AppointmentOutput(BaseModel):
     cancel_reason: str | None
     cancel_consequences: str
     payment: list[PaymentOutput]
+    master_client_id: int | None = None
     client: str | None = None
     phone: str | None = None
     notes: str | None = None
@@ -235,3 +236,7 @@ class DateScheduleInput(Input):
             ScheduleInput(staff_id=self.staff_id, weekday=0, work_start=self.work_start,
                           work_end=self.work_end, breaks=self.breaks)
         return self
+
+
+class MasterAppointmentAction(Input):
+    action: Literal["cancel", "complete"]

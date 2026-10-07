@@ -24,8 +24,8 @@ export function calendarView({year, month, days, today, min_date='2000-01-01', m
     <div class="calendar-weekdays" aria-hidden="true">${['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(day=>`<span>${day}</span>`).join('')}</div>
     <div class="calendar-grid">${'<span class="calendar-blank"></span>'.repeat(padding)}${days.map(day=>{
       const blocked = !master && !day.available;
-      const state = master ? ({weekly:'По расписанию',day_off:'Выходной',custom:'Особое расписание'}[day.mode] || 'По расписанию') : day.available?'Есть свободное время':label[day.reason] || 'Недоступно';
+      const state = master ? ({appointments:'Записи дня',weekly:'По расписанию',day_off:'Выходной',custom:'Особое расписание'}[day.mode] || 'По расписанию') : day.available?'Есть свободное время':label[day.reason] || 'Недоступно';
       const count = day.appointment_count ? `, записей: ${day.appointment_count}` : '';
       return `<button type="button" class="calendar-day ${day.date===selected?'is-selected':''} ${day.date===today?'is-today':''} ${master?`state-${day.mode}`:''}" data-action="${action}" data-id="${e(day.date)}" data-state="${e(day.reason || (day.available ? 'available' : 'unavailable'))}" ${day.date===today?'aria-current="date"':''} aria-label="${e((day.date===today?'Сегодня, ':'')+day.date+', '+state+count)}" aria-pressed="${day.date===selected}" title="${e(state+count)}" ${blocked?'disabled':''}><span>${Number(day.date.slice(-2))}</span>${master&&day.appointment_count?'<i aria-hidden="true" class="calendar-dot"></i>':''}</button>`;
-    }).join('')}</div>${master?'<p class="calendar-legend"><span>○ По расписанию</span><span>— Выходной</span><span>◇ Особое расписание</span><span>● Есть записи</span></p>':''}</section>`;
+    }).join('')}</div>${master&&days.some(d=>d.mode==='appointments')?'<p class="calendar-legend">● Есть записи</p>':master?'<p class="calendar-legend"><span>○ По расписанию</span><span>— Выходной</span><span>◇ Особое расписание</span><span>● Есть записи</span></p>':''}</section>`;
 }
