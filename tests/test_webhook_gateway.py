@@ -7,7 +7,7 @@ Covers:
 4. Constant-time secret token verification (403 on missing, mismatch, or unset secret)
 5. Payload size enforcement (413 Payload Too Large)
 6. Payload schema validation (400 Bad Request on invalid JSON / schema)
-7. Bot lifecycle states (DISABLED/ERROR/PROVISIONING -> 403, SETUP_REQUIRED/ACTIVE -> allowed)
+7. Inactive bot updates are acknowledged without dispatch; current PROVISIONING updates remain retryable.
 8. Two-phase update deduplication in Redis (atomic lock, duplicate skipping, release on failure)
 9. Strict tenant isolation & handler context injection (master_id, master, bot_instance)
 10. Fail-closed tenant security in webhook mode (no fallback to master_id=1)
@@ -429,11 +429,16 @@ async def test_webhook_schema_validation_400(
 
 @requires_postgres
 @pytest.mark.asyncio
-async def test_webhook_inactive_bot_states_rejected(
+async def test_webhook_inactive_bot_updates_are_acknowledged_without_dispatch(
     pg_session: AsyncSession,
     crypto: TokenCrypto,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bots in DISABLED, ERROR, or PROVISIONING status return 403."""
+    """Inactive instances stop Telegram retries; current provisioning remains transient."""
+    from app.web import app as web_app_module
+
+    notify_inactive = AsyncMock()
+    monkeypatch.setattr(web_app_module, "_notify_inactive_bot_update", notify_inactive)
     owner = User(telegram_id=987777888, first_name="OwnerStatus")
     pg_session.add(owner)
     await pg_session.flush()
@@ -449,7 +454,7 @@ async def test_webhook_inactive_bot_states_rejected(
         telegram_bot_id=444555661,
         webhook_secret="sec_disabled",
         status=BotInstanceStatus.DISABLED,
-        is_current=True,
+        is_current=False,
     )
     # Error Bot
     bot_error = BotInstance(
@@ -467,7 +472,7 @@ async def test_webhook_inactive_bot_states_rejected(
         telegram_bot_id=444555663,
         webhook_secret="sec_prov",
         status=BotInstanceStatus.PROVISIONING,
-        is_current=False,
+        is_current=True,
     )
     bot_replaced = BotInstance(
         public_id=uuid.uuid4(),
@@ -492,31 +497,33 @@ async def test_webhook_inactive_bot_states_rejected(
             headers={"X-Telegram-Bot-Api-Secret-Token": "sec_disabled"},
             json=update_data,
         )
-        assert res_dis.status_code == 403
-        assert "DISABLED" in res_dis.json()["detail"]
+        assert res_dis.status_code == 200
+        assert res_dis.json() == {"ok": True, "status": "inactive_bot"}
 
         res_err = await client.post(
             f"/telegram/webhook/{bot_error.public_id}",
             headers={"X-Telegram-Bot-Api-Secret-Token": "sec_error"},
             json=update_data,
         )
-        assert res_err.status_code == 403
-        assert "ERROR" in res_err.json()["detail"]
+        assert res_err.status_code == 200
+        assert res_err.json() == {"ok": True, "status": "inactive_bot"}
 
         res_prov = await client.post(
             f"/telegram/webhook/{bot_prov.public_id}",
             headers={"X-Telegram-Bot-Api-Secret-Token": "sec_prov"},
             json=update_data,
         )
-        assert res_prov.status_code == 403
-        assert "PROVISIONING" in res_prov.json()["detail"]
+        assert res_prov.status_code == 503
 
         res_replaced = await client.post(
             f"/telegram/webhook/{bot_replaced.public_id}",
             headers={"X-Telegram-Bot-Api-Secret-Token": "sec_replaced"},
             json=update_data,
         )
-        assert res_replaced.status_code == 403
+        assert res_replaced.status_code == 200
+        assert res_replaced.json() == {"ok": True, "status": "inactive_bot"}
+
+    assert notify_inactive.await_count == 3
 
 
 # ---------------------------------------------------------------------------

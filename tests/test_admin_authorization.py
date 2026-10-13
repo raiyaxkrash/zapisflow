@@ -25,6 +25,7 @@ Covers all 20 required scenarios on live PostgreSQL:
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import select
@@ -709,21 +710,36 @@ async def test_user_with_different_roles_across_a_b_c_gets_correct_role_per_mast
     tg_user_mock.username = None
 
     # Context A
-    data_a = {"event_from_user": tg_user_mock, "session": pg_session, "master_id": master_a.id}
+    data_a = {
+        "event_from_user": tg_user_mock,
+        "session": pg_session,
+        "master_id": master_a.id,
+        "bot_instance": SimpleNamespace(master_id=master_a.id),
+    }
     result_a = await middleware(dummy_handler, MagicMock(), data_a)
     assert result_a["admin_role"] == AdminRole.OWNER
     assert result_a["is_admin"] is True
     assert result_a["is_owner"] is True
 
     # Context B
-    data_b = {"event_from_user": tg_user_mock, "session": pg_session, "master_id": master_b.id}
+    data_b = {
+        "event_from_user": tg_user_mock,
+        "session": pg_session,
+        "master_id": master_b.id,
+        "bot_instance": SimpleNamespace(master_id=master_b.id),
+    }
     result_b = await middleware(dummy_handler, MagicMock(), data_b)
     assert result_b["admin_role"] == AdminRole.ADMIN
     assert result_b["is_admin"] is True
     assert result_b["is_owner"] is False
 
     # Context C
-    data_c = {"event_from_user": tg_user_mock, "session": pg_session, "master_id": master_c.id}
+    data_c = {
+        "event_from_user": tg_user_mock,
+        "session": pg_session,
+        "master_id": master_c.id,
+        "bot_instance": SimpleNamespace(master_id=master_c.id),
+    }
     result_c = await middleware(dummy_handler, MagicMock(), data_c)
     assert result_c["admin_role"] == AdminRole.NONE
     assert result_c["is_admin"] is False

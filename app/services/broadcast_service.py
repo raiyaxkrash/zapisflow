@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.broadcast import (
     Broadcast,
     BroadcastRecipient,
@@ -39,12 +40,16 @@ class BroadcastService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get_eligible_users(self, master_id: int) -> List[User]:
-        """Get active users who have opted into marketing specifically for this master.
-
-        Reads exclusively from master_clients where master_id = master_id
-        and is_marketing_allowed = TRUE and is_bot_blocked = FALSE.
+    async def get_eligible_users(
+        self, master_id: int, segment: Optional[str] = None
+    ) -> List[User]:
+        """Get active users who have opted into marketing specifically for this master,
+        optionally filtered by client segment (ALL, REGULAR, NEW, INACTIVE_30, INACTIVE_60).
         """
+        now_utc = datetime.now(timezone.utc)
+        thirty_days_ago = now_utc - timedelta(days=30)
+        sixty_days_ago = now_utc - timedelta(days=60)
+
         query = (
             select(User)
             .join(MasterClient, MasterClient.user_id == User.id)
@@ -54,14 +59,57 @@ class BroadcastService:
                 MasterClient.is_bot_blocked.is_(False),
                 User.telegram_id > 0,
             )
-            .order_by(User.id.asc())
         )
+
+        seg = (segment or "ALL").upper().strip()
+        if seg == "REGULAR":
+            reg_subq = (
+                select(Appointment.user_id)
+                .where(
+                    Appointment.master_id == master_id,
+                    Appointment.status == AppointmentStatus.COMPLETED,
+                )
+                .group_by(Appointment.user_id)
+                .having(func.count(Appointment.id) >= 3)
+            )
+            query = query.where(User.id.in_(reg_subq))
+        elif seg == "NEW":
+            new_subq = (
+                select(Appointment.user_id)
+                .where(Appointment.master_id == master_id)
+                .group_by(Appointment.user_id)
+                .having(
+                    or_(
+                        func.min(Appointment.start_time) >= thirty_days_ago,
+                        func.count(Appointment.id) == 1,
+                    )
+                )
+            )
+            query = query.where(User.id.in_(new_subq))
+        elif seg in ("INACTIVE_30", "INACTIVE30"):
+            inact30_subq = (
+                select(Appointment.user_id)
+                .where(Appointment.master_id == master_id)
+                .group_by(Appointment.user_id)
+                .having(func.max(Appointment.start_time) < thirty_days_ago)
+            )
+            query = query.where(User.id.in_(inact30_subq))
+        elif seg in ("INACTIVE_60", "INACTIVE60"):
+            inact60_subq = (
+                select(Appointment.user_id)
+                .where(Appointment.master_id == master_id)
+                .group_by(Appointment.user_id)
+                .having(func.max(Appointment.start_time) < sixty_days_ago)
+            )
+            query = query.where(User.id.in_(inact60_subq))
+
+        query = query.order_by(User.id.asc())
         res = await self.session.execute(query)
         return list(res.scalars().all())
 
-    async def count_recipients(self, master_id: int) -> int:
-        """Count active users opted into marketing for this master."""
-        users = await self.get_eligible_users(master_id)
+    async def count_recipients(self, master_id: int, segment: Optional[str] = None) -> int:
+        """Count active users opted into marketing for this master and segment."""
+        users = await self.get_eligible_users(master_id, segment=segment)
         return len(users)
 
     async def create_broadcast(
@@ -72,12 +120,13 @@ class BroadcastService:
         photo_file_id: Optional[str] = None,
         button_text: Optional[str] = None,
         button_url: Optional[str] = None,
+        target_segment: Optional[str] = "ALL",
     ) -> Broadcast:
         """Create a new broadcast campaign strictly belonging to master_id."""
         if not await SubscriptionAccessPolicy(self.session).can_send_marketing_broadcast(master_id):
             raise SubscriptionExpiredError("Маркетинговые рассылки недоступны при истекшей подписке.")
 
-        eligible = await self.get_eligible_users(master_id)
+        eligible = await self.get_eligible_users(master_id, segment=target_segment)
         broadcast = Broadcast(
             master_id=master_id,
             admin_id=admin_id,
@@ -85,6 +134,7 @@ class BroadcastService:
             photo_file_id=photo_file_id,
             button_text=button_text,
             button_url=button_url,
+            target_segment=target_segment or "ALL",
             status=BroadcastStatus.DRAFT,
             total_count=len(eligible),
             success_count=0,
@@ -158,7 +208,7 @@ class BroadcastService:
             raise ValueError(f"Broadcast #{broadcast_id} not found for master {master_id}")
         if broadcast.status != BroadcastStatus.DRAFT:
             return broadcast
-        recipients = await self.get_eligible_users(master_id)
+        recipients = await self.get_eligible_users(master_id, segment=broadcast.target_segment)
         broadcast.total_count = len(recipients)
         broadcast.status = BroadcastStatus.SENDING
         broadcast.started_at = datetime.now(timezone.utc)

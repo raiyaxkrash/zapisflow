@@ -1,0 +1,22 @@
+# Opt-in only: docker compose -f docker-compose.yml -f deploy/miniapp/compose.yml ...
+# Do not enable until app DNS/TLS, config, migrations and Telegram UAT are ready.
+services:
+  miniapp:
+    build:
+      context: .
+      dockerfile: miniapp/Dockerfile
+    restart: unless-stopped
+    networks: [backend]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+  caddy:
+    environment:
+      MINI_APP_DOMAIN: ${MINI_APP_DOMAIN:-app.zapisflow.su}
+    volumes:
+      - ./deploy/miniapp/gateway.Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      miniapp:
+        condition: service_healthy

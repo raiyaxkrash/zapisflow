@@ -71,7 +71,8 @@ async def cmd_start(
 
 @router.callback_query(MenuCallback.filter(F.action == "main"))
 async def cb_main_menu(
-    callback: CallbackQuery, state: FSMContext, db_user: User, is_admin: bool
+    callback: CallbackQuery, state: FSMContext, db_user: User, is_admin: bool,
+    bot_instance: Optional[BotInstance] = None,
 ) -> None:
     """
     Return to main menu from any inline screen.
@@ -95,7 +96,8 @@ async def cb_main_menu(
 @router.message(Command("cancel"))
 @router.message(F.text.casefold() == "❌ отмена")
 async def cmd_cancel(
-    message: Message, state: FSMContext, db_user: User, is_admin: bool
+    message: Message, state: FSMContext, db_user: User, is_admin: bool,
+    bot_instance: Optional[BotInstance] = None,
 ) -> None:
     """
     Global cancellation handler that clears FSM state and removes reply keyboards.

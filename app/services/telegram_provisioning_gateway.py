@@ -5,6 +5,9 @@ guaranteeing that temporary bot client sessions are closed cleanly without resou
 """
 
 import asyncio
+import socket
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 import logging
 from typing import Optional
@@ -17,9 +20,11 @@ from aiogram.exceptions import (
     TelegramNetworkError,
     TelegramUnauthorizedError,
 )
-from aiogram.types import WebhookInfo
+from aiogram.types import BotCommand, MenuButton, WebhookInfo
 
 from app.core.security import mask_token
+from app.config.settings import settings
+from app.config.url_validation import webhook_origin
 from app.services.exceptions import (
     InvalidBotTokenError,
     TelegramGatewayError,
@@ -27,6 +32,11 @@ from app.services.exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Telegram keeps the previous allowed_updates value when setWebhook omits the
+# parameter. Always subscribe client bots to both messages and inline callbacks
+# so a bot previously configured for message-only updates can recover safely.
+REQUIRED_WEBHOOK_UPDATES = ("message", "callback_query")
 
 
 @dataclass(frozen=True)
@@ -95,17 +105,46 @@ class TelegramProvisioningGateway:
 
         Always closes the temporary bot session in a finally block.
         """
+        configured_updates = list(allowed_updates or ())
+        for update_type in REQUIRED_WEBHOOK_UPDATES:
+            if update_type not in configured_updates:
+                configured_updates.append(update_type)
+
         bot = self._create_temp_bot(token)
         try:
+            delivery = {}
+            if settings.is_production:
+                parsed = urlsplit(url)
+                webhook_origin(f"{parsed.scheme}://{parsed.netloc}", production=True)
+                try:
+                    addresses = await asyncio.wait_for(
+                        asyncio.get_running_loop().getaddrinfo(
+                            parsed.hostname, parsed.port or 443,
+                            family=socket.AF_INET, type=socket.SOCK_STREAM,
+                        ), timeout=self.request_timeout,
+                    )
+                except OSError as exc:
+                    raise TelegramGatewayNetworkError("Не удалось разрешить DNS webhook.") from exc
+                current_ip = next((entry[4][0] for entry in addresses if ip_address(entry[4][0]).is_global), None)
+                if not current_ip:
+                    raise TelegramGatewayNetworkError("DNS webhook не содержит публичного IPv4 адреса.")
+                delivery["ip_address"] = current_ip
             result = await asyncio.wait_for(
                 bot.set_webhook(
                     url=url,
                     secret_token=secret_token,
-                    allowed_updates=allowed_updates,
+                    allowed_updates=configured_updates,
                     drop_pending_updates=drop_pending_updates,
+                    **delivery,
                 ),
                 timeout=self.request_timeout,
             )
+            if not result:
+                raise TelegramGatewayError("Telegram не подтвердил установку webhook.")
+            if delivery:
+                info = await asyncio.wait_for(bot.get_webhook_info(), timeout=self.request_timeout)
+                if info.url != url or info.ip_address != delivery["ip_address"]:
+                    raise TelegramGatewayError("Telegram не подтвердил URL/IP webhook.")
             logger.info("Successfully set webhook for bot token %s -> %s", mask_token(token), url)
             return bool(result)
         except TelegramUnauthorizedError as exc:
@@ -161,5 +200,101 @@ class TelegramProvisioningGateway:
         except TelegramAPIError as exc:
             logger.error("Telegram API error deleting webhook: %s", exc)
             raise TelegramGatewayError(f"Ошибка удаления вебхука: {exc.message}") from exc
+        finally:
+            await bot.session.close()
+
+    async def get_managed_bot_token(self, manager_token: str, bot_id: int) -> str:
+        """Call Telegram getManagedBotToken via the platform manager bot session.
+
+        Args:
+            manager_token: HTTP API token of the platform manager bot.
+            bot_id: Telegram User identifier of the MANAGED BOT (NOT the owner).
+        """
+        bot = self._create_temp_bot(manager_token)
+        try:
+            token = await asyncio.wait_for(
+                bot.get_managed_bot_token(user_id=bot_id),
+                timeout=self.request_timeout,
+            )
+            return token
+        except TelegramUnauthorizedError as exc:
+            raise InvalidBotTokenError("Токен управляющего бота недействителен.") from exc
+        except (TelegramNetworkError, asyncio.TimeoutError) as exc:
+            raise TelegramGatewayNetworkError("Ошибка сети при получении токена управляемого бота.") from exc
+        except TelegramAPIError as exc:
+            raise TelegramGatewayError(f"Ошибка получения токена: {exc.message}") from exc
+        finally:
+            await bot.session.close()
+
+    async def replace_managed_bot_token(self, manager_token: str, bot_id: int) -> str:
+        """Call Telegram replaceManagedBotToken to rotate a managed bot token.
+
+        Args:
+            manager_token: HTTP API token of the platform manager bot.
+            bot_id: Telegram User identifier of the MANAGED BOT (NOT the owner).
+        """
+        bot = self._create_temp_bot(manager_token)
+        try:
+            token = await asyncio.wait_for(
+                bot.replace_managed_bot_token(user_id=bot_id),
+                timeout=self.request_timeout,
+            )
+            return token
+        except TelegramUnauthorizedError as exc:
+            raise InvalidBotTokenError("Токен управляющего бота недействителен.") from exc
+        except (TelegramNetworkError, asyncio.TimeoutError) as exc:
+            raise TelegramGatewayNetworkError("Ошибка сети при смене токена управляемого бота.") from exc
+        except TelegramAPIError as exc:
+            raise TelegramGatewayError(f"Ошибка смены токена: {exc.message}") from exc
+        finally:
+            await bot.session.close()
+
+    async def check_manager_bot_mode(self, manager_token: str) -> bool:
+        """Check if platform manager bot has can_manage_bots enabled in BotFather."""
+        bot = self._create_temp_bot(manager_token)
+        try:
+            me = await asyncio.wait_for(bot.get_me(), timeout=self.request_timeout)
+            return bool(getattr(me, "can_manage_bots", False))
+        except Exception as exc:
+            logger.warning("Could not query getMe for manager bot mode check: %s", exc)
+            return False
+        finally:
+            await bot.session.close()
+
+    async def set_my_commands(
+        self,
+        token: str,
+        commands: list[BotCommand],
+    ) -> bool:
+        """Set default commands for the bot."""
+        bot = self._create_temp_bot(token)
+        try:
+            res = await asyncio.wait_for(
+                bot.set_my_commands(commands=commands),
+                timeout=self.request_timeout,
+            )
+            return bool(res)
+        except Exception as exc:
+            logger.warning("Failed to set commands for bot %s: %s", mask_token(token), exc)
+            return False
+        finally:
+            await bot.session.close()
+
+    async def set_chat_menu_button(
+        self,
+        token: str,
+        menu_button: Optional[MenuButton] = None,
+    ) -> bool:
+        """Set chat menu button for the bot."""
+        bot = self._create_temp_bot(token)
+        try:
+            res = await asyncio.wait_for(
+                bot.set_chat_menu_button(menu_button=menu_button),
+                timeout=self.request_timeout,
+            )
+            return bool(res)
+        except Exception as exc:
+            logger.warning("Failed to set menu button for bot %s: %s", mask_token(token), exc)
+            return False
         finally:
             await bot.session.close()

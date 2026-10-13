@@ -49,13 +49,13 @@ async def _enqueue(
     session: AsyncSession,
     *,
     master_id: int,
-    bot_instance_id: int,
+    bot_instance_id: int | None,
     chat_id: int,
     operation_type: str,
     payload: dict[str, Any],
     idempotency_key: str,
 ) -> TelegramOutbox:
-    if master_id <= 0 or bot_instance_id <= 0 or chat_id == 0:
+    if master_id <= 0 or (bot_instance_id is not None and bot_instance_id <= 0) or chat_id == 0:
         raise ValueError("Valid tenant, bot instance, and target chat are required")
     if not idempotency_key or len(idempotency_key) > 255:
         raise ValueError("Outbox idempotency key must be 1-255 characters")
@@ -109,6 +109,8 @@ async def enqueue_telegram_message(
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> TelegramOutbox:
     """Queue a tenant text message in the caller's business transaction."""
+    if bot_instance_id is None:
+        raise ValueError("Tenant delivery requires BotInstance")
     return await _enqueue(
         session,
         master_id=master_id,
@@ -250,3 +252,19 @@ async def enqueue_telegram_edit_caption(
         },
         idempotency_key=idempotency_key,
     )
+
+
+async def enqueue_manager_message(session: AsyncSession, *, master_id: int, chat_id: int,
+                                  text: str, idempotency_key: str,
+                                  reply_markup: InlineKeyboardMarkup | None = None) -> TelegramOutbox:
+    """Server-created owner notice; never accept a client-supplied recipient."""
+    from app.database.models.master import Master
+    from app.database.models.user import User
+    master = await session.get(Master, master_id)
+    owner = await session.get(User, master.owner_user_id) if master else None
+    if owner is None or owner.telegram_id != chat_id:
+        raise ValueError("Manager delivery must target the tenant owner")
+    return await _enqueue(session, master_id=master_id, bot_instance_id=None,
+                          chat_id=chat_id, operation_type="send_message",
+                          payload={"text": text, "reply_markup": _keyboard_payload(reply_markup)},
+                          idempotency_key=idempotency_key)

@@ -52,6 +52,9 @@ async def main() -> None:
             host=settings.webhook_host,
             port=settings.webhook_port,
             log_level="info",
+            # Checkout paths contain short-lived bearer tokens. Caddy logs are
+            # filtered separately; Uvicorn must not log raw request paths.
+            access_log=False,
         )
         server = uvicorn.Server(config)
         await server.serve()

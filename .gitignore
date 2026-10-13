@@ -41,3 +41,14 @@
 !/docs/
 !/docs/**
 
+# Mini App source and build configuration (generated files stay local).
+!/miniapp/
+!/miniapp/**/
+!/miniapp/**/*.js
+!/miniapp/**/*.css
+!/miniapp/**/*.html
+!/miniapp/**/*.json
+!/miniapp/Dockerfile
+/miniapp/node_modules/
+/miniapp/dist/
+

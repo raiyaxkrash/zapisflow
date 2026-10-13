@@ -167,6 +167,9 @@ class BotInstanceRepository:
         status: BotInstanceStatus = BotInstanceStatus.ACTIVE,
         token_version: int = 1,
         is_current: bool = True,
+        provisioning_source: str = "manual_token",
+        managed_by_platform: bool = False,
+        telegram_owner_user_id: Optional[int] = None,
     ) -> BotInstance:
         """Create and persist a new BotInstance."""
         instance = BotInstance(
@@ -179,6 +182,9 @@ class BotInstanceRepository:
             status=status,
             token_version=token_version,
             is_current=is_current,
+            provisioning_source=provisioning_source,
+            managed_by_platform=managed_by_platform,
+            telegram_owner_user_id=telegram_owner_user_id,
         )
         if public_id is not None:
             instance.public_id = public_id
@@ -186,3 +192,4 @@ class BotInstanceRepository:
         await self.session.flush()
         await self.session.refresh(instance)
         return instance
+

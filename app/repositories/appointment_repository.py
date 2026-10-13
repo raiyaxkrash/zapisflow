@@ -38,6 +38,7 @@ class AppointmentRepository(BaseRepository[Appointment]):
             )
             .options(
                 selectinload(Appointment.user),
+                selectinload(Appointment.staff),
                 selectinload(Appointment.service),
                 selectinload(Appointment.payments).selectinload(Payment.proofs),
             )
@@ -116,9 +117,10 @@ class AppointmentRepository(BaseRepository[Appointment]):
         master_id: int,
         start_time: datetime,
         end_time_with_buffer: datetime,
+        staff_id: Optional[int] = None,
         exclude_id: Optional[int] = None,
     ) -> Sequence[Appointment]:
-        """Find any active appointments for master_id that overlap with [start_time, end_time_with_buffer)."""
+        """Find any active appointments for master_id and optional staff_id that overlap with [start_time, end_time_with_buffer)."""
         active_statuses = [
             AppointmentStatus.CONFIRMED,
             AppointmentStatus.PAYMENT_PROOF_SENT,
@@ -132,6 +134,9 @@ class AppointmentRepository(BaseRepository[Appointment]):
             Appointment.end_time_with_buffer > start_time,
         )
 
+        if staff_id is not None:
+            query = query.where(Appointment.staff_id == staff_id)
+
         if exclude_id is not None:
             query = query.where(Appointment.id != exclude_id)
 
@@ -143,9 +148,10 @@ class AppointmentRepository(BaseRepository[Appointment]):
         master_id: int,
         start_datetime: datetime,
         end_datetime: datetime,
+        staff_id: Optional[int] = None,
         exclude_id: Optional[int] = None,
     ) -> Sequence[Appointment]:
-        """Get all active appointments for master_id within a date range for slot calculations."""
+        """Get all active appointments for master_id and optional staff_id within a date range for slot calculations."""
         active_statuses = [
             AppointmentStatus.CONFIRMED,
             AppointmentStatus.PAYMENT_PROOF_SENT,
@@ -162,6 +168,8 @@ class AppointmentRepository(BaseRepository[Appointment]):
             )
             .order_by(Appointment.start_time.asc())
         )
+        if staff_id is not None:
+            query = query.where(Appointment.staff_id == staff_id)
         if exclude_id is not None:
             query = query.where(Appointment.id != exclude_id)
         result = await self.session.execute(query)

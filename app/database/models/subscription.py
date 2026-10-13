@@ -5,6 +5,7 @@ Subscription, billing periods, payment history and plan database models.
 from datetime import datetime
 from decimal import Decimal
 import enum
+import uuid
 from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import (
     BigInteger,
@@ -13,12 +14,15 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     Numeric,
     String,
     Text,
+    Uuid,
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.models.base import Base
@@ -52,6 +56,9 @@ class SubscriptionPlan(Base):
     period_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    features: Mapped[Optional[dict]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=True, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -121,6 +128,7 @@ class SubscriptionPayment(Base):
     __tablename__ = "subscription_payments"
     __table_args__ = (
         UniqueConstraint("provider", "provider_payment_id", name="uq_subscription_payment_provider_id"),
+        UniqueConstraint("checkout_ref", name="uq_subscription_payment_checkout_ref"),
         Index("idx_sub_payments_master_created", "master_id", "created_at"),
     )
 
@@ -133,6 +141,12 @@ class SubscriptionPayment(Base):
     )
     provider: Mapped[str] = mapped_column(String(32), nullable=False)  # MANUAL, YOOKASSA, etc.
     provider_payment_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    checkout_ref: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    last_reconciled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), default="RUB", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)  # PENDING, SUCCEEDED, FAILED, CANCELLED

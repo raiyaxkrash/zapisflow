@@ -168,6 +168,7 @@ async def test_production_lifespan_uses_real_registry_contract(monkeypatch):
     import app.web.app as web_module
 
     monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "payment_provider", "disabled")
     monkeypatch.setattr(settings, "app_mode", "webhook")
     monkeypatch.setattr(settings, "webhook_base_url", "https://example.test")
     monkeypatch.setattr(settings, "manager_bot_token", "123456789:TEST_MANAGER_TOKEN")

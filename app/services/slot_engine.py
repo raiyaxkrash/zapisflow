@@ -1,6 +1,6 @@
-"""Slot calculation engine for master schedule, active bookings, buffers and breaks.
+"""Slot calculation engine for master and staff schedule, active bookings, buffers and breaks.
 
-Strictly isolated per master_id.
+Strictly isolated per master_id and staff_id.
 """
 
 from datetime import date as dt_date, datetime, timedelta
@@ -13,18 +13,32 @@ from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.repositories.service_repository import ServiceRepository
+from app.repositories.staff_repository import StaffRepository
 from app.services.exceptions import ServiceNotFoundError
 
 
 class SlotEngine:
-    """Core engine responsible for dynamic slot generation and collision detection strictly within master_id."""
+    """Core engine responsible for dynamic slot generation and collision detection strictly within master_id and staff_id."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.schedule_repo = ScheduleRepository(session)
         self.appointment_repo = AppointmentRepository(session)
         self.service_repo = ServiceRepository(session)
+        self.staff_repo = StaffRepository(session)
         self.master_settings_repo = MasterSettingsRepository(session)
+
+    async def _resolve_staff_id(self, service_id: int, master_id: int, staff_id: Optional[int] = None) -> Optional[int]:
+        """Determine target staff_id for service or fall back to default specialist."""
+        if staff_id is not None:
+            return staff_id
+        # Check staff members assigned to this service
+        assigned_staff = await self.staff_repo.list_staff_for_service(service_id, master_id)
+        if assigned_staff:
+            return assigned_staff[0].id
+        # Fall back to primary staff of master
+        primary = await self.staff_repo.get_primary_or_default(master_id)
+        return primary.id if primary else None
 
     async def get_available_slots(
         self,
@@ -32,16 +46,21 @@ class SlotEngine:
         target_date: dt_date,
         master_id: int,
         *,
+        staff_id: Optional[int] = None,
         duration_min: Optional[int] = None,
         buffer_min: Optional[int] = None,
         exclude_appointment_id: Optional[int] = None,
         allow_inactive: bool = False,
     ) -> List[datetime]:
-        """Calculate and return all valid slot start datetimes for a given service and date within master_id."""
+        """Calculate and return all valid slot start datetimes for a given service, staff and date within master_id."""
         # 1. Fetch and validate service strictly for this master
         service = await self.service_repo.get_by_id(service_id, master_id=master_id)
         if not service or (not allow_inactive and (not service.is_active or service.is_archived)):
             raise ServiceNotFoundError(f"Service id {service_id} not found or inactive for master {master_id}")
+
+        resolved_staff_id = await self._resolve_staff_id(service_id, master_id, staff_id)
+        if not resolved_staff_id:
+            return []
 
         # 2. Timezone configuration from master_settings
         tz_str = await self.master_settings_repo.get_value(master_id, "timezone", settings.timezone)
@@ -73,14 +92,14 @@ class SlotEngine:
 
         min_candidate_time = now_local + timedelta(hours=min_advance_hours) if target_date == today_local else None
 
-        # 4. Determine working hours and breaks for the target date for this master
-        work_hours = await self._get_working_window_and_breaks(master_id, target_date, tz)
+        # 4. Determine working hours and breaks considering project-wide and staff-specific overrides
+        work_hours = await self._get_working_window_and_breaks(master_id, target_date, tz, staff_id=resolved_staff_id)
         if not work_hours:
-            return []  # Day off or closed
+            return []  # Day off, closed project-wide or personal staff day off
 
         work_start_dt, work_end_dt, breaks = work_hours
 
-        # 5. Collect all busy intervals for the day strictly for this master
+        # 5. Collect all busy intervals for this staff member and project-wide blocks
         busy_intervals = await self._collect_busy_intervals(
             master_id=master_id,
             target_date=target_date,
@@ -88,6 +107,7 @@ class SlotEngine:
             day_end=work_end_dt,
             breaks=breaks,
             tz=tz,
+            staff_id=resolved_staff_id,
             exclude_appointment_id=exclude_appointment_id,
         )
 
@@ -131,12 +151,13 @@ class SlotEngine:
         slot_start: datetime,
         master_id: int,
         *,
+        staff_id: Optional[int] = None,
         duration_min: Optional[int] = None,
         buffer_min: Optional[int] = None,
         exclude_appointment_id: Optional[int] = None,
         allow_inactive: bool = False,
     ) -> bool:
-        """Check if a single specific datetime slot is still free for this master."""
+        """Check if a single specific datetime slot is still free for the target staff member."""
         if slot_start.tzinfo is None:
             return False
         tz_str = await self.master_settings_repo.get_value(master_id, "timezone", settings.timezone)
@@ -145,12 +166,12 @@ class SlotEngine:
             service_id,
             target_date,
             master_id=master_id,
+            staff_id=staff_id,
             duration_min=duration_min,
             buffer_min=buffer_min,
             exclude_appointment_id=exclude_appointment_id,
             allow_inactive=allow_inactive,
         )
-        # Compare timestamps ignoring microsecond differences
         slot_ts = int(slot_start.timestamp())
         return any(int(s.timestamp()) == slot_ts for s in available)
 
@@ -159,22 +180,40 @@ class SlotEngine:
         service_id: int,
         start_date: dt_date,
         master_id: int,
-        days_count: int = 14,
+        *,
+        staff_id: Optional[int] = None,
+        days_count: Optional[int] = None,
     ) -> List[dt_date]:
-        """Scan a date range and return only dates with at least one free slot for this master."""
+        """Scan a date range and return only dates with at least one free slot for this staff member."""
+        horizon_val = await self.master_settings_repo.get_value(
+            master_id, "booking_horizon_days", 30
+        )
+        max_horizon = max(1, int(horizon_val))
+        if days_count is None:
+            scan_days = max_horizon
+        else:
+            scan_days = min(days_count, max_horizon)
+
         available_dates: List[dt_date] = []
-        for offset in range(days_count):
+        for offset in range(scan_days):
             curr_date = start_date + timedelta(days=offset)
-            slots = await self.get_available_slots(service_id, curr_date, master_id=master_id)
+            slots = await self.get_available_slots(
+                service_id, curr_date, master_id=master_id, staff_id=staff_id
+            )
             if slots:
                 available_dates.append(curr_date)
         return available_dates
 
     async def _get_working_window_and_breaks(
-        self, master_id: int, target_date: dt_date, tz: pytz.BaseTzInfo
+        self, master_id: int, target_date: dt_date, tz: pytz.BaseTzInfo, staff_id: Optional[int] = None
     ) -> Optional[Tuple[datetime, datetime, List[Tuple[datetime, datetime]]]]:
-        """Resolve working window and breaks considering date exceptions and weekly templates for this master."""
-        exception = await self.schedule_repo.get_exception_for_date(target_date, master_id=master_id)
+        """
+        Resolve working window and breaks.
+        Prioritizes project-wide closures, then personal staff overrides, then staff template.
+        """
+        exception = await self.schedule_repo.get_exception_for_date(
+            target_date, master_id=master_id, staff_id=staff_id
+        )
         if exception:
             if exception.is_day_off or not exception.work_start or not exception.work_end:
                 return None
@@ -183,14 +222,15 @@ class SlotEngine:
             raw_breaks = [(b.break_start, b.break_end) for b in exception.breaks]
         else:
             weekday = target_date.weekday()
-            template = await self.schedule_repo.get_template_for_weekday(weekday, master_id=master_id)
+            template = await self.schedule_repo.get_template_for_weekday(
+                weekday, master_id=master_id, staff_id=staff_id
+            )
             if not template or template.is_day_off:
                 return None
             work_start = template.work_start
             work_end = template.work_end
             raw_breaks = [(b.break_start, b.break_end) for b in template.breaks]
 
-        # Convert TIME to localized datetime
         work_start_dt = tz.localize(datetime.combine(target_date, work_start))
         work_end_dt = tz.localize(datetime.combine(target_date, work_end))
 
@@ -210,26 +250,29 @@ class SlotEngine:
         day_end: datetime,
         breaks: List[Tuple[datetime, datetime]],
         tz: pytz.BaseTzInfo,
+        staff_id: Optional[int] = None,
         exclude_appointment_id: Optional[int] = None,
     ) -> List[Tuple[datetime, datetime]]:
-        """Gather all blocked intervals strictly for this master_id."""
+        """Gather all blocked intervals strictly for this master_id and specific staff_id."""
         busy: List[Tuple[datetime, datetime]] = list(breaks)
 
-        # 1. Active appointments for this master
+        # 1. Active appointments strictly for this staff member
         appointments = await self.appointment_repo.get_active_for_range(
             master_id=master_id,
             start_datetime=day_start,
             end_datetime=day_end,
+            staff_id=staff_id,
             exclude_id=exclude_appointment_id,
         )
         for app in appointments:
             busy.append((app.start_time, app.end_time_with_buffer))
 
-        # 2. Blocked intervals for this master
+        # 2. Blocked intervals (both project-wide and staff-specific)
         blocked = await self.schedule_repo.get_blocked_intervals(
             master_id=master_id,
             start_datetime=day_start,
             end_datetime=day_end,
+            staff_id=staff_id,
         )
         for blk in blocked:
             busy.append((blk.start_time, blk.end_time))

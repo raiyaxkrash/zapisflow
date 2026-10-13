@@ -6,6 +6,7 @@ import hashlib
 import logging
 from typing import Any, Awaitable, Callable, Dict
 from aiogram import BaseMiddleware
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import TelegramObject, Update
 from sqlalchemy import text
 
@@ -48,7 +49,21 @@ class DbSessionMiddleware(BaseMiddleware):
                     if await session.get(ProcessedWebhookUpdate, (scope, update_id)):
                         return None
 
-                result = await handler(event, data)
+                try:
+                    result = await handler(event, data)
+                except TelegramBadRequest as exc:
+                    message = str(exc).lower()
+                    benign_response = (
+                        "message is not modified" in message
+                        or "query is too old" in message
+                        or "query id is invalid" in message
+                    )
+                    if not benign_response:
+                        raise
+                    # Telegram can reject an old callback acknowledgement after
+                    # business work succeeded. It must not roll back that work.
+                    logger.debug("Ignoring stale or unchanged Telegram response for update scope=%s id=%s", scope, update_id)
+                    result = None
                 if scope is not None and update_id is not None:
                     session.add(ProcessedWebhookUpdate(scope=scope, update_id=update_id))
                 await session.commit()

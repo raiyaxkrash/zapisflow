@@ -40,13 +40,21 @@ from app.database.models.master import (
 )
 from app.database.models.audit import AuditLog
 from app.database.models.processed_update import ProcessedWebhookUpdate
+from app.database.models.miniapp import MiniAppSession, MiniAppOperation
 from app.database.models.telegram_outbox import TelegramOutbox, TelegramOutboxStatus
+from app.database.models.checkout_session import CheckoutSession
 from app.database.models.subscription import (
     EffectiveSubscriptionStatus,
     SubscriptionPlan,
     SubscriptionPeriod,
     SubscriptionPayment,
     PromoCode,
+)
+from app.database.models.review import Review
+from app.database.models.staff import StaffMember, StaffService
+from app.database.models.managed_bot_request import (
+    ManagedBotCreationRequest,
+    ManagedBotRequestStatus,
 )
 
 __all__ = [
@@ -81,6 +89,7 @@ __all__ = [
     "AuditLog",
     "TelegramOutbox",
     "TelegramOutboxStatus",
+    "CheckoutSession",
     "Master",
     "MasterStatus",
     "SubscriptionStatus",
@@ -95,4 +104,9 @@ __all__ = [
     "SubscriptionPeriod",
     "SubscriptionPayment",
     "PromoCode",
+    "Review",
+    "StaffMember",
+    "StaffService",
+    "ManagedBotCreationRequest",
+    "ManagedBotRequestStatus",
 ]

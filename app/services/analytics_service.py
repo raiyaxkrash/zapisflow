@@ -34,10 +34,13 @@ class AnalyticsService:
         master_id: int,
         start_dt: Optional[datetime] = None,
         end_dt: Optional[datetime] = None,
+        staff_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Calculate aggregated metrics for a specific datetime range strictly for master_id."""
         # 1. Base appointment query strictly scoped to master_id
         conditions = [Appointment.master_id == master_id]
+        if staff_id is not None:
+            conditions.append(Appointment.staff_id == staff_id)
         if start_dt:
             conditions.append(Appointment.start_time >= start_dt)
         if end_dt:
@@ -121,6 +124,8 @@ class AnalyticsService:
                 Payment.confirmed_at.is_not(None),
             )
         )
+        if staff_id is not None:
+            dep_query = dep_query.where(Appointment.staff_id == staff_id)
         if start_dt:
             dep_query = dep_query.where(Appointment.start_time >= start_dt)
         if end_dt:

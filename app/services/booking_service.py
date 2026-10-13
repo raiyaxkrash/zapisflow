@@ -19,11 +19,14 @@ from app.repositories.master_settings_repository import MasterSettingsRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.service_repository import ServiceRepository
+from app.repositories.staff_repository import StaffRepository
 from app.repositories.user_repository import UserRepository
 from app.services.exceptions import (
     BookingNotFoundError,
     InvalidBookingStatusError,
+    PaymentRequisitesMissingError,
     ServiceNotFoundError,
+    StaffServiceUnavailableError,
     SlotAlreadyBookedError,
     SubscriptionExpiredError,
     UserNotFoundError,
@@ -44,6 +47,7 @@ class BookingService:
         self.session = session
         self.appointment_repo = AppointmentRepository(session)
         self.service_repo = ServiceRepository(session)
+        self.staff_repo = StaffRepository(session)
         self.payment_repo = PaymentRepository(session)
         self.user_repo = UserRepository(session)
         self.master_settings_repo = MasterSettingsRepository(session)
@@ -72,8 +76,10 @@ class BookingService:
         cancel_policy_agreed: bool = True,
         is_manual: bool = False,
         admin_notes: Optional[str] = None,
-    ) -> Tuple[Appointment, Payment]:
-        """Atomically reserve a slot, create immutable snapshot and pending deposit payment for a master."""
+        staff_id: Optional[int] = None,
+        reserve_only: bool = False,
+    ) -> Tuple[Appointment, Optional[Payment]]:
+        """Create a booking and, only for a positive deposit, its pending payment."""
         # Serialize booking creation with suspend/renewal/expiration updates.
         # A previously read ACTIVE state must not outlive an admin suspension.
         if isinstance(self.session, AsyncSession):
@@ -99,23 +105,46 @@ class BookingService:
         if not service or not service.is_active or service.is_archived:
             raise ServiceNotFoundError(f"Service ID {service_id} not available for master {master_id}")
 
+        # 2.1 Validate or resolve staff member
+        if staff_id is None:
+            staff = await self.staff_repo.get_primary_or_default(master_id)
+            if not staff:
+                raise ValueError("В проекте нет доступных специалистов для записи")
+            staff_id = staff.id
+        else:
+            staff = await self.staff_repo.get_by_id(staff_id, master_id=master_id)
+            if not staff or not staff.is_active:
+                raise StaffServiceUnavailableError(
+                    "Выбранный специалист недоступен. Начните запись заново."
+                )
+            # An empty active mapping preserves the product's existing fallback:
+            # an unconfigured specialist can perform all active project services.
+            # Once any mappings are active, enforce the configured allow-list.
+            staff_services = await self.staff_repo.list_services_for_staff(staff_id, master_id=master_id)
+            if staff_services and service_id not in staff_services:
+                raise StaffServiceUnavailableError(
+                    "Выбранный специалист больше не оказывает эту услугу. "
+                    "Начните запись заново."
+                )
+
         # 3. Calculate time intervals using service parameters
         duration = timedelta(minutes=service.duration_min)
         buffer = timedelta(minutes=service.buffer_min)
         end_time = start_time + duration
         end_time_with_buffer = end_time + buffer
 
-        # Validate slot availability against master's schedule and existing active bookings
+        # Validate slot availability against staff schedule and existing active bookings
         if start_time.tzinfo is None or not await SlotEngine(self.session).is_slot_available(
-            service_id, start_time, master_id=master_id
+            service_id, start_time, master_id=master_id, staff_id=staff.id
         ):
             raise SlotAlreadyBookedError("Выбранное время больше недоступно. Пожалуйста, выберите другой слот.")
 
-        # Check for existing active overlaps before insert within master_id
+        # Check for existing active overlaps before insert within master_id and specific staff
         overlaps = await self.appointment_repo.get_active_overlapping(
             master_id=master_id,
             start_time=start_time,
             end_time_with_buffer=end_time_with_buffer,
+            staff_id=staff.id,
         )
         if overlaps:
             raise SlotAlreadyBookedError("Выбранное время уже занято или удерживается другим клиентом.")
@@ -128,6 +157,24 @@ class BookingService:
         else:
             deposit_amount = service.deposit_value.quantize(Decimal("1.00"))
 
+        # Do not create a client hold/payment with sample, shared, or incomplete
+        # payment details. Admin-created appointments do not collect a deposit.
+        if deposit_amount > 0 and not is_manual:
+            master_settings = await self.master_settings_repo.get_by_master_id(master_id)
+            has_requisites = bool(
+                master_settings
+                and master_settings.bank_name
+                and master_settings.bank_name.strip()
+                and master_settings.bank_card_number
+                and master_settings.bank_card_number.strip()
+                and master_settings.bank_recipient_name
+                and master_settings.bank_recipient_name.strip()
+            )
+            if not has_requisites:
+                raise PaymentRequisitesMissingError(
+                    "Предоплата временно недоступна: мастер ещё не настроил реквизиты."
+                )
+
         # 6. Determine hold deadline from master's settings
         hold_minutes = int(
             await self.master_settings_repo.get_value(
@@ -138,7 +185,12 @@ class BookingService:
         hold_until = now_utc + timedelta(minutes=hold_minutes)
 
         # Initial status
-        initial_status = AppointmentStatus.CONFIRMED if is_manual else AppointmentStatus.WAITING_PAYMENT
+        no_deposit_required = deposit_amount <= 0
+        initial_status = (
+            AppointmentStatus.CONFIRMED
+            if is_manual or (no_deposit_required and not reserve_only)
+            else AppointmentStatus.WAITING_PAYMENT
+        )
 
         # Trial/paid_until can elapse while slot queries run. Administrative
         # status changes remain serialized by the Master row lock above.
@@ -148,13 +200,14 @@ class BookingService:
         # 7. Create appointment with immutable snapshot
         appointment = Appointment(
             master_id=master_id,
+            staff_id=staff.id,
             user_id=user_id,
             service_id=service_id,
             status=initial_status,
             start_time=start_time,
             end_time=end_time,
             end_time_with_buffer=end_time_with_buffer,
-            hold_until=None if is_manual else hold_until,
+            hold_until=None if is_manual or (no_deposit_required and not reserve_only) else hold_until,
             cancel_policy_agreed=cancel_policy_agreed,
             snapshot_service_title=service.title,
             snapshot_service_price=service.price,
@@ -176,6 +229,10 @@ class BookingService:
                 "Выбранный интервал только что был забронирован другим клиентом. Пожалуйста, выберите другое время."
             ) from exc
 
+        if no_deposit_required and not is_manual:
+            await self.session.refresh(appointment)
+            return appointment, None
+
         # 8. Create associated deposit payment strictly under master_id
         payment = await self.payment_repo.create_payment(
             master_id=master_id,
@@ -186,6 +243,32 @@ class BookingService:
         await self.session.flush()
         await self.session.refresh(appointment)
         return appointment, payment
+
+    async def confirm_reserved_booking(self, master_id: int, appointment_id: int, user_id: int) -> Appointment:
+        """Finalize a Mini App zero-deposit hold; paid holds use existing proof flow.
+
+        Caller owns the transaction. Re-check entitlement and lease; retries are no-op.
+        """
+        await self.session.scalar(select(Master).where(Master.id == master_id).with_for_update())
+        if not await self.access_policy.can_create_hold(master_id):
+            raise SubscriptionExpiredError(NEUTRAL_CLIENT_EXPIRED_MESSAGE)
+        appointment = await self.appointment_repo.get_by_id_with_relations(appointment_id, master_id, for_update=True)
+        if appointment is None or appointment.user_id != user_id:
+            raise BookingNotFoundError("Запись не найдена")
+        if appointment.status == AppointmentStatus.CONFIRMED:
+            return appointment
+        if appointment.status != AppointmentStatus.WAITING_PAYMENT:
+            raise InvalidBookingStatusError("Запись больше не ожидает подтверждения")
+        if appointment.hold_until is None or appointment.hold_until <= datetime.now(pytz.UTC):
+            raise InvalidBookingStatusError("Время резервирования истекло")
+        if not appointment.cancel_policy_agreed:
+            raise InvalidBookingStatusError("Подтвердите условия отмены")
+        if appointment.snapshot_deposit_amount <= 0:
+            # The only additional transition: a real zero-deposit temporary hold.
+            appointment.status = AppointmentStatus.CONFIRMED
+            appointment.hold_until = None
+            await self.session.flush()
+        return appointment
 
     async def cancel_booking_by_client(
         self,
@@ -249,6 +332,7 @@ class BookingService:
         appointment_id: int,
         new_start_time: datetime,
         admin_id: int,
+        new_staff_id: Optional[int] = None,
     ) -> Appointment:
         """Reschedule an appointment to a new date/time by master, strictly within master_id."""
         appointment = await self.appointment_repo.get_by_id_with_relations(
@@ -268,6 +352,13 @@ class BookingService:
         if appointment_start_utc <= datetime.now(pytz.UTC):
             raise InvalidBookingStatusError("Нельзя перенести запись, время которой уже наступило")
 
+        target_staff_id = appointment.staff_id
+        if new_staff_id is not None:
+            staff = await self.staff_repo.get_by_id(new_staff_id, master_id=master_id)
+            if not staff or not staff.is_active:
+                raise ValueError("Специалист не найден или недоступен")
+            target_staff_id = new_staff_id
+
         duration = timedelta(minutes=appointment.snapshot_service_duration_min)
         buffer = timedelta(minutes=appointment.snapshot_buffer_duration_min)
         new_end_time = new_start_time + duration
@@ -277,6 +368,7 @@ class BookingService:
             appointment.service_id,
             new_start_time,
             master_id=master_id,
+            staff_id=target_staff_id,
             duration_min=appointment.snapshot_service_duration_min,
             buffer_min=appointment.snapshot_buffer_duration_min,
             exclude_appointment_id=appointment.id,
@@ -287,6 +379,8 @@ class BookingService:
         appointment.start_time = new_start_time
         appointment.end_time = new_end_time
         appointment.end_time_with_buffer = new_end_time_with_buffer
+        if new_staff_id is not None:
+            appointment.staff_id = new_staff_id
 
         # Recalculate and reset pending/stale notifications for the new appointment time
         await NotificationRepository(self.session).handle_appointment_rescheduled(

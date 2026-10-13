@@ -47,6 +47,9 @@ async def create_dispatcher() -> Dispatcher:
         )
         logger.info(f"Connected to Redis at {settings.redis_host}:{settings.redis_port} for FSM storage")
     except Exception as e:
+        if settings.is_production and settings.app_mode.lower() == "webhook":
+            logger.error("Redis FSM initialization failed in production webhook mode")
+            raise RuntimeError("Redis FSM storage is required in production webhook mode") from e
         logger.warning(f"Could not connect to Redis ({e}), falling back to in-memory FSM storage")
         storage = MemoryStorage()
 

@@ -14,9 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.handlers.client.booking import cb_agree_policy
 from app.bot.middlewares.db_session import DbSessionMiddleware
-from app.database.models.appointment import Appointment
+from app.database.models.appointment import Appointment, AppointmentStatus
 from app.database.models.master import BotInstance, BotInstanceStatus, Master, MasterSettings, MasterStatus, SubscriptionStatus
 from app.database.models.payment import Payment
+from app.database.models.processed_update import ProcessedWebhookUpdate
 from app.database.models.service import DepositType, Service
 from app.database.models.subscription import SubscriptionPayment, SubscriptionPeriod, SubscriptionPlan
 from app.database.models.telegram_outbox import TelegramOutbox
@@ -43,7 +44,20 @@ def _middleware_with_savepoints(pg_session: AsyncSession, monkeypatch) -> DbSess
 
 @requires_postgres
 @pytest.mark.asyncio
-async def test_booking_callback_crash_and_replay_creates_one_appointment(pg_session: AsyncSession, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "deposit_value,expected_payment_count,expected_status",
+    [
+        (Decimal("100.00"), 1, AppointmentStatus.WAITING_PAYMENT),
+        (Decimal("0.00"), 0, AppointmentStatus.CONFIRMED),
+    ],
+)
+async def test_booking_callback_crash_and_replay_creates_one_appointment(
+    pg_session: AsyncSession,
+    monkeypatch,
+    deposit_value: Decimal,
+    expected_payment_count: int,
+    expected_status: AppointmentStatus,
+) -> None:
     """A callback's booking, outbox row and completed marker share one commit."""
     suffix = uuid4().int % 1_000_000_000
     owner = User(telegram_id=7_000_000_000 + suffix, first_name="Owner")
@@ -59,14 +73,20 @@ async def test_booking_callback_crash_and_replay_creates_one_appointment(pg_sess
     )
     pg_session.add(master)
     await pg_session.flush()
-    pg_session.add(MasterSettings(master_id=master.id))
+    if deposit_value > 0:
+        pg_session.add(MasterSettings(
+            master_id=master.id,
+            bank_name="Test Bank",
+            bank_card_number="4111111111111111",
+            bank_recipient_name="Test Owner",
+        ))
     service = Service(
         master_id=master.id,
         title="Replay service",
         duration_min=60,
         price=Decimal("1000.00"),
         deposit_type=DepositType.FIXED,
-        deposit_value=Decimal("100.00"),
+        deposit_value=deposit_value,
         is_active=True,
     )
     pg_session.add(service)
@@ -87,6 +107,7 @@ async def test_booking_callback_crash_and_replay_creates_one_appointment(pg_sess
     callback.answer = AsyncMock()
     slot = datetime.now(timezone.utc) + timedelta(days=2)
     state = MagicMock()
+    state.get_state = AsyncMock(return_value="confirming_policy")
     state.get_data = AsyncMock(return_value={"service_id": service.id, "slot_timestamp": int(slot.timestamp())})
     state.clear = AsyncMock()
     update = Update(update_id=1_000_000_000 + suffix)
@@ -115,8 +136,71 @@ async def test_booking_callback_crash_and_replay_creates_one_appointment(pg_sess
 
     assert calls == 2  # Failed first delivery and one successful delivery; replay skipped.
     assert await pg_session.scalar(select(func.count(Appointment.id)).where(Appointment.master_id == master.id)) == 1
-    assert await pg_session.scalar(select(func.count(Payment.id)).where(Payment.master_id == master.id)) == 1
+    assert await pg_session.scalar(select(func.count(Payment.id)).where(Payment.master_id == master.id)) == expected_payment_count
     assert await pg_session.scalar(select(func.count(TelegramOutbox.id)).where(TelegramOutbox.master_id == master.id)) == 1
+    appointment = await pg_session.scalar(select(Appointment).where(Appointment.master_id == master.id))
+    assert appointment is not None and appointment.status == expected_status
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_expired_booking_callback_is_acknowledged_and_deduplicated(
+    pg_session: AsyncSession, monkeypatch
+) -> None:
+    """An expired subscription is a completed rejection, not a hanging webhook."""
+    suffix = uuid4().int % 1_000_000_000
+    owner = User(telegram_id=5_000_000_000 + suffix, first_name="Owner")
+    client = User(telegram_id=6_000_000_000 + suffix, first_name="Client")
+    pg_session.add_all([owner, client])
+    await pg_session.flush()
+    master = Master(
+        owner_user_id=owner.id,
+        display_name=f"Expired booking {suffix}",
+        status=MasterStatus.ACTIVE,
+        subscription_status=SubscriptionStatus.EXPIRED,
+    )
+    pg_session.add(master)
+    await pg_session.flush()
+
+    middleware = _middleware_with_savepoints(pg_session, monkeypatch)
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    state = MagicMock()
+    state.get_state = AsyncMock(return_value="confirming_policy")
+    state.get_data = AsyncMock(
+        return_value={"service_id": 123, "slot_timestamp": int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp())}
+    )
+    state.clear = AsyncMock()
+    update_id = 3_000_000_000 + suffix
+    update = Update(update_id=update_id)
+    scope = f"tenant:expired-{suffix}"
+    calls = 0
+
+    async def handler(_event, data):
+        nonlocal calls
+        calls += 1
+        await cb_agree_policy(callback, state, client, data["session"], master.id)
+
+    await middleware(handler, update, {"webhook_update_scope": scope})
+    await middleware(handler, update, {"webhook_update_scope": scope})
+
+    assert calls == 1
+    callback.answer.assert_awaited_once()
+    assert "временно недоступна" in callback.answer.await_args.args[0]
+    assert callback.answer.await_args.kwargs["show_alert"] is True
+    state.clear.assert_awaited_once()
+    assert await pg_session.scalar(
+        select(func.count(ProcessedWebhookUpdate.update_id)).where(
+            ProcessedWebhookUpdate.scope == scope,
+            ProcessedWebhookUpdate.update_id == update_id,
+        )
+    ) == 1
+    assert await pg_session.scalar(
+        select(func.count(Appointment.id)).where(Appointment.master_id == master.id)
+    ) == 0
+    assert await pg_session.scalar(
+        select(func.count(Payment.id)).where(Payment.master_id == master.id)
+    ) == 0
 
 
 @requires_postgres

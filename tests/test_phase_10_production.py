@@ -48,6 +48,7 @@ def test_production_config_validation_passes_valid() -> None:
     prod_settings = Settings(
         _env_file=None,
         APP_ENV="production",
+        PAYMENT_PROVIDER="disabled",
         APP_MODE="webhook",
         WEBHOOK_BASE_URL="https://api.example.com",
         MANAGER_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ",
@@ -96,7 +97,7 @@ def test_production_config_validation_fails_on_insecure_url_and_secret() -> None
     with pytest.raises(ValueError) as exc:
         insecure_settings.validate_production_configuration()
     err_msg = str(exc.value)
-    assert "WEBHOOK_BASE_URL must be configured with https://" in err_msg
+    assert "WEBHOOK_BASE_URL must be an HTTPS hostname origin" in err_msg
     assert "MANAGER_WEBHOOK_SECRET must be at least 32 characters" in err_msg
 
 
@@ -218,7 +219,10 @@ async def test_production_payment_screen_creates_no_fake_checkout() -> None:
     session.commit.assert_not_awaited()
     callback.message.edit_text.assert_awaited_once()
     text = callback.message.edit_text.call_args.args[0]
-    assert "Автоматическая оплата временно недоступна" in text
+    assert (
+        "Автоматическая оплата временно недоступна" in text
+        or "Оплата онлайн временно недоступна" in text
+    )
     assert settings.support_tag in text
     keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
     assert not any(

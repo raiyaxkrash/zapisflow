@@ -33,6 +33,7 @@ def _service_command(service: str) -> str:
 
 @pytest.mark.asyncio
 async def test_main_fails_if_database_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(application.settings, "app_mode", "polling")
     monkeypatch.setattr(application.settings, "bot_token", VALID_BOT_TOKEN)
 
     async def unavailable_database() -> None:
@@ -52,6 +53,7 @@ async def test_main_fails_if_database_is_unavailable(monkeypatch: pytest.MonkeyP
 async def test_main_rejects_placeholder_token_before_database_use(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(application.settings, "app_mode", "polling")
     monkeypatch.setattr(application.settings, "bot_token", "dummy_token_for_init")
 
     async def must_not_open_database() -> None:

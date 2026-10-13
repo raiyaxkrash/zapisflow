@@ -35,8 +35,8 @@ class TelegramOutbox(Base):
     master_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("masters.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    bot_instance_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("bot_instances.id", ondelete="RESTRICT"), nullable=False, index=True
+    bot_instance_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("bot_instances.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     operation_type: Mapped[str] = mapped_column(String(32), nullable=False)
     target_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

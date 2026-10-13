@@ -68,7 +68,9 @@ async def test_reopening_main_menu_ignores_unchanged_message_and_escapes_name() 
         "app.manager_bot.handlers._get_or_create_user",
         new=AsyncMock(return_value=SimpleNamespace(id=5, first_name="<test>")),
     ):
-        await cb_main_menu(callback, state, AsyncMock())
+        with patch("app.manager_bot.handlers.PlatformAdminService") as admin_svc_cls:
+            admin_svc_cls.return_value.is_platform_admin = AsyncMock(return_value=False)
+            await cb_main_menu(callback, state, AsyncMock())
     callback.answer.assert_awaited_once()
     assert "&lt;test&gt;" in callback.message.edit_text.await_args.args[0]
 

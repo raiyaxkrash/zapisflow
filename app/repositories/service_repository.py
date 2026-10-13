@@ -49,6 +49,8 @@ class ServiceRepository(BaseRepository[Service]):
 
     async def create_service(self, master_id: int, **kwargs: Any) -> Service:
         """Create a service strictly assigned to the given master."""
+        if "deposit_value" not in kwargs or kwargs["deposit_value"] is None:
+            kwargs["deposit_value"] = 0
         service = Service(master_id=master_id, **kwargs)
         self.session.add(service)
         await self.session.flush()

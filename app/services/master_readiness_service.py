@@ -71,8 +71,16 @@ class MasterReadinessService:
         )
         deposit_services_count = (await self.session.execute(stmt_deposit_services)).scalar() or 0
         if deposit_services_count > 0:
-            if not settings or not (settings.bank_card_number and settings.bank_card_number.strip()):
-                missing_items.append("Укажите номер карты/счета для приёма предоплаты")
+            missing_requisites = not settings or any(
+                not value or not value.strip()
+                for value in (
+                    settings.bank_name if settings else None,
+                    settings.bank_card_number if settings else None,
+                    settings.bank_recipient_name if settings else None,
+                )
+            )
+            if missing_requisites:
+                missing_items.append("Заполните банк, номер карты и имя получателя для предоплаты")
 
         is_ready = len(missing_items) == 0
         return is_ready, missing_items

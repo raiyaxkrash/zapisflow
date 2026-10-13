@@ -94,6 +94,24 @@ async def test_webhook_tenant_context_requires_bot_instance_and_ignores_legacy_d
 
 
 @pytest.mark.asyncio
+async def test_suspended_project_cannot_receive_customer_bot_update(pg_session: AsyncSession) -> None:
+    master_a, _, _, _ = await _tenant_pair(pg_session)
+    bot = BotInstance(master_id=master_a.id, telegram_bot_id=995103,
+                      status=BotInstanceStatus.ACTIVE)
+    pg_session.add(bot)
+    master_a.status = MasterStatus.SUSPENDED
+    await pg_session.flush()
+    handler = AsyncMock(return_value="handled")
+
+    with patch.object(settings, "app_mode", "webhook"):
+        result = await TenantContextMiddleware()(
+            handler, MagicMock(), {"session": pg_session, "bot_instance": bot}
+        )
+    assert result is None
+    handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_customer_service_callback_cannot_read_other_tenant(
     pg_session: AsyncSession,
 ) -> None:

@@ -29,6 +29,11 @@ async def refresh_subscriptions(
                 batch_size=batch_size,
                 now_utc=now_utc,
             )
+            # Send lifecycle reminders (3d, 1d, today, expired yesterday)
+            from app.services.subscription_notification_service import SubscriptionNotificationService
+            notif_svc = SubscriptionNotificationService(session)
+            await notif_svc.check_and_send_expiring_reminders(now_utc=now_utc)
+
             await session.commit()
             if count > 0:
                 logger.info("Successfully refreshed %d expired subscriptions to EXPIRED", count)

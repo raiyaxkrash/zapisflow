@@ -122,6 +122,10 @@ class MockGateway(TelegramProvisioningGateway):
     async def validate_token(self, token: str) -> BotIdentity:
         return await self.validate_token_mock(token)
 
+    async def set_chat_menu_button(self, token, menu_button):
+        self.menu_button = menu_button
+        return True
+
     async def set_webhook(self, token: str, url: str, secret_token=None, **kwargs) -> bool:
         self.last_webhook_url = url
         return await self.set_webhook_mock(token=token, url=url, secret_token=secret_token, **kwargs)

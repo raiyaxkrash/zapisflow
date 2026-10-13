@@ -13,13 +13,16 @@ import logging
 from typing import Awaitable, Callable
 import uuid
 
+from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config.settings import settings
-from app.database.models.master import BotInstance, BotInstanceStatus
+from app.database.models.master import BotInstance, BotInstanceStatus, Master
+from app.database.models.user import User
 from app.database.models.telegram_outbox import TelegramOutbox, TelegramOutboxStatus
 from app.database.session import async_session_maker
 from app.services.bot_registry import BotRegistry
@@ -36,7 +39,7 @@ def _retry_delay(attempts: int, retry_after: int | None = None) -> int:
 class _Delivery:
     id: int
     master_id: int
-    bot_instance_id: int
+    bot_instance_id: int | None
     operation_type: str
     target_chat_id: int
     payload: dict
@@ -186,19 +189,28 @@ async def _deliver_one(
                     payload=dict(row.payload),
                     attempts=row.attempts,
                 )
-                instance = await session.get(BotInstance, row.bot_instance_id)
-                if (
-                    instance is None
-                    or instance.master_id != row.master_id
-                    or not instance.is_current
-                    or instance.status not in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED)
-                ):
-                    raise RuntimeError("BotInstance unavailable or tenant binding changed")
-                bot = await registry.get_by_instance_id(
-                    row.bot_instance_id,
-                    session=session,
-                    expected_token_version=instance.token_version,
-                )
+                if row.bot_instance_id is None:
+                    master = await session.get(Master, row.master_id)
+                    target = await session.get(User, master.owner_user_id) if master else None
+                    if target is None or target.telegram_id != row.target_chat_id:
+                        raise ValueError("Manager notification tenant owner mismatch")
+                    if not settings.manager_bot_token:
+                        raise RuntimeError("Manager Bot unavailable")
+                    bot = Bot(settings.manager_bot_token, default=DefaultBotProperties(parse_mode="HTML"))
+                else:
+                    instance = await session.get(BotInstance, row.bot_instance_id)
+                    if (
+                        instance is None
+                        or instance.master_id != row.master_id
+                        or not instance.is_current
+                        or instance.status not in (BotInstanceStatus.ACTIVE, BotInstanceStatus.SETUP_REQUIRED)
+                    ):
+                        raise RuntimeError("BotInstance unavailable or tenant binding changed")
+                    bot = await registry.get_by_instance_id(
+                        row.bot_instance_id,
+                        session=session,
+                        expected_token_version=instance.token_version,
+                    )
         except Exception as exc:
             await _record_failure(session_maker, row_id, owner, attempt, max_attempts, exc)
             return False
@@ -220,6 +232,9 @@ async def _deliver_one(
         except Exception as exc:
             await _record_failure(session_maker, row_id, owner, attempt, max_attempts, exc)
             return False
+        finally:
+            if delivery.bot_instance_id is None:
+                await bot.session.close()
 
         return await _record_sent(session_maker, delivery, owner, attempt)
 

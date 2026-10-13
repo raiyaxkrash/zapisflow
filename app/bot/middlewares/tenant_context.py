@@ -12,7 +12,7 @@ from aiogram.types import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
-from app.database.models.master import BotInstance, BotInstanceStatus
+from app.database.models.master import BotInstance, BotInstanceStatus, MasterStatus
 from app.repositories.bot_instance_repository import BotInstanceRepository
 from app.repositories.master_repository import MasterRepository
 from app.services.tenant_context import LegacyTenantResolver
@@ -112,6 +112,9 @@ class TenantContextMiddleware(BaseMiddleware):
             master = await master_repo.get_by_id(master_id)
             if not master:
                 logger.error("Fail-closed: Master #%s not found in DB", master_id)
+                return None
+            if master.status in (MasterStatus.SUSPENDED, MasterStatus.ARCHIVED):
+                logger.warning("Rejecting update for unavailable Master #%s", master_id)
                 return None
             data["master"] = master
 

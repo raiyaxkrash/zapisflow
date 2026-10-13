@@ -76,6 +76,10 @@ class _Gateway:
         self.delete_calls = 0
         self.url = ""
 
+    async def set_chat_menu_button(self, token, menu_button):
+        self.menu_button = menu_button
+        return True
+
     async def set_webhook(self, token, url, secret_token, **kwargs):
         self.set_calls += 1
         self.url = url

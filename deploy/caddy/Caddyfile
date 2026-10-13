@@ -2,13 +2,31 @@
 # Handles automatic Let's Encrypt TLS certificates, security headers,
 # request size limits, and forwarding to FastAPI webhook backend.
 
+{
+    # Also redact request headers in reverse-proxy error logs.
+    log {
+        format filter {
+            request>headers>X-Telegram-Bot-Api-Secret-Token delete
+            wrap json
+        }
+    }
+}
+
 {$DOMAIN:api.yourdomain.com} {
     # Logging configuration
     log {
         output stdout
-        format json
+        format filter {
+            request>headers>X-Telegram-Bot-Api-Secret-Token delete
+            wrap json
+        }
         level INFO
     }
+    # Checkout URL path contains a bearer capability; never write it to access logs.
+    log_skip /billing/checkout/*
+    # Telegram secret headers must not appear in access logs.
+    @telegram_webhooks path /telegram/manager-webhook /telegram/webhook/*
+    log_skip @telegram_webhooks
 
     # Strict Request Body Limit (Telegram updates are typically < 64KB, max 2MB)
     request_body {
@@ -39,5 +57,33 @@
             write_timeout 30s
             keepalive_idle_conns 100
         }
+    }
+}
+
+# The billing subdomain is separate from the existing zapisflow.su website.
+{$BILLING_DOMAIN:pay.zapisflow.su} {
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+    log_skip /billing/checkout/*
+    request_body {
+        max_size 16KB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Cache-Control "no-store"
+        -Server
+    }
+    @billing path /billing/checkout/* /billing/success /billing/cancel
+    handle @billing {
+        reverse_proxy http://backend:8000
+    }
+    handle {
+        respond "Not found" 404
     }
 }

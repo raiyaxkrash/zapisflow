@@ -33,6 +33,12 @@ class ServiceNotFoundError(AppException):
     pass
 
 
+class StaffServiceUnavailableError(AppException):
+    """Raised when a selected staff member cannot perform a requested service."""
+
+    pass
+
+
 class UserNotFoundError(AppException):
     """
     Raised when a user profile is not found.
@@ -65,6 +71,12 @@ class PaymentNotFoundError(AppException):
     """
     Raised when a payment record is not found.
     """
+    pass
+
+
+class PaymentRequisitesMissingError(AppException):
+    """Raised when a deposit booking is requested without tenant payment details."""
+
     pass
 
 

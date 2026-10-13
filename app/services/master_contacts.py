@@ -21,6 +21,7 @@ CONTACT_FIELD_LABELS = {
     "working_hours_text": "🕒 Режим работы",
     "contacts_intro_text": "📝 Текст для клиентов",
     "telegram_username": "✈️ Telegram",
+    "vk_profile": "💙 ВКонтакте",
 }
 CONTACT_FIELD_LIMITS = {
     "studio_phone": 64,
@@ -29,6 +30,7 @@ CONTACT_FIELD_LIMITS = {
     "working_hours_text": 300,
     "contacts_intro_text": 1000,
     "telegram_username": 64,
+    "vk_profile": 128,
 }
 DEFAULT_INTRO = (
     "Если у вас есть вопросы по записи, индивидуальным дизайнам или вы хотите "
@@ -36,6 +38,7 @@ DEFAULT_INTRO = (
 )
 _PHONE_PATTERN = re.compile(r"^\+?[0-9 ()\-]+$")
 _USERNAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+_VK_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{2,64}$")
 
 
 def contact_phone_e164(value: str | None) -> str | None:
@@ -64,6 +67,16 @@ def _telegram_username(value: str | None) -> str | None:
     return username if _USERNAME_PATTERN.fullmatch(username) else None
 
 
+def _vk_profile(value: str | None) -> str | None:
+    if not value:
+        return None
+    val = value.strip().rstrip("/")
+    if "vk.com/" in val:
+        val = val.split("vk.com/")[-1].strip()
+    val = val.lstrip("@")
+    return val if _VK_PATTERN.fullmatch(val) else None
+
+
 def normalize_contact_value(field: str, raw: str | None) -> str | None:
     """Validate an individual field. Empty input intentionally clears it."""
     if field not in CONTACT_FIELD_LABELS:
@@ -83,6 +96,11 @@ def normalize_contact_value(field: str, raw: str | None) -> str | None:
         if not username or value not in (username, f"@{username}"):
             raise ValueError("Введите Telegram username, например @master_name")
         value = username
+    elif field == "vk_profile":
+        vk = _vk_profile(value)
+        if not vk:
+            raise ValueError("Введите корректный ник или ссылку ВКонтакте, например vk.com/master_lash")
+        value = vk
     elif field == "studio_address" and not _safe_address(value):
         raise ValueError("Введите адрес без переносов строк")
     return value
@@ -123,6 +141,7 @@ def render_contacts(settings: MasterSettings | None) -> tuple[str, InlineKeyboar
     address = get("studio_address")
     hours = get("working_hours_text")
     username = _telegram_username(get("telegram_username"))
+    vk = _vk_profile(get("vk_profile"))
     if phone:
         lines.append(f"📱 <b>Телефон:</b> {html.escape(phone)}")
     if whatsapp:
@@ -133,6 +152,8 @@ def render_contacts(settings: MasterSettings | None) -> tuple[str, InlineKeyboar
         lines.append(f"🕒 <b>Режим работы:</b> {html.escape(hours)}")
     if username:
         lines.append(f"✈️ <b>Telegram:</b> @{html.escape(username)}")
+    if vk:
+        lines.append(f"💙 <b>ВКонтакте:</b> vk.com/{html.escape(vk)}")
     buttons: list[list[InlineKeyboardButton]] = []
     if contact_phone_e164(phone):
         # Telegram inline URL buttons accept HTTP(S)/tg links, not tel: links.
@@ -149,6 +170,10 @@ def render_contacts(settings: MasterSettings | None) -> tuple[str, InlineKeyboar
     if username:
         buttons.append([
             InlineKeyboardButton(text="✈️ Написать в Telegram", url=f"https://t.me/{username}")
+        ])
+    if vk:
+        buttons.append([
+            InlineKeyboardButton(text="💙 Написать во ВКонтакте", url=f"https://vk.com/{vk}")
         ])
     safe_address = _safe_address(address)
     if safe_address:
