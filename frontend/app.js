@@ -48,6 +48,7 @@ document.addEventListener('click',event=>{const el=event.target.closest('[data-a
   if(el.matches('[data-date]')){state.chosenDay=el.dataset.date;const svc=state.services.find(x=>x.id===state.serviceId);if(svc&&isBusy(state.chosenDay,state.chosenTime,svc.minutes))state.chosenTime='';save();render();return;}
   if(el.matches('[data-time]')){state.chosenTime=el.dataset.time;save();render();return;}
   const action=el.dataset.action;
+  if(action)event.preventDefault();
   if(action==='mobile-menu'){go('/login');}
   if(action==='close-modal'){state.modal='';render();}
   if(action==='new-service'){state.modal='service:0';render();}
